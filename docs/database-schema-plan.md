@@ -119,11 +119,12 @@ since Prisma does not support native enums on SQLite.
 
 ## Scope
 
-In scope: events, library (tracks/formats/levels/tags/rooms/roles/custom fields), forms
-(builder + conditional logic + routing), submissions (abstracts→sessions), evaluation
-(plans/rounds/scorecards/reviews), agenda (drafts/placements/rules/conflict waivers),
-speaker portal (speakers, tasks, file requests, files), emails (templates, reminder rules,
-send log, ICS), embeds. Out of scope (per brief): CRM, CMS pages, payments, marketing,
+In scope: events, library (tracks/formats/levels/tags/rooms/roles/custom fields/schedule
+slots), forms (builder + conditional logic + routing), submissions (abstracts→sessions,
+transition audit log), evaluation (plans/rounds/reviewer pools/scorecards/reviews), agenda
+(drafts/placements/rules/schedule revisions), speaker portal (speakers, availability,
+tasks, file requests, files), emails (templates, reminder rules, outbox with dedupe, ICS),
+embeds. Out of scope (per brief): CRM, CMS pages, payments, marketing,
 transcriptions/recordings, sponsors/exhibitors.
 
 ## Key decisions
@@ -172,12 +173,16 @@ transcriptions/recordings, sponsors/exhibitors.
    round, with COI status) → `ReviewScore` per scorecard field. `RoundSession` tracks
    which submissions advance between rounds.
 
-6. **Agenda = live schedule on `Session` + draft workspaces.** `Session.roomId/startsAt/
-   endsAt` is the live schedule. `AgendaDraft` + `DraftPlacement` stage changes; commit
-   copies placements onto sessions (exactly the public API model). Conflicts
-   (speaker double-booked, room overlap, rule violations) are **computed, never stored** —
-   only `ConflictWaiver` rows persist deliberate acknowledgements. `SchedulingRule` is a
-   typed enum + scoped int value instead of SessionBoard's opaque JSON config.
+6. **Agenda = live schedule on `Session` + draft workspaces.** `Session.roomId/
+   scheduleSlotId/startsAt/endsAt` is the live schedule. `AgendaDraft` + `DraftPlacement`
+   stage changes; commit copies placements onto sessions (exactly the public API model).
+   Commits are guarded by **optimistic concurrency**: `Event.scheduleRevision` vs
+   `AgendaDraft.baseScheduleRevision` — a stale draft must rebase, so two drafts can
+   never silently overwrite each other. Conflicts (speaker double-booked, room overlap,
+   speaker unavailable, rule violations) are **computed, never stored**; committing with
+   open conflicts requires explicit confirmation (no waiver table — it cannot represent
+   unary or multi-session conflicts correctly). `SchedulingRule` is a typed enum + scoped
+   int value instead of SessionBoard's opaque JSON config.
 
 7. **Portal work items**: `TaskDefinition` targets `SPEAKER` or `SUBMISSION` and can wrap
    a portal `Form` or a `FileRequest` (source enum `MANUAL | FORM | FILE_REQUEST`).
@@ -208,25 +213,99 @@ Submission (Session.status):
       │                 │         └───────────────┘ (email) └──────────┘
       └────────────── speaker withdraws ──────────────────► WITHDRAWN
 
-Form:        DRAFT → OPEN → CLOSED (auto at closesAt, draft reminders before)
-AgendaDraft: OPEN → COMMITTED (placements copied to sessions) | DISCARDED
+Form:        DRAFT → OPEN → CLOSED (auto at closesAt) → ARCHIVED; structure locks at
+             first submitted response (clone to change)
+AgendaDraft: OPEN → COMMITTED (placements copied to sessions, scheduleRevision bumped)
+             | DISCARDED; stale baseScheduleRevision blocks commit until rebase
 Round:       PENDING → OPEN → CLOSED; RoundSession outcome PENDING → ADVANCED | REJECTED
 Assignment:  PENDING → IN_PROGRESS → COMPLETED (or DECLINED / CONFLICT_OF_INTEREST)
 Task:        NOT_STARTED → IN_PROGRESS → SUBMITTED → COMPLETED (OVERDUE derived from dueAt)
-Email:       QUEUED → SENT | FAILED
+Email:       QUEUED → SENT | FAILED (retried on the same row, deduped by dedupeKey)
+
+Every Session stage/status change also appends a SessionTransition row (who/when/why)
+in the same atomic batch — the full audit trail from submission to agenda.
 ```
 
 ## Gap-filling assumptions
 
-- Form editing is in-place (no version snapshots); answers reference `FieldDefinition`
-  so history survives label changes. SessionBoard's "V2" badge is a platform version, not
-  per-form versioning.
+- **Forms lock instead of versioning.** Once a form has its first submitted response, its
+  structure (sections, questions, options) is locked; organizers clone the form to make a
+  new version, and used forms/fields/options get `ARCHIVED`, never deleted. Historical
+  references use `Restrict` so `FormResponse`/`Answer` rows stay immutable evidence.
 - Conflict detection algorithm: overlap when two placements intersect in time AND share a
-  room, or share a participant, or violate an enabled `SchedulingRule`. Personas
-  (attendee-type schedule scoring) are skipped — the brief crossed out AI review and
-  doesn't need schedule scoring.
-- File storage is object storage; the `File` row stores `storageKey`, never bytes.
+  room, or share a participant, or hit a `SpeakerAvailability` block, or violate an
+  enabled `SchedulingRule`. Personas (attendee-type schedule scoring) are skipped — the
+  brief crossed out AI review and doesn't need schedule scoring.
+- File storage is object storage; the `File` row stores `storageKey`, never bytes. The
+  event owns files; detaching (session delete, answer delete) is `SetNull` and a
+  background job garbage-collects unreferenced rows + bytes.
 - Decision emails: bulk "notify" action sends per-submission decision emails and stamps
-  `Session.notifiedAt` (matches the "Notified" column in the abstracts table).
+  `Session.notifiedAt` **after** the message reaches `SENT` (matches the "Notified"
+  column in the abstracts table).
 - Submission limits: event-level default (`Event.submissionLimitPerUser`, default 3) with
   optional per-form override (`Form.submissionLimit`), counting drafts + submitted.
+- `friendlyId` is allocated from the atomic `Event.nextSessionNumber` counter (never
+  `SELECT max()+1`, which races under concurrent submissions).
+
+# Design review round (oracle + Sessionize research)
+
+An independent review pass (with sessionize.com research for implementation diversity)
+drove these schema changes:
+
+**Integrity / SQLite correctness**
+
+- **Tenant boundaries in the database**: every event-scoped parent exposes
+  `UNIQUE(id, eventId)`; cross-aggregate children (`SessionParticipant`, `RoundSession`,
+  `ReviewAssignment`, `DraftPlacement`, `TaskAssignment`, `FormQuestion`…) carry a
+  denormalized `eventId`/`formId`/`roundId` and use **composite FKs**, so a session can
+  never reference a track, speaker, or plan from another event. Same-form composites for
+  logic/answers, same-round composites for scores. Nullable refs (e.g. `Session.trackId`)
+  get their composite FK in the drizzle migration (Prisma cannot mix required + optional
+  relation fields); the header appendix in `schema.prisma` lists them.
+- **Partial unique indexes** replace composite uniques that contain nullable columns
+  (`TaskAssignment.sessionId`, `Answer.subjectSpeakerId`, `Speaker.userId`) — SQLite
+  treats every NULL as distinct, so the plain uniques did not prevent duplicates.
+- **CHECK constraints** (documented in the schema header) for exactly-one-reference
+  tables (`AnswerOption`, `EmbedFilter`, routing match), time ranges, draft-title rule,
+  and lifecycle enum values (drizzle text enums are TypeScript-only).
+- `AnswerOption.libraryRefId` (unchecked string) replaced with **typed FKs** per library
+  dimension; logic conditions and routing rules gained typed track/format/tag refs.
+- BetterAuth tables are marked **generated** (`@better-auth/cli generate` is the source);
+  added `AuthAccount UNIQUE(providerId, accountId)` and the inviter FK.
+
+**Model corrections**
+
+- Speaker confirmation moved to `SessionParticipant` (a speaker can confirm talk A and
+  decline talk B); event-level status is derived.
+- One submitter source of truth: `Session.submitterSpeakerId` (removed the duplicate
+  `Session.submitterId` User ref and `SessionParticipant.isSubmitter`).
+- `Session.title` nullable for autosaved drafts (+ CHECK for non-drafts);
+  `Session.coverImageFileId` for the portal-editable cover image;
+  `Session.evaluationPlanId` records plan membership set by routing.
+- `SessionTransition` append-only audit log for every stage/status change; round
+  outcomes and COI declarations also carry audit fields.
+- `EvaluationRoundReviewer` per-round reviewer pools; scorecards support `FILE` uploads.
+- `TaskAssignment.dueAt` snapshots the deadline at assignment time.
+- `Form.slug` unique per event (`/submit/{event}/cfp` everywhere), `EventMember` allows
+  multiple roles per user, ~25 missing FK/query indexes added.
+- Emails became a real **transactional outbox**: `dedupeKey @unique` (two cron workers
+  cannot double-send), retry on the same row, provenance links, `IcsMethod`
+  REQUEST/CANCEL + per-message `icsSequence`, `SCHEDULE_CANCEL` template, stable derived
+  calendar UID.
+
+**Sessionize-inspired product improvements**
+
+- `Format.defaultDurationMinutes` — the agenda builder pre-fills `endsAt`.
+- `ScheduleSlot` — reusable "day + time block" grid the organizer places sessions into
+  (the customer wants "choose a day and spot"); workshops can still use free timestamps.
+- `SessionKind: CONTENT | SERVICE` — breaks/lunch/registration live in the same grid
+  without speakers or CFP baggage.
+- `SpeakerAvailability` windows feed conflict detection.
+- Evaluation presets (Quick vote Yes/Maybe/No, Stars, Weighted rubric) are documented as
+  product presets over the existing scorecard primitives — no new tables.
+- Public JSON + ICS feeds (`/public/events/{slug}/schedule.json|.ics`) will be the data
+  source the embed widgets consume (application-level, no schema change).
+
+**Dropped**: `ConflictWaiver` (wrong cardinality for unary/multi-session conflicts;
+replaced by always-visible computed conflicts + explicit commit confirmation) and the
+`FORM_CLOSING` reminder trigger (undefined recipient set).
