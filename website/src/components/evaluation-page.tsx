@@ -5,6 +5,7 @@ import { useState, useTransition } from 'react'
 import { ErrorBoundary, Link, router, useLoaderData } from 'spiceflow/react'
 import { StarIcon } from 'lucide-react'
 import { upsertReview } from '../actions.tsx'
+import { runAction } from './ui/toast.tsx'
 import { cn } from '../lib/utils.ts'
 import { SessionStatusBadge } from './abstracts-page.tsx'
 import type { SessionStatus } from '../lib/submissions.ts'
@@ -202,15 +203,18 @@ function InlineReviewCard({
               disabled={pending}
               onClick={() => {
                 startTransition(async () => {
-                  await upsertReview({
-                    orgId,
-                    eventId,
-                    sessionId: row.id,
-                    vote,
-                    rating: rating ? Number(rating) : null,
-                    comment: comment.trim() || null,
-                  })
-                  if (!initial) setDone(true)
+                  const result = await runAction(
+                    () => upsertReview({
+                      orgId,
+                      eventId,
+                      sessionId: row.id,
+                      vote,
+                      rating: rating ? Number(rating) : null,
+                      comment: comment.trim() || null,
+                    }),
+                    { fallbackError: 'Could not save review' },
+                  )
+                  if (result && !initial) setDone(true)
                 })
               }}
             >

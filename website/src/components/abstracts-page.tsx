@@ -17,6 +17,7 @@ import {
   type SessionStatus,
 } from '../lib/submissions.ts'
 import { cn, formatDateTimeUTC } from '../lib/utils.ts'
+import { runAction, toastActionError } from './ui/toast.tsx'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
 import { Badge, EmptyState, Input, NativeSelect } from './ui/primitives.tsx'
@@ -101,28 +102,28 @@ export function AbstractsPage({
     if (sessionIds.length === 0) return
     setError(null)
     startTransition(async () => {
-      try {
-        await bulkUpdateSessionStatus({
+      const result = await runAction(
+        () => bulkUpdateSessionStatus({
           orgId: currentOrgId,
           eventId: event.id,
           sessionIds,
           status: nextStatus,
-        })
-        setSelected(new Set())
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Bulk update failed')
-      }
+        }),
+        { fallbackError: 'Bulk update failed' },
+      )
+      if (result) setSelected(new Set())
+      else setError('Bulk update failed')
     })
   }
 
   function runNotify(queue: 'accept' | 'decline') {
     setError(null)
     startTransition(async () => {
-      try {
-        await notifyQueue({ orgId: currentOrgId, eventId: event.id, queue })
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Notify failed')
-      }
+      const result = await runAction(
+        () => notifyQueue({ orgId: currentOrgId, eventId: event.id, queue }),
+        { fallbackError: 'Notify failed' },
+      )
+      if (result === null) setError('Notify failed')
     })
   }
 
@@ -366,7 +367,10 @@ function StatusCell({
             const next = e.target.value as SessionStatus
             if (next === status) return
             startTransition(async () => {
-              await updateSessionStatus({ orgId, eventId, sessionId, status: next })
+              await runAction(
+                () => updateSessionStatus({ orgId, eventId, sessionId, status: next }),
+                { fallbackError: 'Could not update status' },
+              )
             })
           }}
         >

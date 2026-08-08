@@ -1432,7 +1432,8 @@ function getInitialThemeClass(request: Request) {
   return /(?:^|;\s*)color-theme=dark(?:;|$)/.test(cookie) ? 'dark' : undefined
 }
 
-function AppShell({ children, request }: { children: React.ReactNode; request: Request }) {
+async function AppShell({ children, request }: { children: React.ReactNode; request: Request }) {
+  const { Toaster } = await import('./components/ui/toast.tsx')
   return (
     <html lang="en" className={getInitialThemeClass(request)} data-default-theme="system" suppressHydrationWarning>
       <Head>
@@ -1444,6 +1445,7 @@ function AppShell({ children, request }: { children: React.ReactNode; request: R
         <script dangerouslySetInnerHTML={{ __html: appThemeScript }} />
         <ProgressBar color="var(--primary)" />
         {children}
+        <Toaster />
       </body>
     </html>
   )

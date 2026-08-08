@@ -6,6 +6,7 @@ import { useState, useTransition } from 'react'
 import { ErrorBoundary, Link, router, useLoaderData } from 'spiceflow/react'
 import { ArrowLeftIcon } from 'lucide-react'
 import { updateSessionStatus, upsertReview } from '../actions.tsx'
+import { toastActionError } from './ui/toast.tsx'
 import type { SessionStatus } from '../lib/submissions.ts'
 import { formatDateTimeUTC } from '../lib/utils.ts'
 import { SessionStatusBadge } from './abstracts-page.tsx'
@@ -172,7 +173,7 @@ function DecisionActions({
       try {
         await updateSessionStatus({ orgId, eventId, sessionId, status: next })
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Status update failed')
+        setError(toastActionError(err, 'Status update failed'))
       }
     })
   }
@@ -282,15 +283,19 @@ function ReviewPanel({
             onClick={() => {
               setMessage(null)
               startTransition(async () => {
-                await upsertReview({
-                  orgId,
-                  eventId,
-                  sessionId,
-                  vote,
-                  rating: rating ? Number(rating) : null,
-                  comment: comment.trim() || null,
-                })
-                setMessage('Saved')
+                try {
+                  await upsertReview({
+                    orgId,
+                    eventId,
+                    sessionId,
+                    vote,
+                    rating: rating ? Number(rating) : null,
+                    comment: comment.trim() || null,
+                  })
+                  setMessage('Saved')
+                } catch (err) {
+                  setMessage(toastActionError(err, 'Could not save review'))
+                }
               })
             }}
           >

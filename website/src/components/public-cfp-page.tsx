@@ -11,6 +11,7 @@ import { formatDateRangeUTC, formatDateTimeUTC } from '../lib/utils.ts'
 import { OpenSessionLogo } from './auth-page.tsx'
 import { PublicFormWizard, SubmittedSuccess } from './public-form-wizard.tsx'
 import { Button } from './ui/button.tsx'
+import { Toaster, toastActionError } from './ui/toast.tsx'
 import { Badge } from './ui/primitives.tsx'
 
 type DraftData = {
@@ -82,7 +83,7 @@ export function PublicCfpPage({
       })
       setSavedAt(Date.now())
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not save the draft')
+      setError(toastActionError(cause, 'Could not save the draft'))
     } finally {
       setSaving(false)
     }
@@ -91,13 +92,18 @@ export function PublicCfpPage({
   const submit = async (submission: FormSubmission) => {
     if (!draft) throw new Error('Sign in to submit')
     setError(null)
-    const result = await submitPublicCfp({
-      eventId: event.id,
-      formId: form.id,
-      responseId: draft.responseId,
-      submission,
-    })
-    setSubmitted({ sessionId: result.sessionId, title: result.title, status: 'PENDING' })
+    try {
+      const result = await submitPublicCfp({
+        eventId: event.id,
+        formId: form.id,
+        responseId: draft.responseId,
+        submission,
+      })
+      setSubmitted({ sessionId: result.sessionId, title: result.title, status: 'PENDING' })
+    } catch (cause) {
+      setError(toastActionError(cause, 'Could not submit'))
+      throw cause
+    }
   }
 
   const header = (
@@ -117,6 +123,7 @@ export function PublicCfpPage({
 
   return (
     <main className="min-h-screen bg-background px-4 py-8 sm:px-6 sm:py-12">
+      <Toaster />
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
         {submitted ? (
           <>
