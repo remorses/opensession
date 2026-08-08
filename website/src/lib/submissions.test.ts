@@ -97,13 +97,20 @@ describe('applyTransition', () => {
     expect('notifiedAt' in patch).toBe(false)
   })
 
-  test('rejects illegal transitions and empty titles for non-draft', () => {
+  test('rejects illegal transitions', () => {
     expect(() => applyTransition(base('ACCEPTED'), 'PENDING', 1)).toThrow(
       /Cannot move session/,
     )
-    expect(() =>
-      applyTransition(base('DRAFT', { title: '   ' }), 'PENDING', 1),
-    ).toThrow(/must have a title/)
+  })
+
+  test('backfills Untitled when non-draft has empty title', () => {
+    const patch = applyTransition(base('PENDING', { title: '   ' }), 'ACCEPT_QUEUE', 1)
+    expect(patch.title).toBe('Untitled')
+    expect(patch.status).toBe('ACCEPT_QUEUE')
+    // Keeps a real title when present.
+    expect(applyTransition(base('PENDING', { title: 'Talk' }), 'ACCEPT_QUEUE', 1).title).toBe(
+      undefined,
+    )
   })
 })
 

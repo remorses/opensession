@@ -984,6 +984,7 @@ export async function bulkUpdateSessionStatus(
       .update(schema.eventSession)
       .set({
         status: patch.status,
+        ...(patch.title != null ? { title: patch.title } : {}),
         submittedAt: patch.submittedAt,
         decidedAt: patch.decidedAt,
         withdrawnAt: patch.withdrawnAt,
@@ -1075,6 +1076,7 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
       .update(schema.eventSession)
       .set({
         status: patch.status,
+        ...(patch.title != null ? { title: patch.title } : {}),
         submittedAt: patch.submittedAt,
         decidedAt: patch.decidedAt,
         withdrawnAt: patch.withdrawnAt,

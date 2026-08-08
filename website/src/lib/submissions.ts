@@ -63,11 +63,17 @@ export type TransitionableSession = {
 
 export type SessionTransitionPatch = {
   status: SessionStatus
+  /** Set when the row had no title and we backfill for the DB CHECK. */
+  title?: string
   submittedAt: number | null
   decidedAt: number | null
   withdrawnAt: number | null
   updatedAt: number
 }
+
+/** Placeholder when a submitted row lost its projected title (legacy data or
+ *  form without a well-known `title` field). Keeps the DB CHECK happy. */
+export const UNTITLED_SESSION_TITLE = 'Untitled'
 
 /** Apply a guarded status transition. Stamps lifecycle timestamps; never
  *  touches notifiedAt (that lands only after decision email SENT). */
@@ -79,16 +85,16 @@ export function applyTransition(
   if (!canTransition(session.status, to)) {
     throw new Error(`Cannot move session from ${session.status} to ${to}`)
   }
-  // Non-DRAFT rows must keep a non-empty title (DB CHECK).
-  if (to !== 'DRAFT') {
-    const title = session.title?.trim() ?? ''
-    if (!title) {
-      throw new Error('A non-draft session must have a title')
-    }
-  }
+
+  // Non-DRAFT rows need a non-empty title (DB CHECK). Older/broken rows may
+  // already be PENDING with a null title — backfill instead of blocking the
+  // accept-queue buttons with a cryptic throw.
+  const existingTitle = session.title?.trim() ?? ''
+  const needsTitle = to !== 'DRAFT' && !existingTitle
 
   return {
     status: to,
+    ...(needsTitle ? { title: UNTITLED_SESSION_TITLE } : {}),
     submittedAt:
       to === 'PENDING' && session.submittedAt == null
         ? now
