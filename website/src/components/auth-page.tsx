@@ -13,7 +13,12 @@ import { cn } from '../lib/utils.ts'
  */
 export function OpenSessionLogo({ className, imageClassName = 'h-7' }: { className?: string; imageClassName?: string }) {
   return (
-    <span className={cn('inline-flex items-center', className)}>
+    // `flex`, NOT `inline-flex`: an inline-level box sits on its parent's text
+    // baseline, so the line box adds ~6px of descender leading BELOW the image.
+    // That made the wrapping <a> 34px tall for a 28px logo and pushed the logo
+    // visually toward the top of the navbar. Block-level flex has no line box,
+    // so the wrapper height matches the image exactly.
+    <span className={cn('flex items-center', className)}>
       <img
         src="/holocron-api/ai-logo/opensession.jpeg"
         alt="OpenSession"

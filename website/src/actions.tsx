@@ -273,3 +273,216 @@ export async function createEvent(input: {
   }
     throw redirect(`/org/${parsed.orgId}/e/${eventId}`)
 }
+
+// ── Event settings actions ──────────────────────────────────────────
+
+function validateTimezone(timezone: string) {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: timezone })
+  } catch {
+    throw new Error(`Unknown timezone: ${timezone}`)
+  }
+}
+
+/** Auth + tenancy check shared by every event-scoped action: the caller
+ *  must be a member of the org AND the event must belong to that org.
+ *  Never trust the eventId alone — it comes from the client. */
+async function requireEventAccess({ actionRequest, orgId, eventId }: {
+  actionRequest: Request
+  orgId: string
+  eventId: string
+}) {
+  await requireOrgAccess(actionRequest, orgId)
+  const db = getDb()
+  const event = await db.query.event.findFirst({ where: { id: eventId, orgId } })
+  if (!event) throw new Error('Event not found')
+  return { db, event }
+}
+
+const updateEventSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  name: z.string().trim().min(1).max(120),
+  slug: z.string().trim().toLowerCase().regex(SLUG_RE).max(60),
+  status: z.enum(['DRAFT', 'ACTIVE', 'ARCHIVED']),
+  websiteUrl: z.string().trim().max(500),
+  location: z.string().trim().max(200),
+  timezone: z.string().min(1).max(60),
+  /** Epoch ms. */
+  startsAt: z.number().int().positive(),
+  endsAt: z.number().int().positive(),
+  description: z.string().trim().max(5000),
+})
+
+/** Update the event details (Settings > Details). Empty optional strings
+ *  are stored as NULL. */
+export async function updateEvent(input: z.input<typeof updateEventSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = updateEventSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  if (parsed.endsAt <= parsed.startsAt) {
+    throw new Error('The event must end after it starts')
+  }
+  validateTimezone(parsed.timezone)
+
+  try {
+    await db
+      .update(schema.event)
+      .set({
+        name: parsed.name,
+        slug: parsed.slug,
+        status: parsed.status,
+        websiteUrl: parsed.websiteUrl || null,
+        location: parsed.location || null,
+        timezone: parsed.timezone,
+        startsAt: parsed.startsAt,
+        endsAt: parsed.endsAt,
+        description: parsed.description || null,
+        updatedAt: Date.now(),
+      })
+      .where(orm.eq(schema.event.id, parsed.eventId))
+      .limit(1)
+  } catch {
+    // Global unique slug — the most likely failure mode.
+    throw new Error(`The slug "${parsed.slug}" is already taken. Pick another one.`)
+  }
+  return { eventId: parsed.eventId }
+}
+
+// ── Library: tracks / formats / rooms ───────────────────────────────
+//
+// Deletes must detach sessions FIRST: the session→track/format/room
+// composite FKs are NO ACTION (see db/src/schema.ts), so deleting a
+// referenced library row would fail. Detach + delete go in one atomic
+// db.batch.
+
+const createTrackSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  name: z.string().trim().min(1).max(80),
+  /** Hex color, e.g. "#6366f1". */
+  color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+})
+
+export async function createTrack(input: z.input<typeof createTrackSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = createTrackSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  try {
+    await db.insert(schema.track).values({
+      eventId: parsed.eventId,
+      name: parsed.name,
+      color: parsed.color,
+    })
+  } catch {
+    throw new Error(`A track named "${parsed.name}" already exists`)
+  }
+  return { name: parsed.name }
+}
+
+const deleteTrackSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  trackId: z.string().min(1),
+})
+
+export async function deleteTrack(input: z.input<typeof deleteTrackSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = deleteTrackSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const row = await db.query.track.findFirst({ where: { id: parsed.trackId, eventId: parsed.eventId } })
+  if (!row) throw new Error('Track not found')
+  await db.batch([
+    db
+      .update(schema.eventSession)
+      .set({ trackId: null })
+      .where(orm.eq(schema.eventSession.trackId, parsed.trackId)),
+    db.delete(schema.track).where(orm.eq(schema.track.id, parsed.trackId)).limit(1),
+  ] as const)
+  return { trackId: parsed.trackId }
+}
+
+const createFormatSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  name: z.string().trim().min(1).max(80),
+  defaultDurationMinutes: z.number().int().min(1).max(24 * 60).nullable(),
+})
+
+export async function createFormat(input: z.input<typeof createFormatSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = createFormatSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  try {
+    await db.insert(schema.format).values({
+      eventId: parsed.eventId,
+      name: parsed.name,
+      defaultDurationMinutes: parsed.defaultDurationMinutes,
+    })
+  } catch {
+    throw new Error(`A format named "${parsed.name}" already exists`)
+  }
+  return { name: parsed.name }
+}
+
+const deleteFormatSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  formatId: z.string().min(1),
+})
+
+export async function deleteFormat(input: z.input<typeof deleteFormatSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = deleteFormatSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const row = await db.query.format.findFirst({ where: { id: parsed.formatId, eventId: parsed.eventId } })
+  if (!row) throw new Error('Format not found')
+  await db.batch([
+    db
+      .update(schema.eventSession)
+      .set({ formatId: null })
+      .where(orm.eq(schema.eventSession.formatId, parsed.formatId)),
+    db.delete(schema.format).where(orm.eq(schema.format.id, parsed.formatId)).limit(1),
+  ] as const)
+  return { formatId: parsed.formatId }
+}
+
+const createRoomSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  name: z.string().trim().min(1).max(80),
+})
+
+export async function createRoom(input: z.input<typeof createRoomSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = createRoomSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  try {
+    await db.insert(schema.room).values({ eventId: parsed.eventId, name: parsed.name })
+  } catch {
+    throw new Error(`A room named "${parsed.name}" already exists`)
+  }
+  return { name: parsed.name }
+}
+
+const deleteRoomSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  roomId: z.string().min(1),
+})
+
+export async function deleteRoom(input: z.input<typeof deleteRoomSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = deleteRoomSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const row = await db.query.room.findFirst({ where: { id: parsed.roomId, eventId: parsed.eventId } })
+  if (!row) throw new Error('Room not found')
+  await db.batch([
+    db
+      .update(schema.eventSession)
+      .set({ roomId: null })
+      .where(orm.eq(schema.eventSession.roomId, parsed.roomId)),
+    db.delete(schema.room).where(orm.eq(schema.room.id, parsed.roomId)).limit(1),
+  ] as const)
+  return { roomId: parsed.roomId }
+}

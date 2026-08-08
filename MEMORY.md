@@ -34,3 +34,7 @@ The product is OpenSession on opensession.dev. Two leftovers keep the old plural
 spelling: the local checkout folder `~/Documents/GitHub/opensessions` (renaming breaks
 the kimaki project mapping) and the sigillo org `opensessions` (the CLI has no
 `orgs update` command). Everything else must say `opensession`.
+
+## Spiceflow query-param tabs: two gotchas
+
+zod `.default()` in a page `query` schema is NOT applied at runtime — use `.optional()` and normalize with `?? 'default'` in the handler. And `router.href('/org/:orgId/e/:eventId/settings', {...})` breaks TS for multi-param paths that also have a query schema (params infer as never); use the template-literal form `router.href(\`/org/${orgId}/e/${eventId}/settings\`, { tab })` instead.

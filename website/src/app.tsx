@@ -15,8 +15,10 @@ import {
   getOrgPageData,
   getOrgAccessData,
   getInvitation,
+  getDb,
 } from './db.ts'
-import { cn } from './lib/utils.ts'
+import { cn, formatDateRangeUTC } from './lib/utils.ts'
+import { Badge } from './components/ui/primitives.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
 import { OpenSessionLogo } from './components/auth-page.tsx'
 
@@ -212,6 +214,10 @@ export const app = new Spiceflow()
   .layout('/org/:orgId/*', async ({ children, request, loaderData }) => {
     const { OrgSwitch, UserMenu, ThemeSelect } = await import('./components/dashboard-shell.tsx')
     const { EventSwitch } = await import('./components/event-switch.tsx')
+    // Event pages get the EventSidebar (nested event layout) instead of the
+    // org tab bar, and the main area drops its padding so the sidebar can
+    // span full height — the event layout pads its own content.
+    const isEventPage = loaderData.pathname.includes('/e/')
     return (
       <AppShell request={request}>
         <DashboardNavbar
@@ -221,12 +227,23 @@ export const app = new Spiceflow()
           userSlot={<UserMenu />}
         />
         <div className="border-t border-border" />
-        <DashboardTabBar pathname={loaderData.pathname} orgId={loaderData.currentOrgId} />
-        <div className="border-t border-border" />
-        <ContentFrame className="isolate grow relative">
+        {!isEventPage && (
+          <>
+            <DashboardTabBar pathname={loaderData.pathname} orgId={loaderData.currentOrgId} />
+            <div className="border-t border-border" />
+          </>
+        )}
+        <ContentFrame className="isolate grow relative flex flex-col">
           <GridDot position="tl" />
           <GridDot position="tr" />
-          <main className="p-4 sm:p-6 overflow-x-hidden min-w-0">{children}</main>
+          <main
+            className={cn(
+              'overflow-x-hidden min-w-0 grow',
+              isEventPage ? 'flex' : 'p-4 sm:p-6',
+            )}
+          >
+            {children}
+          </main>
         </ContentFrame>
         <DashboardFooter themeSlot={<ThemeSelect />} />
       </AppShell>
@@ -245,28 +262,160 @@ export const app = new Spiceflow()
     return <NoEventsPage />
   })
 
-  // ── Event page (placeholder until the event shell lands) ──────────
+  // ── Event shell (/org/:orgId/e/:eventId/*) ────────────────────────
+  // Auth + org membership is guarded by the /org/:orgId/* loader above;
+  // this level owns event resolution only: the event with its library
+  // (tracks/formats/rooms) in ONE db.query. Events from other orgs (or
+  // stale ids) bounce back to the org index.
 
-  .page('/org/:orgId/e/:eventId', async ({ params, loaderData }) => {
-    const event = loaderData.events.find((row) => row.id === params.eventId)
-    if (!event) throw redirect(`/org/${params.orgId}`)
+  .loader('/org/:orgId/e/:eventId/*', async ({ params }) => {
+    const db = getDb()
+    const found = await db.query.event.findFirst({
+      where: { id: params.eventId, orgId: params.orgId },
+      with: {
+        tracks: { orderBy: { sortOrder: 'asc', name: 'asc' } },
+        formats: { orderBy: { sortOrder: 'asc', name: 'asc' } },
+        rooms: { orderBy: { sortOrder: 'asc', name: 'asc' } },
+      },
+    })
+    if (!found) throw redirect(`/org/${params.orgId}`)
+    const { tracks, formats, rooms, ...event } = found
+    return { event, tracks, formats, rooms }
+  })
+
+  .layout('/org/:orgId/e/:eventId/*', async ({ children }) => {
+    const { EventSidebar } = await import('./components/event-shell.tsx')
     return (
-      <div className="flex flex-col gap-5">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold tracking-tight">{event.name}</h1>
+      <div className="flex w-full min-w-0 grow">
+        <EventSidebar />
+        <div className="min-w-0 grow p-4 sm:p-6">{children}</div>
+      </div>
+    )
+  })
+
+  // ── Event dashboard (index) ───────────────────────────────────────
+  // Simple overview for now: name, dates, status, count row. The full
+  // KPI dashboard (per-form progress, nudges) is a later task.
+
+  .page('/org/:orgId/e/:eventId', async ({ loaderData }) => {
+    const { event } = loaderData
+    const db = getDb()
+    const [sessions, speakers, forms] = await db.batch([
+      db.query.eventSession.findMany({ where: { eventId: event.id }, columns: { id: true } }),
+      db.query.speaker.findMany({ where: { eventId: event.id }, columns: { id: true } }),
+      db.query.form.findMany({ where: { eventId: event.id }, columns: { id: true } }),
+    ] as const)
+    const stats = [
+      { label: 'Sessions', value: sessions.length },
+      { label: 'Speakers', value: speakers.length },
+      { label: 'Forms', value: forms.length },
+    ]
+    return (
+      <div className="flex flex-col gap-6">
+        <div className="flex flex-col gap-1.5">
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-xl font-semibold tracking-tight">{event.name}</h1>
+            <EventStatusBadge status={event.status} />
+          </div>
           <p className="text-sm text-muted-foreground">
-            <span className="font-mono text-xs">{event.slug}</span>
-            {' · '}
-            {event.status.toLowerCase()}
+            {formatDateRangeUTC(event.startsAt, event.endsAt)}
             {' · '}
             {event.timezone}
+            {event.location ? ` · ${event.location}` : ''}
           </p>
         </div>
-        <p className="text-sm text-muted-foreground text-balance">
-          Forms, abstracts, agenda, and the speaker portal will show up here.
+        <div className="flex gap-10">
+          {stats.map((stat) => (
+            <div key={stat.label} className="flex flex-col gap-0.5">
+              <span className="text-2xl font-semibold tabular-nums">{stat.value}</span>
+              <span className="text-sm text-muted-foreground">{stat.label}</span>
+            </div>
+          ))}
+        </div>
+        <p className="text-sm text-muted-foreground">
+          Publish a CFP form to start collecting submissions, then review abstracts and build the agenda.
         </p>
       </div>
     )
+  })
+
+  // ── Event sections (placeholders until their tasks land) ──────────
+  // Every sidebar item is a registered page so navigation never 404s.
+
+  .page('/org/:orgId/e/:eventId/abstracts', async () => (
+    <ComingSoonPage
+      title="Abstracts"
+      description="Review submissions, move them through accept and decline queues, and notify speakers."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/sessions', async () => (
+    <ComingSoonPage
+      title="Sessions"
+      description="Accepted and service sessions with times, rooms, tracks, and visibility."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/files', async () => (
+    <ComingSoonPage
+      title="Files"
+      description="Every file uploaded to this event: headshots, slides, cover images, and logos."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/forms', async () => (
+    <ComingSoonPage
+      title="Forms"
+      description="CFP forms with an MDX editor, immutable versions, and submission counts."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/evaluation', async () => (
+    <ComingSoonPage
+      title="Evaluation"
+      description="Vote, rate, and comment on pending submissions; track review coverage."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/agenda', async () => (
+    <ComingSoonPage
+      title="Agenda"
+      description="Schedule sessions across days and rooms, and spot room or speaker conflicts."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/tasks', async () => (
+    <ComingSoonPage
+      title="Tasks"
+      description="Speaker and submission tasks with per-assignment progress and due dates."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/portal-forms', async () => (
+    <ComingSoonPage
+      title="Portal Forms"
+      description="Forms speakers fill from the portal, linkable from tasks."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/speakers', async () => (
+    <ComingSoonPage
+      title="Speakers"
+      description="Event speakers with profiles, confirmations, and outstanding tasks."
+    />
+  ))
+  .page('/org/:orgId/e/:eventId/emails', async () => (
+    <ComingSoonPage
+      title="Emails"
+      description="Outbox of every email sent for this event, with retries and reminder schedules."
+    />
+  ))
+
+  // ── Event settings (?tab=details|tracks|formats|rooms|team) ───────
+
+  .page({
+    path: '/org/:orgId/e/:eventId/settings',
+    query: z.object({
+      // NOTE: spiceflow query validation does not apply zod .default() to the
+      // parsed handler value — normalize undefined in the handler instead.
+      tab: z.enum(['details', 'tracks', 'formats', 'rooms', 'team']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { EventSettings } = await import('./components/event-settings.tsx')
+      return <EventSettings tab={query.tab ?? 'details'} />
+    },
   })
 
   // ── Members page (org members + invite links) ─────────────────────
@@ -302,6 +451,31 @@ export const app = new Spiceflow()
 
   // Mount holocron last — it serves the landing page and docs pages
   .use(holocronApp)
+
+// ── Event page helpers ──────────────────────────────────────────────
+
+function EventStatusBadge({ status }: { status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED' }) {
+  const variant = status === 'ACTIVE' ? 'success' : status === 'ARCHIVED' ? 'outline' : 'secondary'
+  return (
+    <Badge variant={variant} className="px-1.5 capitalize">
+      {status.toLowerCase()}
+    </Badge>
+  )
+}
+
+/** Consistent placeholder for event sections that later tasks implement.
+    Registered as real pages so sidebar navigation never 404s. */
+function ComingSoonPage({ title, description }: { title: string; description: string }) {
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1">
+        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
+        <p className="text-sm text-muted-foreground">{description}</p>
+      </div>
+      <Badge variant="outline" className="w-fit px-1.5">Coming soon</Badge>
+    </div>
+  )
+}
 
 // ── Dashboard shell (sigillo-style chrome) ──────────────────────────
 // HTML shell + navbar + tab bar + footer with the same decorative
