@@ -7,6 +7,9 @@ import { Spiceflow, redirect, json } from 'spiceflow'
 import { Head, Link, ProgressBar, router } from 'spiceflow/react'
 import { z } from 'zod'
 import { app as holocronApp } from '@holocron.so/vite/app'
+import { env } from 'cloudflare:workers'
+import * as schema from 'db/schema'
+import { ulid } from 'ulid'
 import {
   getAuth,
   getSession,
@@ -16,7 +19,12 @@ import {
   getOrgAccessData,
   getInvitation,
   getDb,
+  requireSession,
 } from './db.ts'
+import { libraryOptions } from './forms/collect-fields.ts'
+import { canAccessFile } from './lib/cfp-submission.ts'
+import { getOrCreateCfpDraft, getPublicCfp, type PublicCfpForm } from './lib/cfp-server.ts'
+import { linkSpeakerIdentity } from './lib/speaker-link.ts'
 import { cn, formatDateRangeUTC } from './lib/utils.ts'
 import { Badge } from './components/ui/primitives.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
@@ -179,6 +187,207 @@ export const app = new Spiceflow()
     },
     { detail: { hide: true } },
   )
+
+  // ── Authenticated file storage ────────────────────────────────────
+
+  .post('/api/upload', async ({ request }) => {
+    const session = await requireSession(request)
+    const body = await request.formData()
+    const uploaded = body.get('file')
+    const eventId = String(body.get('eventId') ?? '')
+    const kindResult = z.enum(['HEADSHOT', 'SLIDES', 'DOCUMENT', 'IMAGE', 'OTHER'])
+      .safeParse(body.get('kind'))
+    if (!(uploaded instanceof File) || !eventId || !kindResult.success) {
+      return json({ error: 'invalid_upload', message: 'File, eventId, and kind are required' }, { status: 400 })
+    }
+    if (uploaded.size > MAX_UPLOAD_BYTES) {
+      return json({ error: 'file_too_large', message: 'Files must be 100 MB or smaller' }, { status: 413 })
+    }
+    if (!isAllowedUpload(uploaded, kindResult.data)) {
+      return json({ error: 'unsupported_file', message: 'This file type is not supported' }, { status: 415 })
+    }
+
+    const db = getDb()
+    const event = await db.query.event.findFirst({ where: { id: eventId } })
+    if (!event) return json({ error: 'not_found', message: 'Event not found' }, { status: 404 })
+    const [member, speaker] = await db.batch([
+      db.query.orgMember.findFirst({ where: { userId: session.userId, orgId: event.orgId } }),
+      db.query.speaker.findFirst({ where: { eventId, userId: session.userId } }),
+    ] as const)
+    if (!member && !speaker) return json({ error: 'not_found', message: 'Event not found' }, { status: 404 })
+
+    const fileId = ulid()
+    const fileName = sanitizeFileName(uploaded.name)
+    const storageKey = `${eventId}/${fileId}/${fileName}`
+    await env.FILES.put(storageKey, uploaded.stream(), {
+      httpMetadata: { contentType: uploaded.type },
+    })
+    try {
+      await db.insert(schema.file).values({
+        id: fileId,
+        eventId,
+        kind: kindResult.data,
+        fileName,
+        mimeType: uploaded.type,
+        sizeBytes: uploaded.size,
+        storageKey,
+        uploadedBySpeakerId: speaker?.id ?? null,
+      })
+    } catch (cause) {
+      await env.FILES.delete(storageKey)
+      throw cause
+    }
+    return { fileId, fileName, sizeBytes: uploaded.size }
+  })
+
+  .get('/files/:fileId', async ({ params, request }) => {
+    const db = getDb()
+    const file = await db.query.file.findFirst({
+      where: { id: params.fileId },
+      with: { event: true, formFieldValues: { with: { response: { with: { session: true } } } } },
+    })
+    if (!file?.event) return fileNotFound()
+
+    const session = await getSession(request)
+    const [linkedSpeaker, member, coverSession, headshotSpeakers] = await db.batch([
+      db.query.speaker.findFirst({ where: { eventId: file.eventId, userId: session?.userId ?? '__signed-out__' } }),
+      db.query.orgMember.findFirst({ where: { userId: session?.userId ?? '__signed-out__', orgId: file.event.orgId } }),
+      db.query.eventSession.findFirst({
+        where: { eventId: file.eventId, coverImageFileId: file.id, status: 'ACCEPTED', visibility: 'PUBLIC' },
+      }),
+      db.query.speaker.findMany({
+        where: { eventId: file.eventId, headshotFileId: file.id },
+        with: { participations: { with: { session: true } } },
+      }),
+    ] as const)
+    const publicFieldReference = file.formFieldValues.some((value) =>
+      value.response?.session?.status === 'ACCEPTED' && value.response.session.visibility === 'PUBLIC',
+    )
+    const publicHeadshot = headshotSpeakers.some((speaker) =>
+      speaker.participations.some((participation) =>
+        participation.session?.status === 'ACCEPTED' && participation.session.visibility === 'PUBLIC',
+      ),
+    )
+    const owningSpeaker = Boolean(linkedSpeaker && (
+      file.uploadedBySpeakerId === linkedSpeaker.id
+      || headshotSpeakers.some((speaker) => speaker.id === linkedSpeaker.id)
+      || file.formFieldValues.some((value) =>
+        value.subjectSpeakerId === linkedSpeaker.id || value.response?.speakerId === linkedSpeaker.id,
+      )
+    ))
+    if (!canAccessFile({
+      isOrgMember: Boolean(member),
+      isOwningSpeaker: owningSpeaker,
+      hasPublicSessionReference: Boolean(coverSession) || publicFieldReference,
+      isPublicSpeakerHeadshot: publicHeadshot,
+    })) return fileNotFound()
+
+    const object = await env.FILES.get(file.storageKey)
+    if (!object) return fileNotFound()
+    const headers = new Headers({
+      'content-type': file.mimeType,
+      'content-length': String(file.sizeBytes),
+      'content-disposition': `attachment; filename="${file.fileName.replace(/["\\\r\n]/g, '_').slice(0, 160) || 'download'}"`,
+      'x-content-type-options': 'nosniff',
+      'cache-control': publicHeadshot || coverSession || publicFieldReference ? 'public, max-age=300' : 'private, no-store',
+    })
+    return new Response(object.body, { headers })
+  })
+
+  // ── Public CFP submission ─────────────────────────────────────────
+
+  .loader('/submit/:eventSlug/:formSlug', async ({ params, request }): Promise<{
+    cfp: PublicCfpForm | null
+    draft: Awaited<ReturnType<typeof getOrCreateCfpDraft>> | null
+    capReached: boolean
+  }> => {
+    const cfp = await getPublicCfp(params.eventSlug, params.formSlug)
+    if (!cfp) return { cfp: null, draft: null, capReached: false }
+    const session = await getSession(request)
+    if (!session) return { cfp, draft: null, capReached: false }
+    try {
+      const draft = await getOrCreateCfpDraft(cfp, session)
+      return { cfp, draft, capReached: false }
+    } catch (cause) {
+      if (cause instanceof Error && cause.message.includes('at most 3 sessions')) {
+        return { cfp, draft: null, capReached: true }
+      }
+      throw cause
+    }
+  })
+
+  .page('/submit/:eventSlug/:formSlug', async ({ params, loaderData }) => {
+    if (!loaderData.cfp) return <PublicUnavailable />
+    const { PublicCfpPage } = await import('./components/public-cfp-page.tsx')
+    const { event, form, tracks, formats } = loaderData.cfp
+    const callbackURL = `/submit/${params.eventSlug}/${params.formSlug}`
+    return (
+      <PublicCfpPage
+        event={event}
+        form={form}
+        scope={{ tracks: libraryOptions(tracks), formats: libraryOptions(formats) }}
+        mdxSource={loaderData.cfp.version.mdxSource}
+        draft={loaderData.draft}
+        capReached={loaderData.capReached}
+        signInHref={router.href('/login/google', { callbackURL })}
+      />
+    )
+  })
+
+  // Task 6 replaces this small portal summary with the full portal shell.
+  .loader('/portal/:eventSlug', async ({ params, request }): Promise<{
+    portalEvent: typeof schema.event.$inferSelect | null
+    portalSpeaker: ((typeof schema.speaker.$inferSelect) & {
+      submissions: Array<typeof schema.eventSession.$inferSelect>
+    }) | null
+  }> => {
+    const session = await getSession(request)
+    if (!session) throw redirect(router.href('/login', { callbackURL: `/portal/${params.eventSlug}` }))
+    const db = getDb()
+    const event = await db.query.event.findFirst({ where: { slug: params.eventSlug } })
+    if (!event) return { portalEvent: null, portalSpeaker: null }
+    const speaker = await linkSpeakerIdentity({ eventId: event.id, session })
+    if (!speaker) return { portalEvent: event, portalSpeaker: null }
+    const submissions = await db.query.eventSession.findMany({
+      where: { eventId: event.id, submitterSpeakerId: speaker.id, kind: 'CONTENT' },
+      orderBy: { createdAt: 'desc' },
+    })
+    return { portalEvent: event, portalSpeaker: { ...speaker, submissions } }
+  })
+
+  .page('/portal/:eventSlug', async ({ loaderData }) => {
+    if (!loaderData.portalEvent) return <PublicUnavailable />
+    return (
+      <main className="min-h-screen bg-background px-4 py-8 sm:px-6 sm:py-12">
+        <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
+          <OpenSessionLogo imageClassName="h-8" />
+          <div className="flex flex-col gap-1">
+            <h1 className="text-2xl font-semibold tracking-tight">Speaker portal</h1>
+            <p className="text-sm text-muted-foreground">{loaderData.portalEvent.name}</p>
+          </div>
+          <div className="flex items-center justify-between border-b border-border pb-3">
+            <h2 className="font-medium">My submissions</h2>
+            <Badge variant="outline" className="px-1.5">Task 6 preview</Badge>
+          </div>
+          {loaderData.portalSpeaker?.submissions.length ? (
+            <div className="flex flex-col divide-y divide-border border-y border-border">
+              {loaderData.portalSpeaker.submissions.map((submission) => (
+                <div key={submission.id} className="flex items-center justify-between gap-4 py-4">
+                  <div className="flex min-w-0 flex-col gap-1">
+                    <span className="truncate font-medium">{submission.title || 'Untitled draft'}</span>
+                    <span className="font-mono text-xs text-muted-foreground">{submission.id}</span>
+                  </div>
+                  <Badge variant={submission.status === 'PENDING' ? 'warning' : 'secondary'} className="px-1.5">
+                    {submission.status.toLowerCase()}
+                  </Badge>
+                </div>
+              ))}
+            </div>
+          ) : <p className="text-sm text-muted-foreground">No submissions yet.</p>}
+        </div>
+      </main>
+    )
+  })
 
   // ── Org dashboard (/org/:orgId/*) ─────────────────────────────────
   // The org id lives in the URL. The wildcard loader guards auth +
@@ -547,6 +756,57 @@ function ComingSoonPage({ title, description }: { title: string; description: st
       <Badge variant="outline" className="w-fit px-1.5">Coming soon</Badge>
     </div>
   )
+}
+
+function PublicUnavailable() {
+  return (
+    <main className="flex min-h-screen items-center justify-center px-6 py-16">
+      <div className="flex max-w-sm flex-col items-center gap-5 text-center text-balance">
+        <OpenSessionLogo imageClassName="h-8" />
+        <h1 className="text-xl font-semibold">This page is not available</h1>
+        <p className="text-sm text-muted-foreground">The event or form may be closed, archived, or no longer public.</p>
+      </div>
+    </main>
+  )
+}
+
+const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+const IMAGE_EXTENSIONS = new Set(['avif', 'gif', 'jpeg', 'jpg', 'png', 'webp'])
+const DOCUMENT_EXTENSIONS = new Set(['doc', 'docx', 'key', 'pdf', 'ppt', 'pptx'])
+const IMAGE_MIME_TYPES = new Set(['image/avif', 'image/gif', 'image/jpeg', 'image/png', 'image/webp'])
+const DOCUMENT_MIME_TYPES = new Set([
+  'application/msword',
+  'application/pdf',
+  'application/vnd.apple.keynote',
+  'application/vnd.ms-powerpoint',
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+])
+
+function isAllowedUpload(
+  file: File,
+  kind: typeof schema.file.$inferInsert.kind,
+): boolean {
+  const extension = file.name.split('.').pop()?.toLowerCase() ?? ''
+  const isImage = IMAGE_EXTENSIONS.has(extension) && IMAGE_MIME_TYPES.has(file.type)
+  const isDocument = DOCUMENT_EXTENSIONS.has(extension) && DOCUMENT_MIME_TYPES.has(file.type)
+  if (kind === 'HEADSHOT' || kind === 'IMAGE') return isImage
+  if (kind === 'SLIDES' || kind === 'DOCUMENT') return isDocument
+  return isImage || isDocument
+}
+
+function sanitizeFileName(fileName: string): string {
+  const leaf = fileName.split(/[\\/]/).pop() ?? 'upload'
+  const sanitized = leaf
+    .normalize('NFKD')
+    .replace(/[^a-zA-Z0-9._-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 160)
+  return sanitized || 'upload'
+}
+
+function fileNotFound() {
+  return new Response('Not found', { status: 404, headers: { 'cache-control': 'no-store' } })
 }
 
 // ── Dashboard shell (sigillo-style chrome) ──────────────────────────

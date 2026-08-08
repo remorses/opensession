@@ -57,6 +57,9 @@ stop, tell the user, and treat the credential as compromised so it can be rotate
 
 Context documents (in this repo):
 
+- `docs/user-flow.md` — who the buyer is, what they want from SessionBoard, and the
+  real end-to-end usage flow (setup → CFP → review → agenda → portal → emails).
+  Read this first when deciding product behavior or prioritization.
 - `docs/implementation-plan.md` — THE plan: routes, sidebar/tabs design, feature matrix
   per page, MDX form engine design, email/ICS design, milestones. Follow it.
 - `docs/database-schema-plan.md` — product research + schema rationale (23 models,

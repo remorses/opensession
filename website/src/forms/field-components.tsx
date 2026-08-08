@@ -28,9 +28,8 @@ export type FormValuesState = {
   /** Pads the participants array up to `count` empty records (used by
    *  <Participants min> so the submitted array matches the rendered rows). */
   ensureParticipantCount: (count: number) => void
-  /** Real upload wiring lands in task 4: uploads the file, returns the
-   *  File row id that FileUpload stores as the field value. */
-  uploadFile?: (file: File) => Promise<string>
+  /** Uploads the file and returns the File row id stored as the field value. */
+  uploadFile?: (file: File, fieldName: string) => Promise<string>
 }
 
 export const FormValuesContext = React.createContext<FormValuesState | null>(null)
@@ -279,7 +278,7 @@ export function FileUpload({
     setUploading(true)
     setError(null)
     try {
-      set(await ctx.uploadFile(file))
+      set(await ctx.uploadFile(file, name))
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed')
     } finally {

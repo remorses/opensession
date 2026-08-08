@@ -9,10 +9,10 @@
 'use client'
 
 import * as React from 'react'
-import { MdastToJsx, type SafeMdxError } from 'safe-mdx'
+import { MdastToJsx, type MyRootContent, type SafeMdxError } from 'safe-mdx'
 import { mdxParse } from 'safe-mdx/parse'
 import { Button } from '../components/ui/button.tsx'
-import type { FieldOption, FieldValue, FormSubmission, ValuesRecord } from './collect-fields.ts'
+import { collectFields, type FieldOption, type FieldValue, type FormSubmission, type ValuesRecord } from './collect-fields.ts'
 import { formComponents } from './components-map.tsx'
 import { FormValuesContext, type FormValuesState } from './field-components.tsx'
 
@@ -29,9 +29,8 @@ export type FormRendererProps = {
   /** When provided, a submit button renders below the form. */
   onSubmit?: (submission: FormSubmission) => void | Promise<void>
   submitLabel?: string
-  /** Wired by task 4 to POST /api/upload; FileUpload stores the returned
-   *  fileId as the field value. Absent → uploads render disabled. */
-  uploadFile?: (file: File) => Promise<string>
+  /** Uploads through POST /api/upload. Absent means uploads render disabled. */
+  uploadFile?: (file: File, fieldName: string) => Promise<string>
 }
 
 export function FormRenderer({
@@ -51,12 +50,12 @@ export function FormRenderer({
   // Keep onChange out of state updaters: fire it after commit via ref diff.
   const lastNotified = React.useRef<FormSubmission | null>(null)
   React.useEffect(() => {
-    const submission = { values, participants }
+    const submission = visibleSubmission({ mdxSource, scope, values, participants })
     if (lastNotified.current && (lastNotified.current.values !== values || lastNotified.current.participants !== participants)) {
       onChange?.(submission)
     }
     lastNotified.current = submission
-  }, [values, participants])
+  }, [values, participants, mdxSource, scope, onChange])
 
   const state = React.useMemo<FormValuesState>(
     () => ({
@@ -77,9 +76,12 @@ export function FormRenderer({
     [values, participants, uploadFile],
   )
 
-  const mdast = React.useMemo(() => {
+  const mdast = React.useMemo<{
+    ast: MyRootContent | null
+    parseError: string | null
+  }>(() => {
     try {
-      return { ast: mdxParse(mdxSource), parseError: null as string | null }
+      return { ast: mdxParse(mdxSource), parseError: null }
     } catch (error) {
       return { ast: null, parseError: error instanceof Error ? error.message : String(error) }
     }
@@ -109,7 +111,7 @@ export function FormRenderer({
     if (!onSubmit) return
     setSubmitting(true)
     try {
-      await onSubmit({ values, participants })
+      await onSubmit(visibleSubmission({ mdxSource, scope, values, participants }))
     } finally {
       setSubmitting(false)
     }
@@ -129,6 +131,26 @@ export function FormRenderer({
       </div>
     </FormValuesContext.Provider>
   )
+}
+
+function visibleSubmission({ mdxSource, scope, values, participants }: {
+  mdxSource: string
+  scope: FormRendererProps['scope']
+  values: ValuesRecord
+  participants: ValuesRecord[]
+}): FormSubmission {
+  const collected = collectFields({
+    mdxSource,
+    scope: { ...scope, values },
+  })
+  const names = new Set(collected.fields.map((field) => field.name))
+  const participantNames = new Set(collected.participantFields.map((field) => field.name))
+  return {
+    values: Object.fromEntries(Object.entries(values).filter(([name]) => names.has(name))),
+    participants: participants.map((record) =>
+      Object.fromEntries(Object.entries(record).filter(([name]) => participantNames.has(name))),
+    ),
+  }
 }
 
 function padTo(prev: ValuesRecord[], count: number): ValuesRecord[] {

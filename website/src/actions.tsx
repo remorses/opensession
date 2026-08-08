@@ -20,6 +20,7 @@ import {
 } from './db.ts'
 import { collectFields } from './forms/collect-fields.ts'
 import { starterCfpTemplate, starterPortalTemplate } from './forms/starter-template.ts'
+import { cfpSubmissionSchema, saveCfpDraft, submitCfpResponse } from './lib/cfp-server.ts'
 
 // ── Org actions (multi-org + team access) ───────────────────────────
 //
@@ -665,4 +666,30 @@ export async function deleteForm(input: z.input<typeof deleteFormSchema>) {
   await db.delete(schema.form).where(orm.eq(schema.form.id, parsed.formId)).limit(1)
   const listSegment = form.purpose === 'PORTAL' ? 'portal-forms' : 'forms'
   throw redirect(`/org/${parsed.orgId}/e/${parsed.eventId}/${listSegment}`)
+}
+
+// ── Public CFP actions ───────────────────────────────────────────────
+
+const cfpActionSchema = z.object({
+  eventId: z.string().min(1),
+  formId: z.string().min(1),
+  responseId: z.string().min(1),
+  submission: cfpSubmissionSchema,
+})
+
+/** Save an incomplete CFP response. Authentication happens before parsing
+ * any caller-controlled identifiers because server actions are public. */
+export async function savePublicCfpDraft(input: z.input<typeof cfpActionSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = cfpActionSchema.parse(input)
+  return saveCfpDraft({ ...parsed, session })
+}
+
+/** Validate and submit the response against its immutable pinned version. */
+export async function submitPublicCfp(input: z.input<typeof cfpActionSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = cfpActionSchema.parse(input)
+  return submitCfpResponse({ ...parsed, session })
 }

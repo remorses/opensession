@@ -93,7 +93,7 @@ export function getBaseUrl(): string {
 
 export type Session = {
   userId: string
-  user: { id: string; name: string; email: string; image: string | null }
+  user: { id: string; name: string; email: string; emailVerified: boolean; image: string | null }
 }
 
 type RequestHeaders = Pick<Request, 'headers'>
@@ -116,6 +116,7 @@ export async function getSession(request: RequestHeaders): Promise<Session | nul
       id: session.user.id,
       name: session.user.name,
       email: session.user.email,
+      emailVerified: session.user.emailVerified,
       image: session.user.image ?? null,
     },
   }

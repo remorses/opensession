@@ -418,6 +418,11 @@ export const formResponse = s.sqliteTable('form_response', {
   s.index('form_response_version_idx').on(table.formVersionId),
   s.index('form_response_speaker_idx').on(table.speakerId),
   s.index('form_response_session_idx').on(table.sessionId),
+  // One editable draft per form and speaker. Once submitted, the row no
+  // longer matches this index and the speaker may start another response.
+  s.uniqueIndex('form_response_active_draft_unique')
+    .on(table.formId, table.speakerId)
+    .where(orm.sql`status = 'DRAFT'`),
   s.check('form_response_status_check', orm.sql`status IN ('DRAFT', 'SUBMITTED')`),
 ])
 

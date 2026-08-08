@@ -51,6 +51,7 @@ export const starterCfpTemplate = dedent`
     <TextField name="speaker.lastName" label="Last name" required maxLength={80} />
     <TextField name="speaker.email" label="Email" required maxLength={200} />
     <RichText name="speaker.bio" label="Bio" maxLength={5000} />
+    <FileUpload name="speaker.headshot" label="Headshot" accept="image/*" />
   </Participants>
 
   </Section>

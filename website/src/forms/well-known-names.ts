@@ -17,6 +17,7 @@ export const sessionWellKnown = {
   description: 'description',
   track: 'trackId',
   format: 'formatId',
+  coverImage: 'coverImageFileId',
 } as const
 
 /** Participant-scoped names → speaker columns. `speaker.headshot` holds the
@@ -38,6 +39,9 @@ export const speakerWellKnown = {
 export type SessionColumn = (typeof sessionWellKnown)[keyof typeof sessionWellKnown]
 export type SpeakerColumn = (typeof speakerWellKnown)[keyof typeof speakerWellKnown]
 
+const sessionColumns = new Map<string, SessionColumn>(Object.entries(sessionWellKnown))
+const speakerColumns = new Map<string, SpeakerColumn>(Object.entries(speakerWellKnown))
+
 export type ExtractedWellKnown = {
   session: Partial<Record<SessionColumn, string>>
   /** One entry per submitted participant, same order. */
@@ -52,25 +56,25 @@ export function extractWellKnown({ values, participants }: FormSubmission): Extr
   const result: ExtractedWellKnown = { session: {}, speakers: [], customValues: [] }
 
   for (const [name, value] of Object.entries(values)) {
-    const column = (sessionWellKnown as Record<string, SessionColumn>)[name]
+    const column = sessionColumns.get(name)
     // Well-known session fields are single-valued; arrays (multi-selects)
     // can never map to a typed column, so they fall through to custom.
     if (column && typeof value === 'string') {
       result.session[column] = value
       continue
     }
-    pushCustom(result, name, value, null)
+    pushCustom({ result, name, value, participantIndex: null })
   }
 
   participants.forEach((record, index) => {
     const speaker: Partial<Record<SpeakerColumn, string>> = {}
     for (const [name, value] of Object.entries(record)) {
-      const column = (speakerWellKnown as Record<string, SpeakerColumn>)[name]
+      const column = speakerColumns.get(name)
       if (column && typeof value === 'string') {
         speaker[column] = value
         continue
       }
-      pushCustom(result, name, value, index)
+      pushCustom({ result, name, value, participantIndex: index })
     }
     result.speakers.push(speaker)
   })
@@ -78,12 +82,12 @@ export function extractWellKnown({ values, participants }: FormSubmission): Extr
   return result
 }
 
-function pushCustom(
-  result: ExtractedWellKnown,
-  name: string,
-  value: string | string[],
-  participantIndex: number | null,
-) {
+function pushCustom({ result, name, value, participantIndex }: {
+  result: ExtractedWellKnown
+  name: string
+  value: string | string[]
+  participantIndex: number | null
+}) {
   const entries = Array.isArray(value) ? value : [value]
   for (const entry of entries) {
     if (entry === '') continue

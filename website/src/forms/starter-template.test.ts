@@ -112,6 +112,15 @@ describe('starterCfpTemplate', () => {
             "required": false,
             "type": "richtext",
           },
+          {
+            "maxLength": undefined,
+            "multiple": undefined,
+            "name": "speaker.headshot",
+            "options": undefined,
+            "participantScope": true,
+            "required": false,
+            "type": "file",
+          },
         ],
         "participants": {
           "max": 3,
