@@ -90,6 +90,7 @@ type EventRow = {
   startsAt: number
   endsAt: number
   description: string | null
+  contactEmail: string | null
 }
 
 function FieldLabel({ children, className }: { children: React.ReactNode; className?: string }) {
@@ -114,6 +115,7 @@ function DetailsTab({ orgId, event }: { orgId: string; event: EventRow }) {
       startsAt: Date.parse(`${String(formData.get('startsAt'))}T00:00:00Z`),
       endsAt: Date.parse(`${String(formData.get('endsAt'))}T23:59:59Z`),
       description: String(formData.get('description') ?? '').trim(),
+      contactEmail: String(formData.get('contactEmail') ?? '').trim(),
     })
     return 'Saved'
   }, null)
@@ -156,6 +158,18 @@ function DetailsTab({ orgId, event }: { orgId: string; event: EventRow }) {
           <FieldLabel>
             Location
             <Input name="location" defaultValue={event.location ?? ''} placeholder="San Francisco, CA" />
+          </FieldLabel>
+          <FieldLabel>
+            Contact email
+            <Input
+              name="contactEmail"
+              type="email"
+              defaultValue={event.contactEmail ?? ''}
+              placeholder="program@yourconference.com"
+            />
+            <span className="text-xs font-normal text-muted-foreground">
+              Speakers reply here. Every email OpenSession sends for this event uses it as Reply-To.
+            </span>
           </FieldLabel>
           <FieldLabel>
             Timezone

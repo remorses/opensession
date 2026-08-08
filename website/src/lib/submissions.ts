@@ -1,6 +1,7 @@
 // Pure session status transitions, queue helpers, status-tab filters, and
 // review aggregation for the Abstracts / Evaluation admin flows.
-// notifiedAt is stamped only after a decision email reaches SENT (Task 7).
+// notifiedAt is stamped by notifyQueue only after the decision email reaches
+// SENT, never at enqueue time — see actions.tsx.
 
 export type SessionStatus =
   | 'DRAFT'

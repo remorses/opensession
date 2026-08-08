@@ -1,6 +1,7 @@
 // Server-side CFP draft and submit workflow. All entry points receive an
 // authenticated session from actions/loaders, then enforce event, form,
 // response, speaker, participant, file, and pinned-version tenancy.
+import { env } from 'cloudflare:workers'
 import * as orm from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
 import * as schema from 'db/schema'
@@ -16,6 +17,7 @@ import {
   getFileFieldNames,
   restoreSubmissionValues,
 } from './cfp-submission.ts'
+import { dedupeKeys, enqueueAndSend, replyToFor } from './emails/send.ts'
 import { linkSpeakerIdentity, normalizeSpeakerEmail } from './speaker-link.ts'
 
 const fieldValueSchema = z.union([
@@ -434,5 +436,42 @@ export async function submitCfpResponse(input: {
     primarySpeakerId: loaded.speaker.id,
     submission,
   })
-  return persistResponse({ loaded, submission, collected, participantSpeakerIds, submitted: true })
+  const result = await persistResponse({
+    loaded,
+    submission,
+    collected,
+    participantSpeakerIds,
+    submitted: true,
+  })
+
+  // Best-effort confirmation. The outbox row is the durable part; if the
+  // immediate send fails the cron retries it. A mail problem must never fail a
+  // submission the speaker already completed.
+  try {
+    await enqueueAndSend({
+      db: loaded.db,
+      eventId: loaded.event.id,
+      toEmail: loaded.speaker.email,
+      speakerId: loaded.speaker.id,
+      sessionId: result.sessionId,
+      dedupeKey: dedupeKeys.submission(result.responseId),
+      replyTo: replyToFor(loaded.event.contactEmail),
+      now: Date.now(),
+      payload: {
+        kind: 'SUBMISSION_CONFIRMATION',
+        context: {
+          eventName: loaded.event.name,
+          eventSlug: loaded.event.slug,
+          appUrl: env.APP_URL,
+          timezone: loaded.event.timezone,
+          recipientName: loaded.speaker.firstName,
+        },
+        data: { sessionId: result.sessionId, sessionTitle: result.title },
+      },
+    })
+  } catch (error) {
+    console.error('submission confirmation email failed', error)
+  }
+
+  return result
 }

@@ -20,6 +20,19 @@
   "r2_buckets": [
     { "binding": "FILES", "bucket_name": "opensession-files" }
   ],
+  // opensession.dev is onboarded to Cloudflare Email Sending, so any local part
+  // @opensession.dev is a legal sender. remote:true makes `vite dev` hit the real
+  // service instead of the local simulator.
+  "send_email": [
+    {
+      "name": "EMAIL",
+      "remote": true,
+      "allowed_sender_addresses": ["notifications@opensession.dev"]
+    }
+  ],
+  // Drains the email outbox, closes forms past closesAt, enqueues reminders,
+  // and GCs unreferenced R2 objects. See src/lib/emails/cron.ts.
+  "triggers": { "crons": ["*/5 * * * *"] },
   // Production serves the real domain. custom_domain creates the DNS record.
   "routes": [{ "pattern": "opensession.dev", "custom_domain": true }],
   "vars": {
@@ -52,6 +65,14 @@
       "r2_buckets": [
         { "binding": "FILES", "bucket_name": "opensession-preview-files" }
       ],
+      "send_email": [
+        {
+          "name": "EMAIL",
+          "remote": true,
+          "allowed_sender_addresses": ["notifications@opensession.dev"]
+        }
+      ],
+      "triggers": { "crons": ["*/5 * * * *"] },
       // Routes ARE inherited — preview must set its own host or it steals
       // opensession.dev from production.
       "routes": [

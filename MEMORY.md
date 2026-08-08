@@ -46,3 +46,15 @@ zod `.default()` in a page `query` schema is NOT applied at runtime — use `.op
 ## safe-mdx cannot evaluate JSX inside expressions
 
 `{cond && <TextField/>}` fails with "visitor JSXElement is not supported". Form MDX conditionals must use the `<Show when={expr}>` component (attribute expressions evaluate fine and re-run per render).
+
+## Cloudflare send_email builder supports attachments
+
+`env.EMAIL.send({ ..., attachments: [{ disposition: 'attachment', filename, type, content }] })` works, so ICS invites need no hand-rolled MIME or `mimetext`. The older `new EmailMessage(from, to, raw)` overload from `cloudflare:email` is only needed for full raw-MIME control.
+
+## Remote bindings can kill the vite dev worker
+
+With `send_email` `remote: true`, the dev worker sometimes dies with `Error: internal error; reference = ...` and the port stops accepting connections. Restart the `opensession-dev` tuistory session; nothing is wrong with the code.
+
+## Fire the cron locally with /cdn-cgi/handler/scheduled
+
+`curl -X POST "http://localhost:8788/cdn-cgi/handler/scheduled?cron=*/5+*+*+*+*"` invokes `scheduled()` under `@cloudflare/vite-plugin`. The default export in `app.tsx` reaches Cloudflare through `spiceflow/cloudflare-entrypoint`, which re-exports it verbatim.

@@ -164,6 +164,10 @@ export const event = s.sqliteTable('event', {
   startsAt: epochMs('starts_at').notNull(),
   endsAt: epochMs('ends_at').notNull(),
   description: s.text('description'),
+  /** Reply-To for every outbound email of this event. Seeded from the
+   *  creator's account email so speaker replies reach a real human; editable
+   *  in Settings → Details. NULL falls back to the platform sender. */
+  contactEmail: s.text('contact_email'),
   logoFileId: s.text('logo_file_id').unique().references((): s.AnySQLiteColumn => file.id, { onDelete: 'set null' }),
   createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
@@ -608,10 +612,18 @@ export const emailMessage = s.sqliteTable('email_message', {
   subject: s.text('subject').notNull(),
   /** Rendered snapshot. */
   bodyHtml: s.text('body_html').notNull(),
+  /** Plain-text alternative, snapshotted alongside bodyHtml. */
+  bodyText: s.text('body_text'),
   /** ICS attachment (null = plain email). REQUEST = invite or update. */
   icsMethod: s.text('ics_method', { enum: ['REQUEST', 'CANCEL'] }),
   /** Snapshotted from Session.icsSequence at enqueue time. */
   icsSequence: s.integer('ics_sequence', { mode: 'number' }),
+  /** Rendered iCalendar snapshot. The outbox row must be self-contained: a
+   *  retry days later has to send the EXACT invite that was enqueued, because
+   *  it carries the SEQUENCE that was snapshotted with it. Regenerating from
+   *  the live session would ship changed times under an old SEQUENCE, which
+   *  calendar clients silently drop. */
+  icsBody: s.text('ics_body'),
   status: s.text('status', { enum: ['QUEUED', 'SENT', 'FAILED'] }).notNull().default('QUEUED'),
   attemptCount: s.integer('attempt_count', { mode: 'number' }).notNull().default(0),
   lastAttemptAt: epochMs('last_attempt_at'),

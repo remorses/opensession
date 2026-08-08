@@ -40,6 +40,7 @@ import {
   restoreCfpEditDraft,
 } from './lib/portal-server.ts'
 import { parsePortalTasksTab } from './lib/portal.ts'
+import { runCron } from './lib/emails/cron.ts'
 import {
   abstractsToCsv,
   aggregateReviewStats,
@@ -1277,12 +1278,45 @@ export const app = new Spiceflow()
       description="Event speakers with profiles, confirmations, and outstanding tasks."
     />
   ))
-  .page('/org/:orgId/e/:eventId/emails', async () => (
-    <ComingSoonPage
-      title="Emails"
-      description="Outbox of every email sent for this event, with retries and reminder schedules."
-    />
-  ))
+  // ── Emails (?tab=all|queued|sent|failed|reminders) ────────────────
+
+  .loader('/org/:orgId/e/:eventId/emails', async ({ params }) => {
+    const db = getDb()
+    const rows = await db.query.emailMessage.findMany({
+      where: { eventId: params.eventId },
+      orderBy: { createdAt: 'desc' },
+      // The outbox grows forever; the admin log only ever needs the recent
+      // tail. Older rows stay queryable in D1 for auditing.
+      limit: 300,
+    })
+    return {
+      emails: rows.map((row) => ({
+        id: row.id,
+        kind: row.kind,
+        toEmail: row.toEmail,
+        subject: row.subject,
+        status: row.status,
+        attemptCount: row.attemptCount,
+        icsMethod: row.icsMethod,
+        errorMessage: row.errorMessage,
+        createdAt: row.createdAt,
+        sentAt: row.sentAt,
+        bodyHtml: row.bodyHtml,
+        bodyText: row.bodyText,
+      })),
+    }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/emails',
+    query: z.object({
+      tab: z.enum(['all', 'queued', 'sent', 'failed', 'reminders']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { EmailsPage } = await import('./components/emails-page.tsx')
+      return <EmailsPage tab={query.tab ?? 'all'} />
+    },
+  })
 
   // ── Event settings (?tab=details|tracks|formats|rooms|team) ───────
 
@@ -1582,8 +1616,18 @@ declare module 'spiceflow/react' {
   }
 }
 
+// spiceflow/cloudflare-entrypoint re-exports this default handler verbatim
+// (`export default entry.default ?? { fetch: handler }`), so `scheduled` here
+// is what Cloudflare invokes for the wrangler.jsonc cron trigger.
 export default {
   async fetch(request: Request): Promise<Response> {
     return app.handle(request)
+  },
+  async scheduled(
+    controller: ScheduledController,
+    _env: Env,
+    ctx: ExecutionContext,
+  ): Promise<void> {
+    ctx.waitUntil(runCron({ now: controller.scheduledTime }))
   },
 } satisfies ExportedHandler<Env>

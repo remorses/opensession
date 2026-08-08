@@ -6,6 +6,7 @@
 // authenticates via getActionRequest() + requireSession/requireOrgAccess.
 'use server'
 
+import { env } from 'cloudflare:workers'
 import { getActionRequest, redirect } from 'spiceflow'
 import { z } from 'zod'
 import * as orm from 'drizzle-orm'
@@ -33,6 +34,12 @@ import {
   submitPortalFormTask as submitPortalFormTaskServer,
   withdrawPortalSubmission as withdrawPortalSubmissionServer,
 } from './lib/portal-server.ts'
+import {
+  dedupeKeys,
+  enqueueAndSend,
+  replyToFor,
+  sendEmailMessage,
+} from './lib/emails/send.ts'
 import { normalizeReviewInput } from './lib/reviews.ts'
 import {
   applyTransition,
@@ -269,7 +276,7 @@ export async function createEvent(input: {
 }) {
   const actionRequest = getActionRequest()
   const parsed = createEventSchema.parse(input)
-  await requireOrgAccess(actionRequest, parsed.orgId)
+  const { session } = await requireOrgAccess(actionRequest, parsed.orgId)
   if (parsed.endsAt <= parsed.startsAt) {
     throw new Error('The event must end after it starts')
   }
@@ -309,6 +316,10 @@ export async function createEvent(input: {
         timezone: parsed.timezone,
         startsAt: parsed.startsAt,
         endsAt: parsed.endsAt,
+        // Reply-To for every mail this event sends. Seeded from the creator so
+        // speaker replies land in a real inbox from day one; editable later in
+        // Settings → Details.
+        contactEmail: session.user.email,
       }),
       db.insert(schema.track).values({
         id: trackId,
@@ -408,6 +419,9 @@ const updateEventSchema = z.object({
   startsAt: z.number().int().positive(),
   endsAt: z.number().int().positive(),
   description: z.string().trim().max(5000),
+  /** Reply-To for every outbound email of this event. Empty clears it and
+   *  falls back to the platform sender. */
+  contactEmail: z.union([z.literal(''), z.email().max(320)]),
 })
 
 /** Update the event details (Settings > Details). Empty optional strings
@@ -434,6 +448,7 @@ export async function updateEvent(input: z.input<typeof updateEventSchema>) {
         startsAt: parsed.startsAt,
         endsAt: parsed.endsAt,
         description: parsed.description || null,
+        contactEmail: parsed.contactEmail.trim() || null,
         updatedAt: Date.now(),
       })
       .where(orm.eq(schema.event.id, parsed.eventId))
@@ -1032,8 +1047,9 @@ const notifyQueueSchema = z.object({
 })
 
 /** Finalise accept or decline queue: status → ACCEPTED/DECLINED, task
- *  auto-assign on accept, enqueue DECISION_* EmailMessage rows (QUEUED).
- *  notifiedAt stays null until Task 7 marks the outbox SENT. */
+ *  auto-assign on accept, and send the DECISION_* mail through the outbox.
+ *  notifiedAt is stamped only for sessions whose decision mail reached SENT,
+ *  so the Abstracts "Notified" column never lies about delivery. */
 export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
   const actionRequest = getActionRequest()
   const parsed = notifyQueueSchema.parse(input)
@@ -1093,16 +1109,30 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
   await db.batch(updates as [any, ...any[]])
 
   let emailsQueued = 0
+  let emailsSent = 0
   const taskDefs =
     parsed.queue === 'accept'
       ? await db.query.taskDefinition.findMany({ where: { eventId: parsed.eventId } })
       : []
+  const taskDefById = new Map(taskDefs.map((def) => [def.id, def]))
+  const replyTo = replyToFor(event.contactEmail)
+  const context = {
+    eventName: event.name,
+    eventSlug: event.slug,
+    appUrl: env.APP_URL,
+    timezone: event.timezone,
+  }
+  /** notifiedAt means "the speaker actually heard from us", so it is stamped
+   *  only for sessions whose decision mail reached SENT — never at enqueue. */
+  const notifiedSessionIds: string[] = []
 
   for (const patch of planned) {
     const row = rows.find((item) => item.id === patch.id)
     if (!row) continue
+    const title = row.title?.trim() || 'your submission'
+
     if (patch.status === 'ACCEPTED' && taskDefs.length > 0) {
-      await insertAssignmentsIdempotent({
+      const created = await insertAssignmentsIdempotent({
         db,
         rows: buildAssignmentsForAcceptance({
           taskDefs: taskDefs.map((def) => ({
@@ -1116,43 +1146,115 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
           now,
         }),
       })
+      // Only assignments this call actually created get a "new task" mail;
+      // re-running Notify must not re-notify already-assigned speakers.
+      for (const assignment of created) {
+        const speaker = row.participants.find(
+          (part) => part.speakerId === assignment.speakerId,
+        )?.speaker
+        const definition = taskDefById.get(assignment.taskDefinitionId)
+        if (!speaker?.email || !definition) continue
+        const queued = await enqueueAndSend({
+          db,
+          eventId: parsed.eventId,
+          toEmail: speaker.email,
+          speakerId: speaker.id,
+          sessionId: assignment.sessionId ?? null,
+          dedupeKey: dedupeKeys.taskAssigned(assignment.id),
+          replyTo,
+          now,
+          payload: {
+            kind: 'TASK_ASSIGNED',
+            context: { ...context, recipientName: speaker.firstName },
+            data: {
+              assignmentId: assignment.id,
+              taskTitle: definition.title,
+              dueAt: assignment.dueAt ?? null,
+              sessionTitle: assignment.sessionId ? title : null,
+            },
+          },
+        })
+        if (queued.inserted) emailsQueued += 1
+        if (queued.sent) emailsSent += 1
+      }
     }
+
     const kind = patch.status === 'ACCEPTED' ? 'DECISION_ACCEPTED' : 'DECISION_DECLINED'
-    const title = row.title?.trim() || 'your submission'
+    let decisionDelivered = false
     for (const part of row.participants) {
       const speaker = part.speaker
       if (!speaker?.email) continue
-      const dedupeKey = `decision:${row.id}:${speaker.id}`
-      const subject =
-        kind === 'DECISION_ACCEPTED'
-          ? `Accepted: ${title} — ${event.name}`
-          : `Update on ${title} — ${event.name}`
-      const bodyHtml =
-        kind === 'DECISION_ACCEPTED'
-          ? `<p>Your submission <strong>${escapeHtml(title)}</strong> was accepted for ${escapeHtml(event.name)}.</p>`
-          : `<p>Your submission <strong>${escapeHtml(title)}</strong> was not selected for ${escapeHtml(event.name)}.</p>`
-      try {
-        await db
-          .insert(schema.emailMessage)
-          .values({
-            eventId: parsed.eventId,
-            kind,
-            dedupeKey,
-            toEmail: speaker.email,
-            speakerId: speaker.id,
-            sessionId: row.id,
-            subject,
-            bodyHtml,
-            status: 'QUEUED',
-          })
-          .onConflictDoNothing({ target: schema.emailMessage.dedupeKey })
-        emailsQueued += 1
-      } catch {
-        // Dedupe races or missing email constraints — skip, status still updated.
+      const outcome = await enqueueAndSend({
+        db,
+        eventId: parsed.eventId,
+        toEmail: speaker.email,
+        speakerId: speaker.id,
+        sessionId: row.id,
+        dedupeKey: dedupeKeys.decision(row.id, speaker.id),
+        replyTo,
+        now,
+        payload: {
+          kind,
+          context: { ...context, recipientName: speaker.firstName },
+          data: { sessionId: row.id, sessionTitle: title },
+        },
+      })
+      if (outcome.inserted) emailsQueued += 1
+      if (outcome.sent) {
+        emailsSent += 1
+        decisionDelivered = true
       }
     }
+    if (decisionDelivered) notifiedSessionIds.push(row.id)
   }
-  return { updated: planned.length, emailsQueued }
+
+  if (notifiedSessionIds.length > 0) {
+    await db
+      .update(schema.eventSession)
+      .set({ notifiedAt: now, updatedAt: now })
+      .where(
+        orm.and(
+          orm.inArray(schema.eventSession.id, notifiedSessionIds),
+          orm.eq(schema.eventSession.eventId, parsed.eventId),
+        ),
+      )
+  }
+
+  return { updated: planned.length, emailsQueued, emailsSent }
+}
+
+const retryEmailSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  emailId: z.string().min(1),
+})
+
+/** Requeue one FAILED outbox row and attempt it immediately (Emails > Failed).
+ *  The attempt counter is reset because a human decided the cause is fixed. */
+export async function retryEmail(input: z.input<typeof retryEmailSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = retryEmailSchema.parse(input)
+  const { db, event } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  // Tenancy: the row must belong to THIS event, not just exist.
+  const row = await db.query.emailMessage.findFirst({
+    where: { id: parsed.emailId, eventId: parsed.eventId },
+  })
+  if (!row) throw new Error('Email not found')
+  if (row.status === 'SENT') return { retried: false, sent: true }
+
+  // Send this exact row rather than draining the queue: the organizer clicked
+  // retry on one message and expects feedback about that one.
+  const outcome = await sendEmailMessage({
+    db,
+    row: { ...row, attemptCount: 0 },
+    replyTo: replyToFor(event.contactEmail),
+    now: Date.now(),
+  })
+  return { retried: true, sent: outcome.status === 'SENT' }
 }
 
 async function assignTasksForAcceptedSession({
@@ -1192,29 +1294,27 @@ async function insertAssignmentsIdempotent({
 }: {
   db: ReturnType<typeof getDb>
   rows: PlannedTaskAssignment[]
-}) {
-  if (rows.length === 0) return
+}): Promise<Array<typeof schema.taskAssignment.$inferSelect>> {
+  if (rows.length === 0) return []
   // Partial unique indexes (speaker-only vs session×speaker) make plain
   // target arrays awkward — bare onConflictDoNothing lets SQLite match
-  // whichever partial unique fires.
+  // whichever partial unique fires. `returning()` yields ONLY the rows this
+  // call inserted, which is how the caller knows who to email.
   const statements = rows.map((row) =>
-    db.insert(schema.taskAssignment).values(row).onConflictDoNothing(),
+    db.insert(schema.taskAssignment).values(row).onConflictDoNothing().returning(),
   )
   // Cap batch size to avoid huge transactions on multi-speaker events.
   const CHUNK = 40
+  const created: Array<typeof schema.taskAssignment.$inferSelect> = []
   for (let i = 0; i < statements.length; i += CHUNK) {
     const chunk = statements.slice(i, i + CHUNK)
     if (chunk.length === 0) continue
-    await db.batch(chunk as [any, ...any[]])
+    const results = await db.batch(chunk as [any, ...any[]])
+    for (const result of results) {
+      if (Array.isArray(result)) created.push(...result)
+    }
   }
-}
-
-function escapeHtml(value: string): string {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
+  return created
 }
 
 const upsertReviewSchema = z.object({
