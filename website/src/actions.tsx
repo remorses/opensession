@@ -18,6 +18,9 @@ import {
   ensurePersonalOrg,
   getDb,
 } from './db.ts'
+import { collectFields, libraryOptions } from './forms/collect-fields.ts'
+import { starterCfpTemplate } from './forms/starter-template.ts'
+import { validateSubmission } from './forms/validate.ts'
 
 // ── Org actions (multi-org + team access) ───────────────────────────
 //
@@ -445,6 +448,35 @@ export async function deleteFormat(input: z.input<typeof deleteFormatSchema>) {
     db.delete(schema.format).where(orm.eq(schema.format.id, parsed.formatId)).limit(1),
   ] as const)
   return { formatId: parsed.formatId }
+}
+
+// ── Form engine demo action ─────────────────────────────────────────
+// TEMPORARY demo — replaced by task 3/4 (real form CRUD + submit flow).
+// Runs the server-side collector + validation on the starter CFP template
+// with the event's real tracks/formats, returning the typed result (no
+// throw on validation failure — the demo page displays it).
+
+const fieldValueSchema = z.union([z.string(), z.array(z.string())])
+const validateFormDemoSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  values: z.record(z.string(), fieldValueSchema),
+  participants: z.array(z.record(z.string(), fieldValueSchema)),
+})
+
+export async function validateFormDemo(input: z.input<typeof validateFormDemoSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = validateFormDemoSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const [tracks, formats] = await db.batch([
+    db.query.track.findMany({ where: { eventId: parsed.eventId }, columns: { id: true, name: true } }),
+    db.query.format.findMany({ where: { eventId: parsed.eventId }, columns: { id: true, name: true } }),
+  ] as const)
+  const collected = collectFields({
+    mdxSource: starterCfpTemplate,
+    scope: { values: parsed.values, tracks: libraryOptions(tracks), formats: libraryOptions(formats) },
+  })
+  return validateSubmission({ collected, values: parsed.values, participants: parsed.participants })
 }
 
 const createRoomSchema = z.object({

@@ -38,3 +38,11 @@ the kimaki project mapping) and the sigillo org `opensessions` (the CLI has no
 ## Spiceflow query-param tabs: two gotchas
 
 zod `.default()` in a page `query` schema is NOT applied at runtime — use `.optional()` and normalize with `?? 'default'` in the handler. And `router.href('/org/:orgId/e/:eventId/settings', {...})` breaks TS for multi-param paths that also have a query schema (params infer as never); use the template-literal form `router.href(\`/org/${orgId}/e/${eventId}/settings\`, { tab })` instead.
+
+## Playwriter a11y snapshots go stale on the dashboard
+
+`snapshot()` kept returning an old page's accessibility tree after full `goto()` navigations on the dashboard (showed the previous route's content). Verify page state with `page.evaluate(() => document.querySelector('main').innerText)` instead; the DOM is always correct.
+
+## safe-mdx cannot evaluate JSX inside expressions
+
+`{cond && <TextField/>}` fails with "visitor JSXElement is not supported". Form MDX conditionals must use the `<Show when={expr}>` component (attribute expressions evaluate fine and re-run per render).

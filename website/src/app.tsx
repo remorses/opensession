@@ -360,12 +360,11 @@ export const app = new Spiceflow()
       description="Every file uploaded to this event: headshots, slides, cover images, and logos."
     />
   ))
-  .page('/org/:orgId/e/:eventId/forms', async () => (
-    <ComingSoonPage
-      title="Forms"
-      description="CFP forms with an MDX editor, immutable versions, and submission counts."
-    />
-  ))
+  // TEMPORARY demo — replaced by task 3 (real forms list + MDX editor).
+  .page('/org/:orgId/e/:eventId/forms', async () => {
+    const { FormsDemoPage } = await import('./forms/form-demo.tsx')
+    return <FormsDemoPage />
+  })
   .page('/org/:orgId/e/:eventId/evaluation', async () => (
     <ComingSoonPage
       title="Evaluation"
