@@ -1,0 +1,232 @@
+---
+title: SessionBoard clone — product research & database schema plan
+description: >
+  Research on sessionboard.com (use case, workflow, pricing, competitors, API entities)
+  and the design plan for the normalized SQLite schema in ../schema.prisma.
+---
+
+# What SessionBoard is
+
+SessionBoard (sessionboard.com) is a **speaker & event content management platform**. It is the
+"program layer" of an event: it does NOT do registration/ticketing. It manages everything about
+the **content** of a conference:
+
+- **Call for papers (CFP)**: custom submission forms with conditional logic where potential
+  speakers submit session ideas (abstracts)
+- **Abstract management**: review queues, multi-round evaluation plans with scorecards,
+  reviewer assignments, accept/decline workflows
+- **Speaker management**: a self-service speaker portal where speakers maintain bios,
+  headshots, slides, and complete onboarding tasks
+- **Agenda building**: drag-and-drop scheduling into rooms/tracks/time slots with automatic
+  conflict detection, draft workspaces, and commit-to-live
+- **Communications**: templated emails, reminders, calendar invites
+- **Embeds**: auto-updating agenda / speaker gallery widgets for the event website
+
+## Primary use case & user workflow
+
+Two user populations:
+
+```
+  ORGANIZER (admin)                                SUBMITTER / SPEAKER (portal)
+  ─────────────────                                ────────────────────────────
+  1. Create event (dates, tz, rooms,               1. Open public CFP link
+     tracks, formats, tags)                        2. Create account (portal auth)
+  2. Build submission form                         3. Fill multi-step form:
+     (questions, conditional logic,                   Welcome → Account → Submission
+      participant roles, deadlines)         ◄─────    → Participants → Review
+  3. Publish CFP link                               4. Receive confirmation email
+  4. Review abstracts arrive as "Pending"           5. Track status in speaker portal,
+  5. Assign reviewers, run evaluation                  edit own submission, upload
+     rounds, score with scorecards                     headshot, update bio
+  6. Move to Accept Queue / Decline Queue           6. On acceptance: get decision
+  7. Bulk accept → decision emails sent                email + calendar invite
+     (notifiedAt stamped)                          7. Complete portal tasks
+  8. Accepted abstracts become sessions                (upload slides, fill forms,
+  9. Build agenda in a draft workspace:                confirm participation)
+     place sessions in rooms/times,
+     resolve conflicts, commit draft
+ 10. Dashboard: track which speakers
+     still have outstanding tasks
+ 11. Embed agenda/speaker gallery on
+     the event website
+```
+
+## Pricing
+
+- **Professional**: from **$249/month** (speaker/sponsor/exhibitor management, email+SMS
+  templates & tracking, AI tools, 15+ integrations, roles & permissions)
+- **Enterprise**: custom pricing (SSO, custom portal/embed styling, custom email domain,
+  document generation). Real-world enterprise contracts run **>$40k/year** (per the
+  competition brief), priced by submission volume, committee seats, and tracks.
+
+## Competitors
+
+| Competitor | Positioning |
+|---|---|
+| **Sessionize** | Closest direct competitor. CFP + agenda for tech conferences. $499/event, free for community events |
+| **Oxford Abstracts** | Abstract-only specialist, per-event pricing, free tier |
+| **Cvent (Abstract Mgmt)** | Enterprise suite; SessionBoard positions as the deeper "program layer" beside Cvent registration |
+| **Cadmium** | Enterprise abstract/education management for associations |
+| **Ex Ordo** | Academic conference abstract management |
+| **Sched** | Fast agenda/speaker-list publishing for community conferences |
+| **OpenCFP / Papercall / EasyChair** | Simpler open-source or academic CFP tools |
+
+## Primary features (from brief + screenshots)
+
+1. Custom CFP submission forms with **conditional logic** and **category-based routing**
+2. Self-service **speaker portal** (bios, headshots, slides, documents)
+3. Automated templated **communications** incl. reminders and **calendar invites** (ICS)
+4. Submission **evaluation & scoring** workflows (round-based plans, scorecards, reviewer pools)
+5. Drag-and-drop **agenda building** with conflict detection (list/day/week/track/room views)
+6. Real-time **dashboard** of outstanding speaker onboarding tasks
+7. Embeddable **speaker gallery & schedule** widgets
+
+## The public API — core entities
+
+Base: `https://public-api.sessionboard.com` (API key or OAuth bearer, scoped:
+`write:sessions`, `write:contacts`, `write:events`, ...). Key entities from the OpenAPI spec:
+
+- **Event**: id, name, timezone, feature flags
+- **Session**: THE central entity. One table for both abstracts and program sessions via
+  `is_abstract: boolean`. Fields: title, description, `status` enum
+  (`accepted | accept_queue | pending | decline_queue | declined`), custom_status,
+  starts_at/ends_at, is_public, capacity, ceu_credits, client_session_id,
+  `custom_fields[]`, speakers/chairpersons/moderators/participants, sponsors, exhibitors,
+  tags, language, track, level, format, room, subsessions, composition (merged abstracts →
+  session)
+- **Contact** (= speaker): name, email, photo_url, company, title, about/bio, phones,
+  address, social urls, honorific/salutation/pronouns/gender, speaker_score, speaker_fee,
+  custom_fields
+- **ParticipantRole**: per-event configurable roles with `core_role` enum
+  (`speaker | chairperson | moderator`)
+- **Event settings/library**: Field (custom field definitions per module:
+  session/account/contact), Tag, Language, Format, Track (name, color, order), Level,
+  Room (name, capacity, order), custom SessionStatus
+- **Agenda planning**: AgendaDraft (`draft | committed`), DraftSession (placement =
+  draft_id + session_id + starts_at/ends_at + room_id), changes preview, commit;
+  EventRule (scheduling constraint, opaque config), Persona (attendee type for schedule
+  evaluation)
+- **CustomFieldValue**: id, internal_name, type, value (string) — attached to
+  sessions/contacts/sponsors/exhibitors
+- Not exposed in the public API (admin-app-only): Forms, Evaluations, Tasks, Emails,
+  Portal — we reverse-engineered those from the app screenshots.
+
+# Schema design decisions
+
+The full schema is in [`../schema.prisma`](../schema.prisma). It is the **design source of
+truth**; the implementation will translate it 1:1 to drizzle (SQLite text-enum columns),
+since Prisma does not support native enums on SQLite.
+
+## Scope
+
+In scope: events, library (tracks/formats/levels/tags/rooms/roles/custom fields), forms
+(builder + conditional logic + routing), submissions (abstracts→sessions), evaluation
+(plans/rounds/scorecards/reviews), agenda (drafts/placements/rules/conflict waivers),
+speaker portal (speakers, tasks, file requests, files), emails (templates, reminder rules,
+send log, ICS), embeds. Out of scope (per brief): CRM, CMS pages, payments, marketing,
+transcriptions/recordings, sponsors/exhibitors.
+
+## Key decisions
+
+1. **Auth = BetterAuth for BOTH populations.** One `User` table serves organizers and
+   submitters. Organizers get `OrgMember` rows (BetterAuth organization plugin) and
+   `EventMember` rows (per-event role incl. `REVIEWER`). Submitters get a `Speaker` row
+   per event. `Speaker.userId` is nullable: a submitter can add co-speakers by email who
+   have never logged in; when that person later signs in (magic link to the same email),
+   the Speaker row links to their User.
+
+2. **One `Session` table for abstract AND session** — mirrors the real API
+   (`is_abstract`), modeled as `stage: ABSTRACT | SESSION`. Acceptance is a state
+   transition, not a copy: `status → ACCEPTED`, then promotion `stage → SESSION`. This
+   avoids duplicating the ~30 shared columns and keeps history (form answers, reviews)
+   attached to a single row. Merge/composition of multiple abstracts is intentionally
+   dropped (enterprise feature the brief does not need).
+
+3. **Forms are fully normalized, no JSON.**
+   - `FieldDefinition` is an event-level field library (system + custom fields targeting
+     `SUBMISSION` or `SPEAKER`). Form questions **bind** to field definitions (exactly
+     what the app does — the "+ Add Field" picker lists submission fields).
+   - Dropdown options either come from a typed source (`optionSource: TRACKS | FORMATS |
+     LEVELS | LANGUAGES | TAGS`) or from `FieldOption` rows (`CUSTOM`). This is how
+     "Track" questions route into agenda tracks with zero duplication.
+   - **Conditional logic**: `FormLogicRule` (target question, action `SHOW/HIDE/REQUIRE`,
+     match ALL/ANY) + `FormLogicCondition` rows (source question, operator, compared
+     value/option). Pure relational, evaluable client-side and server-side.
+   - **Category routing**: `FormRoutingRule` — when a given option is selected on a given
+     question, auto-assign track and/or evaluation plan to the created submission.
+   - Cross-field combined character limits: `FormValidationRule` + join to questions.
+
+4. **Two layers of answer storage.**
+   - `FormResponse` + `Answer` (+ `AnswerOption` for selects) = the immutable record of
+     what was submitted through which form. `Answer.subjectSpeakerId` distinguishes
+     per-participant answers on multi-speaker submissions.
+   - Canonical current values live on the entities: typed columns on `Session`/`Speaker`
+     for system fields, `SessionFieldValue`/`SpeakerFieldValue` for custom fields.
+     On submit, answers are copied to entity values; admins and portal edits then mutate
+     entity values directly. This matches the app (Add Abstract drawer edits entity
+     fields with no form).
+
+5. **Evaluation is round-based** (matches "Evaluation 2.0"): `EvaluationPlan` →
+   `EvaluationRound` (open/close dates, anonymization) → `ScorecardField` (rating with
+   min/max/weight, text, dropdown, yes/no) → `ReviewAssignment` (reviewer × submission ×
+   round, with COI status) → `ReviewScore` per scorecard field. `RoundSession` tracks
+   which submissions advance between rounds.
+
+6. **Agenda = live schedule on `Session` + draft workspaces.** `Session.roomId/startsAt/
+   endsAt` is the live schedule. `AgendaDraft` + `DraftPlacement` stage changes; commit
+   copies placements onto sessions (exactly the public API model). Conflicts
+   (speaker double-booked, room overlap, rule violations) are **computed, never stored** —
+   only `ConflictWaiver` rows persist deliberate acknowledgements. `SchedulingRule` is a
+   typed enum + scoped int value instead of SessionBoard's opaque JSON config.
+
+7. **Portal work items**: `TaskDefinition` targets `SPEAKER` or `SUBMISSION` and can wrap
+   a portal `Form` or a `FileRequest` (source enum `MANUAL | FORM | FILE_REQUEST`).
+   `TaskAssignment` is the per-speaker/per-session instance with status + due date —
+   this feeds the "outstanding onboarding tasks" dashboard directly.
+
+8. **Emails**: `EmailTemplate` keyed by purpose enum (confirmation, decision accepted/
+   declined, task reminder, draft reminder, schedule/ICS invite), `ReminderRule`
+   (trigger + days offset), `EmailMessage` send log with status and entity links.
+   `Session.icsSequence` supports ICS `SEQUENCE` bumps when a scheduled session moves.
+
+9. **Enums over booleans everywhere** (statuses: form, submission, round, assignment,
+   task, email, embed...). The few remaining booleans are true binary configuration
+   toggles (e.g. `collectParticipants`).
+
+## State machines
+
+```
+Submission (Session.status):
+
+                  submitter          admin/routing            admin decision
+  ┌───────┐ submit ┌─────────┐   ┌──────────────┐  accept  ┌──────────┐
+  │ DRAFT │ ─────► │ PENDING │ ─►│ ACCEPT_QUEUE │ ───────► │ ACCEPTED │─► stage=SESSION
+  └───────┘        └─────────┘   └──────────────┘  (email, └──────────┘   → schedulable
+      │                 │  │                        notifiedAt)
+      │                 │  └─────►┌───────────────┐ decline ┌──────────┐
+      │                 │         │ DECLINE_QUEUE │ ──────► │ DECLINED │
+      │                 │         └───────────────┘ (email) └──────────┘
+      └────────────── speaker withdraws ──────────────────► WITHDRAWN
+
+Form:        DRAFT → OPEN → CLOSED (auto at closesAt, draft reminders before)
+AgendaDraft: OPEN → COMMITTED (placements copied to sessions) | DISCARDED
+Round:       PENDING → OPEN → CLOSED; RoundSession outcome PENDING → ADVANCED | REJECTED
+Assignment:  PENDING → IN_PROGRESS → COMPLETED (or DECLINED / CONFLICT_OF_INTEREST)
+Task:        NOT_STARTED → IN_PROGRESS → SUBMITTED → COMPLETED (OVERDUE derived from dueAt)
+Email:       QUEUED → SENT | FAILED
+```
+
+## Gap-filling assumptions
+
+- Form editing is in-place (no version snapshots); answers reference `FieldDefinition`
+  so history survives label changes. SessionBoard's "V2" badge is a platform version, not
+  per-form versioning.
+- Conflict detection algorithm: overlap when two placements intersect in time AND share a
+  room, or share a participant, or violate an enabled `SchedulingRule`. Personas
+  (attendee-type schedule scoring) are skipped — the brief crossed out AI review and
+  doesn't need schedule scoring.
+- File storage is object storage; the `File` row stores `storageKey`, never bytes.
+- Decision emails: bulk "notify" action sends per-submission decision emails and stamps
+  `Session.notifiedAt` (matches the "Notified" column in the abstracts table).
+- Submission limits: event-level default (`Event.submissionLimitPerUser`, default 3) with
+  optional per-form override (`Form.submissionLimit`), counting drafts + submitted.

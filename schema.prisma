@@ -1,0 +1,1555 @@
+// ─────────────────────────────────────────────────────────────────────────────
+// OpenSessions — SessionBoard clone. Database schema (design source of truth).
+//
+// Target: SQLite. NOTE: Prisma does not support native enums on SQLite; this
+// file is the design artifact. The implementation translates 1:1 to drizzle
+// with `text('col', { enum: [...] })` columns. Enum names/values are final.
+//
+// Scope: events, form builder (conditional logic + routing), submissions
+// (abstract → session lifecycle), evaluation (rounds/scorecards/reviews),
+// agenda (drafts/placements/rules/conflict waivers), speaker portal (tasks,
+// file requests, files), emails (templates/reminders/log/ICS), embeds.
+// Out of scope per brief: CRM, CMS pages, payments, marketing, sponsors.
+// ─────────────────────────────────────────────────────────────────────────────
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// AUTH (BetterAuth) — one User table for BOTH organizers and submitters/speakers.
+// Organizers get OrgMember + EventMember rows; submitters get Speaker rows.
+// BetterAuth manages User/AuthSession/AuthAccount/Verification + org plugin.
+// ═════════════════════════════════════════════════════════════════════════════
+
+model User {
+  id            String   @id @default(cuid())
+  name          String
+  email         String   @unique
+  emailVerified Boolean  @default(false)
+  image         String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  authSessions      AuthSession[]
+  authAccounts      AuthAccount[]
+  orgMemberships    OrgMember[]
+  eventMemberships  EventMember[]
+  speakerIdentities Speaker[] // linked speaker rows across events
+  submissions       Session[] @relation("SubmittedBy")
+  reviewAssignments ReviewAssignment[]
+  formNotifications FormNotificationRecipient[]
+}
+
+model AuthSession {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([userId])
+}
+
+model AuthAccount {
+  id                    String    @id @default(cuid())
+  userId                String
+  user                  User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  accountId             String // provider account id
+  providerId            String // "credential" | "google" | "magic-link" | ...
+  accessToken           String?
+  refreshToken          String?
+  accessTokenExpiresAt  DateTime?
+  refreshTokenExpiresAt DateTime?
+  scope                 String?
+  idToken               String?
+  password              String? // hashed, for credential provider
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+
+  @@index([userId])
+}
+
+model Verification {
+  id         String   @id @default(cuid())
+  identifier String
+  value      String
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@index([identifier])
+}
+
+// BetterAuth organization plugin — the tenant. An org owns events.
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  logo      String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members     OrgMember[]
+  invitations OrgInvitation[]
+  events      Event[]
+}
+
+enum OrgRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model OrgMember {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  userId         String
+  user           User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role           OrgRole      @default(MEMBER)
+  createdAt      DateTime     @default(now())
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+}
+
+enum InvitationStatus {
+  PENDING
+  ACCEPTED
+  REJECTED
+  CANCELED
+}
+
+model OrgInvitation {
+  id             String           @id @default(cuid())
+  organizationId String
+  organization   Organization     @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  email          String
+  role           OrgRole          @default(MEMBER)
+  status         InvitationStatus @default(PENDING)
+  inviterId      String
+  expiresAt      DateTime
+  createdAt      DateTime         @default(now())
+
+  @@index([organizationId])
+  @@index([email])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EVENT + per-event team
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum EventStatus {
+  DRAFT
+  ACTIVE
+  ARCHIVED
+}
+
+model Event {
+  id             String       @id @default(cuid())
+  organizationId String
+  organization   Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+
+  name        String
+  slug        String      @unique // public CFP/portal/embed URLs
+  status      EventStatus @default(DRAFT)
+  eventType   String? // "Conference", "Summit", ...
+  websiteUrl  String?
+  location    String?
+  timezone    String // IANA, e.g. "America/Los_Angeles" — agenda renders in this tz
+  startsAt    DateTime
+  endsAt      DateTime
+  description String?
+  logoFileId       String? @unique
+  logoFile         File?   @relation("EventLogo", fields: [logoFileId], references: [id])
+  backgroundFileId String? @unique
+  backgroundFile   File?   @relation("EventBackground", fields: [backgroundFileId], references: [id])
+
+  // Event-level default; Form.submissionLimit overrides per form. Counts drafts too.
+  submissionLimitPerUser Int @default(3)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  members          EventMember[]
+  tracks           Track[]
+  formats          Format[]
+  levels           Level[]
+  languages        Language[]
+  tags             Tag[]
+  rooms            Room[]
+  participantRoles ParticipantRole[]
+  fieldDefinitions FieldDefinition[]
+  forms            Form[]
+  speakers         Speaker[]
+  sessions         Session[]
+  evaluationPlans  EvaluationPlan[]
+  agendaDrafts     AgendaDraft[]
+  schedulingRules  SchedulingRule[]
+  conflictWaivers  ConflictWaiver[]
+  taskDefinitions  TaskDefinition[]
+  fileRequests     FileRequest[]
+  files            File[]
+  emailTemplates   EmailTemplate[]
+  reminderRules    ReminderRule[]
+  emailMessages    EmailMessage[]
+  embeds           Embed[]
+
+  @@index([organizationId])
+}
+
+enum EventRole {
+  ORGANIZER // full event admin
+  REVIEWER  // can only see/score assigned submissions
+}
+
+model EventMember {
+  id        String    @id @default(cuid())
+  eventId   String
+  event     Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role      EventRole @default(ORGANIZER)
+  createdAt DateTime  @default(now())
+
+  @@unique([eventId, userId])
+  @@index([userId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EVENT LIBRARY — option sources for dropdowns, agenda dimensions, roles,
+// and the custom-field catalog. Mirrors SessionBoard "Settings > Library".
+// ═════════════════════════════════════════════════════════════════════════════
+
+model Track {
+  id        String   @id @default(cuid())
+  eventId   String
+  event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name      String
+  color     String // hex, used by agenda + embeds
+  sortOrder Int      @default(0)
+  createdAt DateTime @default(now())
+
+  sessions     Session[]
+  routingRules FormRoutingRule[]
+  embedFilters EmbedFilter[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+model Format {
+  id        String @id @default(cuid())
+  eventId   String
+  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name      String // "Talk", "Workshop", "Panel", "Keynote", "Lightning"
+  sortOrder Int    @default(0)
+
+  sessions     Session[]
+  embedFilters EmbedFilter[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+model Level {
+  id        String @id @default(cuid())
+  eventId   String
+  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name      String // "Beginner", "Intermediate", "Advanced"
+  sortOrder Int    @default(0)
+
+  sessions Session[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+model Language {
+  id        String @id @default(cuid())
+  eventId   String
+  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int    @default(0)
+
+  sessions Session[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+model Tag {
+  id        String @id @default(cuid())
+  eventId   String
+  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name      String
+  sortOrder Int    @default(0)
+
+  sessionTags  SessionTag[]
+  routingRules FormRoutingRule[]
+  embedFilters EmbedFilter[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+model Room {
+  id        String @id @default(cuid())
+  eventId   String
+  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name      String // "Main Stage", "Hall A"
+  capacity  Int?
+  sortOrder Int    @default(0)
+
+  sessions        Session[]
+  draftPlacements DraftPlacement[]
+  schedulingRules SchedulingRule[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+enum CoreRole {
+  SPEAKER
+  CHAIRPERSON
+  MODERATOR
+}
+
+// Per-event configurable participant roles ("Speakers", "Unconfirmed Speakers"...)
+// each mapped to a core behavior.
+model ParticipantRole {
+  id         String   @id @default(cuid())
+  eventId    String
+  event      Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name       String // singular label
+  namePlural String
+  coreRole   CoreRole @default(SPEAKER)
+  sortOrder  Int      @default(0)
+
+  formRoles    FormParticipantRole[]
+  participants SessionParticipant[]
+
+  @@unique([eventId, name])
+  @@index([eventId])
+}
+
+// ─── Custom field catalog ────────────────────────────────────────────────────
+// Field definitions live at the event level and target an entity type.
+// System fields (Title, Description, First Name, Email...) exist as rows too,
+// marked SYSTEM + a systemKey mapping to a typed column on Session/Speaker.
+// Form questions BIND to these definitions (like the app's "+ Add Field" picker).
+
+enum FieldTarget {
+  SUBMISSION // stored on Session / SessionFieldValue
+  SPEAKER    // stored on Speaker / SpeakerFieldValue
+}
+
+enum FieldSource {
+  SYSTEM // maps to a typed entity column via systemKey; locked in forms
+  CUSTOM // stored in SessionFieldValue / SpeakerFieldValue
+}
+
+enum FieldType {
+  TEXT
+  TEXTAREA
+  RICH_TEXT
+  EMAIL
+  PHONE
+  URL
+  NUMBER
+  DATE
+  DATETIME
+  DROPDOWN
+  MULTI_SELECT
+  CHECKBOX
+  FILE
+}
+
+// Where DROPDOWN/MULTI_SELECT options come from. Library-backed sources are
+// what enables category routing (a "Track" question writes Session.trackId).
+enum OptionSource {
+  NONE      // non-choice field types
+  CUSTOM    // FieldOption rows
+  TRACKS
+  FORMATS
+  LEVELS
+  LANGUAGES
+  TAGS
+}
+
+model FieldDefinition {
+  id           String       @id @default(cuid())
+  eventId      String
+  event        Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  target       FieldTarget
+  source       FieldSource  @default(CUSTOM)
+  // For SYSTEM fields: which entity column this maps to
+  // ("title" | "description" | "firstName" | "lastName" | "email" | "bio" |
+  //  "headshot" | "track" | "format" | "level" | "language" | "capacity" | ...)
+  systemKey    String?
+  internalName String // stable machine name, unique per event
+  label        String // public label
+  helpText     String?
+  fieldType    FieldType
+  optionSource OptionSource @default(NONE)
+  maxChars     Int?
+  containsPii  Boolean      @default(false)
+  sortOrder    Int          @default(0)
+  createdAt    DateTime     @default(now())
+
+  options            FieldOption[]
+  formQuestions      FormQuestion[]
+  sessionFieldValues SessionFieldValue[]
+  speakerFieldValues SpeakerFieldValue[]
+
+  @@unique([eventId, target, internalName])
+  @@index([eventId])
+}
+
+// Options for CUSTOM-sourced choice fields.
+model FieldOption {
+  id                String          @id @default(cuid())
+  fieldDefinitionId String
+  fieldDefinition   FieldDefinition @relation(fields: [fieldDefinitionId], references: [id], onDelete: Cascade)
+  label             String
+  value             String // stable machine value
+  sortOrder         Int             @default(0)
+
+  logicConditions          FormLogicCondition[]
+  routingRules             FormRoutingRule[]
+  answerOptions            AnswerOption[]
+  sessionFieldValueOptions SessionFieldValueOption[]
+  speakerFieldValueOptions SpeakerFieldValueOption[]
+
+  @@unique([fieldDefinitionId, value])
+  @@index([fieldDefinitionId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FORMS — CFP submission forms AND portal forms share one builder.
+// A form = ordered sections of questions bound to FieldDefinitions,
+// plus logic rules, routing rules, participant-role config, and settings.
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum FormPurpose {
+  CFP    // public call-for-speakers form; creates a Session (stage ABSTRACT)
+  PORTAL // assigned to speakers via tasks; fills speaker or submission data
+}
+
+enum FormTarget {
+  SUBMISSION // portal form about a specific session
+  SPEAKER    // portal form about the speaker/contact
+}
+
+enum FormStatus {
+  DRAFT
+  OPEN
+  CLOSED // manually or automatically after closesAt
+}
+
+model Form {
+  id      String      @id @default(cuid())
+  eventId String
+  event   Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  purpose FormPurpose
+  target  FormTarget  @default(SUBMISSION)
+
+  internalName String // admin-facing
+  publicTitle  String // submitter-facing
+  slug         String @unique // public URL: /submit/{event.slug}/{form.slug}
+  status       FormStatus @default(DRAFT)
+
+  // CFP setup (step 1): collect participants step on/off
+  collectParticipants Boolean @default(true)
+
+  // Welcome (step 2)
+  showWelcomeMessage Boolean @default(true)
+  welcomeMessageHtml String?
+
+  // Settings (step 6)
+  closesAt              DateTime? // enables draft reminder emails
+  submissionLimit       Int? // per-user; null → Event.submissionLimitPerUser
+  allowMultipleDrafts   Boolean   @default(false)
+  autoRedirectToPortal  Boolean   @default(false)
+  successMessageHtml    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sections               FormSection[]
+  questions              FormQuestion[]
+  participantRoles       FormParticipantRole[]
+  logicRules             FormLogicRule[]
+  routingRules           FormRoutingRule[]
+  validationRules        FormValidationRule[]
+  notificationRecipients FormNotificationRecipient[]
+  responses              FormResponse[]
+  sessions               Session[] // submissions created through this form
+  taskDefinitions        TaskDefinition[]
+
+  @@index([eventId])
+}
+
+enum SectionKind {
+  SUBMISSION  // "Abstract Information" questions about the session
+  PARTICIPANT // questions repeated per participant
+  CUSTOM
+}
+
+model FormSection {
+  id              String      @id @default(cuid())
+  formId          String
+  form            Form        @relation(fields: [formId], references: [id], onDelete: Cascade)
+  kind            SectionKind
+  title           String // "Tell us about your submission"
+  pageHeading     String // <=15 chars, public step label ("Submission")
+  descriptionHtml String?
+  sortOrder       Int         @default(0)
+
+  questions FormQuestion[]
+
+  @@index([formId])
+}
+
+model FormQuestion {
+  id                String          @id @default(cuid())
+  formId            String
+  form              Form            @relation(fields: [formId], references: [id], onDelete: Cascade)
+  sectionId         String
+  section           FormSection     @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  fieldDefinitionId String
+  fieldDefinition   FieldDefinition @relation(fields: [fieldDefinitionId], references: [id], onDelete: Cascade)
+
+  required     Boolean @default(false)
+  // SYSTEM identity fields (Title, First Name, Email...) are locked: cannot be
+  // removed or retyped, only toggled required where allowed.
+  locked       Boolean @default(false)
+  labelOverride    String?
+  helpTextOverride String?
+  maxCharsOverride Int?
+  sortOrder    Int     @default(0)
+
+  logicRulesTargeting  FormLogicRule[]      @relation("LogicTarget")
+  logicConditionSource FormLogicCondition[] @relation("LogicSource")
+  routingRules         FormRoutingRule[]
+  validationRuleLinks  FormValidationRuleQuestion[]
+  answers              Answer[]
+
+  @@unique([formId, fieldDefinitionId])
+  @@index([sectionId])
+}
+
+// Which participant roles a CFP form accepts, with min/max counts per role.
+model FormParticipantRole {
+  id                String          @id @default(cuid())
+  formId            String
+  form              Form            @relation(fields: [formId], references: [id], onDelete: Cascade)
+  participantRoleId String
+  participantRole   ParticipantRole @relation(fields: [participantRoleId], references: [id], onDelete: Cascade)
+  minCount          Int             @default(0)
+  maxCount          Int? // null = unlimited
+
+  @@unique([formId, participantRoleId])
+  @@index([formId])
+}
+
+// ─── Conditional logic ───────────────────────────────────────────────────────
+// "IF (conditions match ALL/ANY) THEN action ON targetQuestion".
+// Evaluated live on the public form and re-validated server-side on submit.
+
+enum LogicAction {
+  SHOW    // target hidden by default, shown when rule matches
+  HIDE    // target shown by default, hidden when rule matches
+  REQUIRE // target becomes required when rule matches
+}
+
+enum LogicMatch {
+  ALL
+  ANY
+}
+
+model FormLogicRule {
+  id               String       @id @default(cuid())
+  formId           String
+  form             Form         @relation(fields: [formId], references: [id], onDelete: Cascade)
+  targetQuestionId String
+  targetQuestion   FormQuestion @relation("LogicTarget", fields: [targetQuestionId], references: [id], onDelete: Cascade)
+  action           LogicAction
+  match            LogicMatch   @default(ALL)
+
+  conditions FormLogicCondition[]
+
+  @@index([formId])
+  @@index([targetQuestionId])
+}
+
+enum ConditionOperator {
+  EQUALS
+  NOT_EQUALS
+  CONTAINS
+  NOT_CONTAINS
+  IS_EMPTY
+  IS_NOT_EMPTY
+  GREATER_THAN
+  LESS_THAN
+}
+
+model FormLogicCondition {
+  id               String            @id @default(cuid())
+  ruleId           String
+  rule             FormLogicRule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  sourceQuestionId String
+  sourceQuestion   FormQuestion      @relation("LogicSource", fields: [sourceQuestionId], references: [id], onDelete: Cascade)
+  operator         ConditionOperator
+  // For choice questions compare against an option; for text/number compare a value.
+  comparedOptionId String?
+  comparedOption   FieldOption?      @relation(fields: [comparedOptionId], references: [id], onDelete: Cascade)
+  comparedText     String?
+  comparedNumber   Float?
+
+  @@index([ruleId])
+  @@index([sourceQuestionId])
+}
+
+// ─── Category-based routing ──────────────────────────────────────────────────
+// When the submitted answer to `question` selects `option`, the created
+// submission is auto-assigned a track and/or dropped into an evaluation plan.
+model FormRoutingRule {
+  id         String       @id @default(cuid())
+  formId     String
+  form       Form         @relation(fields: [formId], references: [id], onDelete: Cascade)
+  questionId String
+  question   FormQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  optionId   String
+  option     FieldOption  @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  assignTrackId          String?
+  assignTrack            Track?          @relation(fields: [assignTrackId], references: [id], onDelete: SetNull)
+  assignTagId            String?
+  assignTag              Tag?            @relation(fields: [assignTagId], references: [id], onDelete: SetNull)
+  assignEvaluationPlanId String?
+  assignEvaluationPlan   EvaluationPlan? @relation(fields: [assignEvaluationPlanId], references: [id], onDelete: SetNull)
+
+  @@index([formId])
+}
+
+// ─── Cross-field validation ("combined character limits") ────────────────────
+enum ValidationScope {
+  SUBMISSION      // combined limit across submission-level answers
+  PER_PARTICIPANT // limit applies to each participant's answers separately
+}
+
+model FormValidationRule {
+  id               String          @id @default(cuid())
+  formId           String
+  form             Form            @relation(fields: [formId], references: [id], onDelete: Cascade)
+  name             String // "Printed program block"
+  combinedMaxChars Int
+  scope            ValidationScope @default(SUBMISSION)
+
+  questions FormValidationRuleQuestion[]
+
+  @@index([formId])
+}
+
+model FormValidationRuleQuestion {
+  id         String             @id @default(cuid())
+  ruleId     String
+  rule       FormValidationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
+  questionId String
+  question   FormQuestion       @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([ruleId, questionId])
+}
+
+// Admin alert recipients per form.
+enum NotificationTrigger {
+  NEW_SUBMISSION
+  UPDATED_SUBMISSION
+}
+
+model FormNotificationRecipient {
+  id      String              @id @default(cuid())
+  formId  String
+  form    Form                @relation(fields: [formId], references: [id], onDelete: Cascade)
+  userId  String
+  user    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  trigger NotificationTrigger
+
+  @@unique([formId, userId, trigger])
+  @@index([formId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SPEAKERS — event-scoped people. userId nullable: co-speakers added by email
+// link to a User when that person first signs into the portal (magic link).
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum SpeakerConfirmation {
+  PENDING   // accepted session but hasn't confirmed participation yet
+  CONFIRMED
+  DECLINED
+}
+
+model Speaker {
+  id      String  @id @default(cuid())
+  eventId String
+  event   Event   @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  userId  String?
+  user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  email     String
+  firstName String
+  lastName  String
+  // System profile fields (portal "Profile" page)
+  bio           String? // rich text, <=5000 chars app-enforced
+  jobTitle      String?
+  companyName   String?
+  phone         String?
+  salutation    String?
+  honorific     String?
+  pronouns      String?
+  gender        String?
+  websiteUrl    String?
+  linkedinUrl   String?
+  twitterUrl    String?
+  facebookUrl   String?
+  headshotFileId String? @unique
+  headshotFile   File?   @relation("SpeakerHeadshot", fields: [headshotFileId], references: [id])
+
+  confirmation SpeakerConfirmation @default(PENDING)
+  createdAt    DateTime            @default(now())
+  updatedAt    DateTime            @updatedAt
+
+  participations  SessionParticipant[]
+  fieldValues     SpeakerFieldValue[]
+  taskAssignments TaskAssignment[]
+  formResponses   FormResponse[]
+  subjectAnswers  Answer[] // per-participant answers about this speaker
+  emailMessages   EmailMessage[]
+  uploadedFiles   File[]               @relation("UploadedBySpeaker")
+
+  @@unique([eventId, email])
+  @@index([userId])
+  @@index([eventId])
+}
+
+// Custom field values for speakers (target SPEAKER, source CUSTOM).
+model SpeakerFieldValue {
+  id                String          @id @default(cuid())
+  speakerId         String
+  speaker           Speaker         @relation(fields: [speakerId], references: [id], onDelete: Cascade)
+  fieldDefinitionId String
+  fieldDefinition   FieldDefinition @relation(fields: [fieldDefinitionId], references: [id], onDelete: Cascade)
+
+  valueText   String?
+  valueNumber Float?
+  valueDate   DateTime?
+  valueFileId String?
+  valueFile   File?     @relation(fields: [valueFileId], references: [id], onDelete: SetNull)
+
+  selectedOptions SpeakerFieldValueOption[]
+
+  @@unique([speakerId, fieldDefinitionId])
+  @@index([fieldDefinitionId])
+}
+
+model SpeakerFieldValueOption {
+  id           String            @id @default(cuid())
+  fieldValueId String
+  fieldValue   SpeakerFieldValue @relation(fields: [fieldValueId], references: [id], onDelete: Cascade)
+  optionId     String
+  option       FieldOption       @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  @@unique([fieldValueId, optionId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SUBMISSIONS / SESSIONS — one table for the whole lifecycle (mirrors the real
+// SessionBoard API where a Session has is_abstract). stage=ABSTRACT while under
+// review; promotion to stage=SESSION happens on acceptance.
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum SessionStage {
+  ABSTRACT // a proposal under review
+  SESSION  // a finalized agenda item
+}
+
+enum SessionStatus {
+  DRAFT         // submitter saved but not submitted
+  PENDING       // submitted, awaiting decision
+  ACCEPT_QUEUE  // shortlisted for acceptance (decision email not sent yet)
+  ACCEPTED
+  DECLINE_QUEUE // shortlisted for decline
+  DECLINED
+  WITHDRAWN     // pulled by the submitter
+}
+
+model Session {
+  id      String @id @default(cuid())
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  // Human-readable id shown in UI/portal ("SESS-4"), sequential per event.
+  friendlyId Int
+
+  // Provenance: null form = manually created by an admin.
+  formId      String?
+  form        Form?   @relation(fields: [formId], references: [id], onDelete: SetNull)
+  submitterId String? // portal User who submitted it
+  submitter   User?   @relation("SubmittedBy", fields: [submitterId], references: [id], onDelete: SetNull)
+
+  stage  SessionStage  @default(ABSTRACT)
+  status SessionStatus @default(DRAFT)
+
+  title           String
+  description     String? // rich text
+  clientSessionId String? // external system id
+  capacity        Int?
+  ceuCredits      Float?
+  isPublic        Boolean @default(false) // visible in embeds/public agenda
+
+  trackId    String?
+  track      Track?    @relation(fields: [trackId], references: [id], onDelete: SetNull)
+  formatId   String?
+  format     Format?   @relation(fields: [formatId], references: [id], onDelete: SetNull)
+  levelId    String?
+  level      Level?    @relation(fields: [levelId], references: [id], onDelete: SetNull)
+  languageId String?
+  language   Language? @relation(fields: [languageId], references: [id], onDelete: SetNull)
+
+  // Live schedule (null until placed via agenda). Draft placements live in
+  // DraftPlacement and are copied here on commit.
+  roomId   String?
+  room     Room?     @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  startsAt DateTime?
+  endsAt   DateTime?
+
+  // Lifecycle timestamps
+  submittedAt DateTime? // DRAFT → PENDING
+  decidedAt   DateTime? // → ACCEPTED / DECLINED
+  notifiedAt  DateTime? // decision email sent ("Notified" column)
+  withdrawnAt DateTime?
+
+  // ICS SEQUENCE counter — bump on every schedule change to update invites.
+  icsSequence Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tags            SessionTag[]
+  participants    SessionParticipant[]
+  fieldValues     SessionFieldValue[]
+  formResponses   FormResponse[]
+  roundEntries    RoundSession[]
+  reviewAssignments ReviewAssignment[]
+  draftPlacements DraftPlacement[]
+  taskAssignments TaskAssignment[]
+  files           File[]               @relation("SessionFiles")
+  emailMessages   EmailMessage[]
+  waiversA        ConflictWaiver[]     @relation("WaiverSessionA")
+  waiversB        ConflictWaiver[]     @relation("WaiverSessionB")
+
+  @@unique([eventId, friendlyId])
+  @@index([eventId, status])
+  @@index([eventId, stage])
+  @@index([formId])
+  @@index([submitterId])
+  @@index([trackId])
+  @@index([roomId])
+}
+
+model SessionTag {
+  id        String  @id @default(cuid())
+  sessionId String
+  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  tagId     String
+  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([sessionId, tagId])
+  @@index([tagId])
+}
+
+// Speakers/chairs/moderators on a session, with role and display order.
+model SessionParticipant {
+  id                String          @id @default(cuid())
+  sessionId         String
+  session           Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  speakerId         String
+  speaker           Speaker         @relation(fields: [speakerId], references: [id], onDelete: Cascade)
+  participantRoleId String
+  participantRole   ParticipantRole @relation(fields: [participantRoleId], references: [id], onDelete: Cascade)
+  // True for the person who filled the CFP form (portal owner of the submission).
+  isSubmitter       Boolean         @default(false)
+  sortOrder         Int             @default(0)
+  createdAt         DateTime        @default(now())
+
+  @@unique([sessionId, speakerId, participantRoleId])
+  @@index([speakerId])
+}
+
+// Custom field values for submissions (target SUBMISSION, source CUSTOM).
+model SessionFieldValue {
+  id                String          @id @default(cuid())
+  sessionId         String
+  session           Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  fieldDefinitionId String
+  fieldDefinition   FieldDefinition @relation(fields: [fieldDefinitionId], references: [id], onDelete: Cascade)
+
+  valueText   String?
+  valueNumber Float?
+  valueDate   DateTime?
+  valueFileId String?
+  valueFile   File?     @relation(fields: [valueFileId], references: [id], onDelete: SetNull)
+
+  selectedOptions SessionFieldValueOption[]
+
+  @@unique([sessionId, fieldDefinitionId])
+  @@index([fieldDefinitionId])
+}
+
+model SessionFieldValueOption {
+  id           String            @id @default(cuid())
+  fieldValueId String
+  fieldValue   SessionFieldValue @relation(fields: [fieldValueId], references: [id], onDelete: Cascade)
+  optionId     String
+  option       FieldOption       @relation(fields: [optionId], references: [id], onDelete: Cascade)
+
+  @@unique([fieldValueId, optionId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// FORM RESPONSES — the immutable record of a form fill. CFP responses create a
+// Session; portal responses complete a TaskAssignment. On submit, answers are
+// copied to entity values (Session columns / SessionFieldValue / Speaker...).
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum ResponseStatus {
+  DRAFT
+  SUBMITTED
+}
+
+model FormResponse {
+  id        String         @id @default(cuid())
+  formId    String
+  form      Form           @relation(fields: [formId], references: [id], onDelete: Cascade)
+  // Respondent (the portal speaker filling it in).
+  speakerId String
+  speaker   Speaker        @relation(fields: [speakerId], references: [id], onDelete: Cascade)
+  // CFP: the Session created by this response. Portal SUBMISSION forms: the
+  // session the response is about. Portal SPEAKER forms: null.
+  sessionId String?
+  session   Session?       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  // Portal responses opened from a task.
+  taskAssignmentId String?          @unique
+  taskAssignment   TaskAssignment?  @relation(fields: [taskAssignmentId], references: [id], onDelete: SetNull)
+
+  status      ResponseStatus @default(DRAFT)
+  submittedAt DateTime?
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  answers Answer[]
+
+  @@index([formId, status])
+  @@index([speakerId])
+  @@index([sessionId])
+}
+
+model Answer {
+  id         String       @id @default(cuid())
+  responseId String
+  response   FormResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  questionId String
+  question   FormQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+  // For PARTICIPANT-section questions: which participant this answer describes.
+  subjectSpeakerId String?
+  subjectSpeaker   Speaker? @relation(fields: [subjectSpeakerId], references: [id], onDelete: Cascade)
+
+  valueText   String?
+  valueNumber Float?
+  valueDate   DateTime?
+  valueFileId String?
+  valueFile   File?     @relation(fields: [valueFileId], references: [id], onDelete: SetNull)
+
+  selectedOptions AnswerOption[]
+
+  @@unique([responseId, questionId, subjectSpeakerId])
+  @@index([questionId])
+}
+
+// Selected options for choice answers (single- and multi-select).
+model AnswerOption {
+  id       String      @id @default(cuid())
+  answerId String
+  answer   Answer      @relation(fields: [answerId], references: [id], onDelete: Cascade)
+  // Exactly one of optionId (CUSTOM source) or a library reference id is set.
+  optionId String?
+  option   FieldOption? @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  // For library-sourced dropdowns (TRACKS/FORMATS/LEVELS/LANGUAGES/TAGS) store
+  // the library row id; resolved by the fieldDefinition.optionSource.
+  libraryRefId String?
+
+  @@index([answerId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EVALUATION — round-based plans with scorecards, reviewer assignments, scores.
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum PlanStatus {
+  DRAFT
+  ACTIVE
+  COMPLETED
+}
+
+model EvaluationPlan {
+  id      String     @id @default(cuid())
+  eventId String
+  event   Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name    String // "My Evaluation Plan"
+  status  PlanStatus @default(DRAFT)
+
+  createdAt DateTime @default(now())
+
+  rounds       EvaluationRound[]
+  routingRules FormRoutingRule[]
+
+  @@index([eventId])
+}
+
+enum RoundStatus {
+  PENDING
+  OPEN
+  CLOSED
+}
+
+enum Anonymization {
+  NONE         // reviewers see speaker identities
+  SINGLE_BLIND // reviewers don't see speakers
+}
+
+model EvaluationRound {
+  id     String         @id @default(cuid())
+  planId String
+  plan   EvaluationPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  name   String // "Initial Review", "Committee Decision"
+  sortOrder Int         @default(0)
+
+  status        RoundStatus   @default(PENDING)
+  anonymization Anonymization @default(NONE)
+  opensAt       DateTime?
+  closesAt      DateTime?
+  // Assignment caps used by the auto-assignment tool.
+  maxReviewsPerSubmission Int?
+  maxReviewsPerReviewer   Int?
+
+  scorecardFields ScorecardField[]
+  roundSessions   RoundSession[]
+  assignments     ReviewAssignment[]
+
+  @@index([planId])
+}
+
+// Which submissions are in a round and whether they advanced.
+enum RoundOutcome {
+  PENDING
+  ADVANCED // moved to the next round
+  REJECTED // dropped from the plan (admin then sets DECLINE_QUEUE)
+}
+
+model RoundSession {
+  id        String          @id @default(cuid())
+  roundId   String
+  round     EvaluationRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  sessionId String
+  session   Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  outcome   RoundOutcome    @default(PENDING)
+
+  @@unique([roundId, sessionId])
+  @@index([sessionId])
+}
+
+enum ScoreFieldType {
+  RATING   // numeric scale minScore..maxScore
+  TEXT     // free-text feedback
+  DROPDOWN
+  YES_NO
+}
+
+model ScorecardField {
+  id      String          @id @default(cuid())
+  roundId String
+  round   EvaluationRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  label   String // "Relevance", "Speaker experience"
+  fieldType ScoreFieldType
+  required  Boolean       @default(true)
+  minScore  Int? // RATING
+  maxScore  Int? // RATING
+  weight    Float @default(1) // weighted average across fields
+  sortOrder Int   @default(0)
+
+  options ScorecardFieldOption[]
+  scores  ReviewScore[]
+
+  @@index([roundId])
+}
+
+model ScorecardFieldOption {
+  id               String         @id @default(cuid())
+  scorecardFieldId String
+  scorecardField   ScorecardField @relation(fields: [scorecardFieldId], references: [id], onDelete: Cascade)
+  label            String
+  // Numeric contribution of this option to the weighted score, if any.
+  scoreValue       Float?
+  sortOrder        Int            @default(0)
+
+  scores ReviewScore[]
+
+  @@index([scorecardFieldId])
+}
+
+enum AssignmentStatus {
+  PENDING              // assigned, not started
+  IN_PROGRESS
+  COMPLETED
+  DECLINED             // reviewer opted out
+  CONFLICT_OF_INTEREST // reviewer declared COI; excluded from averages
+}
+
+// One reviewer reviewing one submission in one round. The review itself is
+// folded into the assignment (status, comment, scores).
+model ReviewAssignment {
+  id         String          @id @default(cuid())
+  roundId    String
+  round      EvaluationRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  sessionId  String
+  session    Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  reviewerId String
+  reviewer   User            @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
+
+  status         AssignmentStatus @default(PENDING)
+  overallComment String?
+  completedAt    DateTime?
+  createdAt      DateTime         @default(now())
+
+  scores ReviewScore[]
+
+  @@unique([roundId, sessionId, reviewerId])
+  @@index([reviewerId, status])
+  @@index([sessionId])
+}
+
+model ReviewScore {
+  id               String           @id @default(cuid())
+  assignmentId     String
+  assignment       ReviewAssignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  scorecardFieldId String
+  scorecardField   ScorecardField   @relation(fields: [scorecardFieldId], references: [id], onDelete: Cascade)
+
+  valueNumber      Float? // RATING / YES_NO (1|0)
+  valueText        String? // TEXT
+  selectedOptionId String? // DROPDOWN
+  selectedOption   ScorecardFieldOption? @relation(fields: [selectedOptionId], references: [id], onDelete: SetNull)
+
+  @@unique([assignmentId, scorecardFieldId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// AGENDA — draft workspaces over the live schedule + typed scheduling rules.
+// Conflicts are COMPUTED (never stored): time-overlap ∧ (same room ∨ shared
+// participant ∨ rule violation). Only deliberate waivers persist.
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum AgendaDraftStatus {
+  OPEN
+  COMMITTED
+  DISCARDED
+}
+
+model AgendaDraft {
+  id          String            @id @default(cuid())
+  eventId     String
+  event       Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name        String
+  description String?
+  status      AgendaDraftStatus @default(OPEN)
+  committedAt DateTime?
+  createdAt   DateTime          @default(now())
+  updatedAt   DateTime          @updatedAt
+
+  placements DraftPlacement[]
+
+  @@index([eventId])
+}
+
+// A staged placement: on commit, copied to Session.roomId/startsAt/endsAt
+// (and icsSequence bumped + updated calendar invites queued).
+model DraftPlacement {
+  id        String      @id @default(cuid())
+  draftId   String
+  draft     AgendaDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
+  sessionId String
+  session   Session     @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  roomId    String?
+  room      Room?       @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  startsAt  DateTime?
+  endsAt    DateTime?
+  // A placement with all-null room/times means "unschedule this session".
+
+  @@unique([draftId, sessionId])
+  @@index([sessionId])
+}
+
+enum SchedulingRuleType {
+  SPEAKER_NO_OVERLAP      // same speaker in two overlapping sessions
+  ROOM_NO_OVERLAP         // two sessions overlap in one room
+  SPEAKER_MAX_PER_DAY     // intValue = max sessions per speaker per day
+  MIN_BUFFER_MINUTES      // intValue = required gap between sessions (scoped)
+  TRACK_MAX_PARALLEL      // intValue = max simultaneous sessions in a track
+  ROOM_CAPACITY_LIMIT     // session.capacity must not exceed room.capacity
+}
+
+model SchedulingRule {
+  id      String             @id @default(cuid())
+  eventId String
+  event   Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name    String
+  type    SchedulingRuleType
+  enabled Boolean            @default(true)
+  intValue Int? // meaning depends on type (see enum comments)
+  // Optional scoping — rule applies only to this room if set.
+  roomId  String?
+  room    Room?              @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+}
+
+enum ConflictKind {
+  SPEAKER_OVERLAP
+  ROOM_OVERLAP
+  RULE_VIOLATION
+}
+
+// A deliberately acknowledged conflict ("yes, the keynote overlaps the party").
+// Keyed by the unordered session pair + kind; conflict checker skips these.
+model ConflictWaiver {
+  id         String       @id @default(cuid())
+  eventId    String
+  event      Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  kind       ConflictKind
+  sessionAId String
+  sessionA   Session      @relation("WaiverSessionA", fields: [sessionAId], references: [id], onDelete: Cascade)
+  sessionBId String
+  sessionB   Session      @relation("WaiverSessionB", fields: [sessionBId], references: [id], onDelete: Cascade)
+  reason     String?
+  createdAt  DateTime     @default(now())
+
+  @@unique([eventId, kind, sessionAId, sessionBId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SPEAKER PORTAL — onboarding tasks, file requests, files.
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum TaskTarget {
+  SPEAKER    // one assignment per speaker ("book your hotel")
+  SUBMISSION // one assignment per accepted session ("upload slides")
+}
+
+enum TaskSource {
+  MANUAL       // checkbox task, speaker marks complete
+  FORM         // completing the linked portal Form completes the task
+  FILE_REQUEST // uploading to the linked FileRequest completes the task
+}
+
+model TaskDefinition {
+  id      String     @id @default(cuid())
+  eventId String
+  event   Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  title   String
+  instructionsHtml String?
+  target  TaskTarget
+  source  TaskSource @default(MANUAL)
+
+  formId        String?
+  form          Form?        @relation(fields: [formId], references: [id], onDelete: SetNull)
+  fileRequestId String?
+  fileRequest   FileRequest? @relation(fields: [fileRequestId], references: [id], onDelete: SetNull)
+
+  dueAt     DateTime? // drives reminder emails + "overdue" dashboards
+  // Auto-assign to every accepted speaker/session when they reach ACCEPTED.
+  autoAssignOnAccept Boolean @default(true)
+  sortOrder Int       @default(0)
+  createdAt DateTime  @default(now())
+
+  assignments   TaskAssignment[]
+  reminderRules ReminderRule[]
+
+  @@index([eventId])
+}
+
+enum TaskStatus {
+  NOT_STARTED
+  IN_PROGRESS // draft response / partial upload exists
+  SUBMITTED   // awaiting admin review (form/file tasks)
+  COMPLETED
+}
+
+// The per-speaker (or per-session) instance of a task. This table IS the
+// "outstanding onboarding tasks" dashboard.
+model TaskAssignment {
+  id               String         @id @default(cuid())
+  taskDefinitionId String
+  taskDefinition   TaskDefinition @relation(fields: [taskDefinitionId], references: [id], onDelete: Cascade)
+  speakerId        String
+  speaker          Speaker        @relation(fields: [speakerId], references: [id], onDelete: Cascade)
+  // Set when target = SUBMISSION.
+  sessionId        String?
+  session          Session?       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  status      TaskStatus @default(NOT_STARTED)
+  completedAt DateTime?
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
+
+  formResponse FormResponse?
+  files        File[]        @relation("TaskFiles")
+
+  @@unique([taskDefinitionId, speakerId, sessionId])
+  @@index([speakerId, status])
+  @@index([sessionId])
+}
+
+enum FileRequestTarget {
+  SPEAKER
+  SUBMISSION
+}
+
+model FileRequest {
+  id               String            @id @default(cuid())
+  eventId          String
+  event            Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  title            String // "Upload Presentation Slides"
+  instructionsHtml String?
+  target           FileRequestTarget
+  createdAt        DateTime          @default(now())
+
+  taskDefinitions TaskDefinition[]
+  files           File[]
+
+  @@index([eventId])
+}
+
+enum FileKind {
+  HEADSHOT
+  SLIDES
+  DOCUMENT
+  IMAGE
+  OTHER
+}
+
+// Bytes live in object storage; this row is metadata + ownership links.
+model File {
+  id      String   @id @default(cuid())
+  eventId String
+  event   Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  kind    FileKind @default(OTHER)
+
+  fileName   String
+  mimeType   String
+  sizeBytes  Int
+  storageKey String @unique // object-storage key (R2/S3/disk)
+
+  uploadedBySpeakerId String?
+  uploadedBySpeaker   Speaker? @relation("UploadedBySpeaker", fields: [uploadedBySpeakerId], references: [id], onDelete: SetNull)
+  // What the file is attached to (any may be null).
+  sessionId        String?
+  session          Session?        @relation("SessionFiles", fields: [sessionId], references: [id], onDelete: Cascade)
+  fileRequestId    String?
+  fileRequest      FileRequest?    @relation(fields: [fileRequestId], references: [id], onDelete: SetNull)
+  taskAssignmentId String?
+  taskAssignment   TaskAssignment? @relation("TaskFiles", fields: [taskAssignmentId], references: [id], onDelete: SetNull)
+
+  createdAt DateTime @default(now())
+
+  // Reverse links for typed usages
+  eventLogoOf         Event?              @relation("EventLogo")
+  eventBackgroundOf   Event?              @relation("EventBackground")
+  speakerHeadshotOf   Speaker?            @relation("SpeakerHeadshot")
+  answerValues        Answer[]
+  sessionFieldValues  SessionFieldValue[]
+  speakerFieldValues  SpeakerFieldValue[]
+
+  @@index([eventId])
+  @@index([sessionId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EMAILS — templates, reminder rules, send log. Calendar invites are ICS
+// attachments on SCHEDULE_INVITE emails; Session.icsSequence handles updates.
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum EmailTemplateKey {
+  SUBMISSION_CONFIRMATION // sent to submitter after CFP submit
+  SUBMISSION_UPDATED      // sent when submitter edits a submission
+  DECISION_ACCEPTED       // acceptance email (stamps Session.notifiedAt)
+  DECISION_DECLINED
+  TASK_ASSIGNED
+  TASK_REMINDER           // task due soon / overdue
+  DRAFT_REMINDER          // unfinished CFP draft before form closesAt
+  SCHEDULE_INVITE         // calendar invite (ICS) when session is scheduled
+  SCHEDULE_UPDATE         // ICS update when a scheduled session moves
+  CUSTOM
+}
+
+enum TemplateStatus {
+  ENABLED
+  DISABLED
+}
+
+model EmailTemplate {
+  id      String           @id @default(cuid())
+  eventId String
+  event   Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  key     EmailTemplateKey
+  name    String
+  status  TemplateStatus   @default(ENABLED)
+  subject String
+  // Handlebars-style body: {{speaker.firstName}}, {{session.title}},
+  // {{event.name}}, {{task.dueAt}}, {{portalUrl}}...
+  bodyHtml String
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  reminderRules ReminderRule[]
+  messages      EmailMessage[]
+
+  @@unique([eventId, key, name])
+  @@index([eventId])
+}
+
+enum ReminderTrigger {
+  TASK_DUE       // daysOffset before TaskAssignment due date
+  TASK_OVERDUE   // daysOffset after due date
+  DRAFT_INCOMPLETE // daysOffset before Form.closesAt, to draft holders
+  FORM_CLOSING     // daysOffset before Form.closesAt, to all eligible
+}
+
+// Scheduled automation: a cron scans rules and enqueues EmailMessages.
+model ReminderRule {
+  id         String          @id @default(cuid())
+  eventId    String
+  event      Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  templateId String
+  template   EmailTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
+  trigger    ReminderTrigger
+  daysOffset Int             @default(1)
+  enabled    Boolean         @default(true)
+  // Scope reminders to one task definition (null = all tasks with due dates).
+  taskDefinitionId String?
+  taskDefinition   TaskDefinition? @relation(fields: [taskDefinitionId], references: [id], onDelete: Cascade)
+
+  @@index([eventId])
+}
+
+enum EmailStatus {
+  QUEUED
+  SENT
+  FAILED
+}
+
+// Send log — one row per outbound email (also powers dedupe: don't send the
+// same reminder for the same assignment twice).
+model EmailMessage {
+  id         String         @id @default(cuid())
+  eventId    String
+  event      Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  templateId String?
+  template   EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+
+  toEmail   String
+  speakerId String?
+  speaker   Speaker? @relation(fields: [speakerId], references: [id], onDelete: SetNull)
+  sessionId String?
+  session   Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+
+  subject      String
+  bodyHtml     String // rendered snapshot
+  hasIcsAttachment Boolean     @default(false)
+  status       EmailStatus @default(QUEUED)
+  errorMessage String?
+  sentAt       DateTime?
+  createdAt    DateTime    @default(now())
+
+  @@index([eventId, status])
+  @@index([speakerId])
+  @@index([sessionId])
+}
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EMBEDS — auto-updating agenda / speaker widgets for the event website.
+// Served by a public token; only ACCEPTED + isPublic sessions are exposed.
+// ═════════════════════════════════════════════════════════════════════════════
+
+enum EmbedWidget {
+  AGENDA
+  SESSION_LIST
+  SCHEDULE_ITINERARY
+  SPEAKER_LIST
+  SPEAKER_GALLERY
+}
+
+enum EmbedStatus {
+  ENABLED
+  DISABLED
+}
+
+model Embed {
+  id          String      @id @default(cuid())
+  eventId     String
+  event       Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  name        String
+  widget      EmbedWidget
+  status      EmbedStatus @default(ENABLED)
+  publicToken String      @unique // used in the <script>/iframe embed code
+
+  // Display options (typed, not JSON)
+  showSpeakerPhotos Boolean @default(true)
+  showTrackColors   Boolean @default(true)
+  groupBy           String? // "day" | "track" | "room" (widget-dependent)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  filters EmbedFilter[]
+
+  @@index([eventId])
+}
+
+// Normalized content filters — a row per included track/tag/format.
+// No rows of a given dimension = no filtering on that dimension.
+model EmbedFilter {
+  id       String  @id @default(cuid())
+  embedId  String
+  embed    Embed   @relation(fields: [embedId], references: [id], onDelete: Cascade)
+  trackId  String?
+  track    Track?  @relation(fields: [trackId], references: [id], onDelete: Cascade)
+  tagId    String?
+  tag      Tag?    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+  formatId String?
+  format   Format? @relation(fields: [formatId], references: [id], onDelete: Cascade)
+
+  @@index([embedId])
+}
