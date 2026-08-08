@@ -121,8 +121,10 @@ export function CreateEventDialog({ open, onOpenChange, orgId }: {
                   name,
                   timezone,
                   // Date-only inputs: start of day → end of day (UTC).
-                  startsAt: Date.parse(`${startsAt}T00:00:00Z`),
-                  endsAt: Date.parse(`${endsAt}T23:59:59Z`),
+                  // Raw day keys: the server resolves them in the chosen
+                  // event timezone, not the browser's.
+                  startsAt,
+                  endsAt,
                 })
                 onOpenChange(false)
               }}

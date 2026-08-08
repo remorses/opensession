@@ -226,60 +226,31 @@ async function enqueueTaskReminders(db: Db, now: number): Promise<number> {
 /**
  * Delete R2 objects nothing points at any more.
  *
- * Deliberately conservative: a file is collected only when it is older than the
- * grace period AND appears in none of the four reference sites. If a future
- * feature adds a fifth reference column, this query must grow with it —
- * otherwise the cron silently deletes live uploads. Failing to collect a file
- * costs pennies of storage; collecting a referenced one loses a speaker's
- * slides forever, so this errs toward keeping.
+ * ONE guarded statement does the whole decision: a row is removed only if it is
+ * older than the grace period AND no reference exists at that instant. Checking
+ * references in JS first and deleting afterwards is racy — an upload attached in
+ * between would have its reference nulled (the FKs are ON DELETE SET NULL) while
+ * its R2 object is already gone, losing a speaker's slides for good.
+ *
+ * DB first, then R2. A leaked object costs pennies and a later sweep can find it
+ * by storage key; a deleted object referenced by a live row is unrecoverable.
+ *
+ * If a future feature adds a fifth place that points at `file`, add a NOT EXISTS
+ * clause here or the cron will start deleting live uploads.
  */
 async function collectOrphanFiles(db: Db, now: number): Promise<number> {
   const cutoff = now - FILE_GC_GRACE_MS
-  const candidates = await db.query.file.findMany({
-    where: { createdAt: { lt: cutoff } },
-    columns: { id: true, storageKey: true },
-    limit: SCAN_LIMIT,
-  })
-  if (candidates.length === 0) return 0
-  const ids = candidates.map((row) => row.id)
-
-  const [fieldValues, speakers, sessions, events] = await Promise.all([
-    db.query.formFieldValue.findMany({
-      where: { fileId: { in: ids } },
-      columns: { fileId: true },
-    }),
-    db.query.speaker.findMany({
-      where: { headshotFileId: { in: ids } },
-      columns: { headshotFileId: true },
-    }),
-    db.query.eventSession.findMany({
-      where: { coverImageFileId: { in: ids } },
-      columns: { coverImageFileId: true },
-    }),
-    db.query.event.findMany({
-      where: { logoFileId: { in: ids } },
-      columns: { logoFileId: true },
-    }),
-  ])
-  const referenced = new Set<string>(
-    [
-      ...fieldValues.map((row) => row.fileId),
-      ...speakers.map((row) => row.headshotFileId),
-      ...sessions.map((row) => row.coverImageFileId),
-      ...events.map((row) => row.logoFileId),
-    ].filter((id): id is string => Boolean(id)),
-  )
-
-  const orphans = candidates.filter((row) => !referenced.has(row.id))
-  if (orphans.length === 0) return 0
-
-  let collected = 0
-  for (const orphan of orphans) {
-    // R2 first: a dangling DB row is recoverable, a dangling object is not
-    // discoverable once its row is gone.
-    await env.FILES.delete(orphan.storageKey)
-    await db.delete(schema.file).where(orm.eq(schema.file.id, orphan.id)).limit(1)
-    collected += 1
+  const deleted = await db.all<{ storage_key: string }>(orm.sql`
+    DELETE FROM file
+    WHERE created_at < ${cutoff}
+      AND NOT EXISTS (SELECT 1 FROM form_field_value WHERE file_id = file.id)
+      AND NOT EXISTS (SELECT 1 FROM speaker WHERE headshot_file_id = file.id)
+      AND NOT EXISTS (SELECT 1 FROM event_session WHERE cover_image_file_id = file.id)
+      AND NOT EXISTS (SELECT 1 FROM event WHERE logo_file_id = file.id)
+    RETURNING storage_key
+  `)
+  for (const row of deleted) {
+    await env.FILES.delete(row.storage_key)
   }
-  return collected
+  return deleted.length
 }

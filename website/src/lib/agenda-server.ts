@@ -27,6 +27,7 @@ import {
   type Conflict,
   formatDayLabel,
   minutesToLabel,
+  nextIcsSequence,
   toZonedSlot,
   zonedEpoch,
   type ConflictSession,
@@ -193,7 +194,12 @@ async function sendScheduleMails({
   kind: 'SCHEDULE_INVITE' | 'SCHEDULE_UPDATE' | 'SCHEDULE_CANCEL'
   now: number
 }): Promise<number> {
+  // Skip speakers who withdrew: mailing a calendar invite to someone who
+  // declined the slot is noise at best. PENDING speakers DO get the invite —
+  // there is no confirmation UI yet, so a CONFIRMED-only rule would mail
+  // nobody, which is worse than mailing someone who has not replied.
   const speakers = session.participants
+    .filter((part) => part.confirmationStatus !== 'DECLINED')
     .map((part) => part.speaker)
     .filter((speaker): speaker is NonNullable<typeof speaker> => Boolean(speaker?.email))
   if (speakers.length === 0) return 0
@@ -333,7 +339,10 @@ export async function scheduleSessionSlot({
 
   const wasScheduled =
     session.roomId != null && session.startsAt != null && session.endsAt != null
-  const sequence = wasScheduled ? session.icsSequence + 1 : session.icsSequence
+  const sequence = nextIcsSequence({
+    current: session.icsSequence,
+    wasScheduled,
+  })
 
   await db
     .update(schema.eventSession)

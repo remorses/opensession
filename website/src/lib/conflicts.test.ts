@@ -10,6 +10,7 @@ import {
   findConflicts,
   formatDayLabel,
   minutesToLabel,
+  nextIcsSequence,
   sessionsOverlap,
   toZonedSlot,
   zonedEpoch,
@@ -445,5 +446,99 @@ describe('buildDayGrid', () => {
         "startRow": 60,
       }
     `)
+  })
+})
+
+describe('nextIcsSequence', () => {
+  test('the first ever placement keeps sequence 0', () => {
+    expect(nextIcsSequence({ current: 0, wasScheduled: false })).toBe(0)
+  })
+
+  test('moving a scheduled session always moves the revision forward', () => {
+    expect(nextIcsSequence({ current: 0, wasScheduled: true })).toBe(1)
+    expect(nextIcsSequence({ current: 7, wasScheduled: true })).toBe(8)
+  })
+
+  test('re-placing a cancelled session never reuses the cancel sequence', () => {
+    // place(0) -> cancel(1) -> re-place must be 2, not 1. Reusing 1 would hit
+    // the existing ics:{session}:{speaker}:1 dedupe key and silently drop the
+    // invite, leaving the speaker unaware the talk is back on.
+    expect(nextIcsSequence({ current: 1, wasScheduled: false })).toBe(2)
+  })
+
+  test('a full place / cancel / re-place / move chain strictly increases', () => {
+    const chain: number[] = []
+    let current = 0
+    current = nextIcsSequence({ current, wasScheduled: false }) // place
+    chain.push(current)
+    current = nextIcsSequence({ current, wasScheduled: true }) // cancel
+    chain.push(current)
+    current = nextIcsSequence({ current, wasScheduled: false }) // re-place
+    chain.push(current)
+    current = nextIcsSequence({ current, wasScheduled: true }) // move
+    chain.push(current)
+    expect(chain).toMatchInlineSnapshot(`
+      [
+        0,
+        1,
+        2,
+        3,
+      ]
+    `)
+  })
+})
+
+describe('zonedEpoch across DST transitions', () => {
+  test('a normal day round-trips exactly', () => {
+    const t = zonedEpoch('2026-07-01', 9 * 60 + 30, 'Europe/Rome')
+    expect(toZonedSlot(t, 'Europe/Rome')).toMatchInlineSnapshot(`
+      {
+        "dayKey": "2026-07-01",
+        "minutes": 570,
+      }
+    `)
+  })
+
+  test('spring-forward gap resolves AFTER the jump, never before', () => {
+    // New York jumps 02:00 -> 03:00 on 2026-03-08, so 02:30 never happens.
+    // Resolving backwards would land on 01:30, an hour EARLIER than typed.
+    const ny = toZonedSlot(zonedEpoch('2026-03-08', 150, 'America/New_York'), 'America/New_York')
+    // Rome jumps 02:00 -> 03:00 on 2026-03-29. Same rule, opposite offset sign.
+    const rome = toZonedSlot(zonedEpoch('2026-03-29', 150, 'Europe/Rome'), 'Europe/Rome')
+    expect({ ny, rome }).toMatchInlineSnapshot(`
+      {
+        "ny": {
+          "dayKey": "2026-03-08",
+          "minutes": 210,
+        },
+        "rome": {
+          "dayKey": "2026-03-29",
+          "minutes": 210,
+        },
+      }
+    `)
+  })
+
+  test('fall-back overlap picks the first occurrence', () => {
+    // New York repeats 01:00-02:00 on 2026-11-01, so 01:30 happens twice.
+    const t = zonedEpoch('2026-11-01', 90, 'America/New_York')
+    expect(toZonedSlot(t, 'America/New_York')).toMatchInlineSnapshot(`
+      {
+        "dayKey": "2026-11-01",
+        "minutes": 90,
+      }
+    `)
+    // The earlier of the two instants is EDT (UTC-4), i.e. 05:30Z not 06:30Z.
+    expect(new Date(t).toISOString()).toMatchInlineSnapshot(`"2026-11-01T05:30:00.000Z"`)
+  })
+
+  test('midnight on a transition day still lands on that day', () => {
+    expect(toZonedSlot(zonedEpoch('2026-03-29', 0, 'Europe/Rome'), 'Europe/Rome'))
+      .toMatchInlineSnapshot(`
+        {
+          "dayKey": "2026-03-29",
+          "minutes": 0,
+        }
+      `)
   })
 })

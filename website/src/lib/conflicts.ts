@@ -223,10 +223,43 @@ export function zonedEpoch(dayKey: string, minutes: number, timeZone: string): n
   const [year, month, day] = dayKey.split('-').map(Number)
   if (!year || !month || !day) throw new Error(`Invalid day key: ${dayKey}`)
   const naive = Date.UTC(year, month - 1, day) + minutes * 60_000
-  // Pass 1 guesses with the offset that applies at the naive instant; pass 2
-  // re-resolves at the guess so a DST change between them is honored.
-  const guess = naive - offsetAt(naive, timeZone)
-  return naive - offsetAt(guess, timeZone)
+  // Pass 1 guesses with the offset at the naive instant; pass 2 re-resolves at
+  // that guess so a DST change between them is honored. Near a transition the
+  // two passes disagree, so keep BOTH candidates and decide by round-tripping.
+  const firstPass = naive - offsetAt(naive, timeZone)
+  const candidates = [firstPass, naive - offsetAt(firstPass, timeZone)]
+  const valid = candidates.filter((instant) => {
+    const back = toZonedSlot(instant, timeZone)
+    return back.dayKey === dayKey && back.minutes === minutes
+  })
+  // Fall-back overlap: the wall time happens twice. Take the first occurrence.
+  if (valid.length > 0) return Math.min(...valid)
+  // Spring-forward gap: the wall time never happens (02:30 on a day that jumps
+  // 02:00 to 03:00). Resolve to the instant just AFTER the jump. Resolving
+  // backwards would silently start the session an hour before the organizer
+  // typed, which is how a conference misses its own opening keynote.
+  return Math.max(...candidates)
+}
+
+/**
+ * SEQUENCE for the next calendar revision of a session.
+ *
+ * Sequence 0 belongs to the FIRST placement only. Re-placing a session that was
+ * cancelled must NOT reuse the cancellation's sequence: the outbox dedupe key
+ * `ics:{session}:{speaker}:{seq}` would already exist, the insert would be
+ * dropped, and the speaker would never learn the talk is back on. Any sequence
+ * above 0 means the session already has calendar history, so the revision must
+ * move forward even though the session is currently unscheduled.
+ */
+export function nextIcsSequence({
+  current,
+  wasScheduled,
+}: {
+  current: number
+  wasScheduled: boolean
+}): number {
+  if (!wasScheduled && current === 0) return 0
+  return current + 1
 }
 
 /** Every local calendar day the event spans, inclusive of both ends. */

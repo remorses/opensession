@@ -45,6 +45,7 @@ import {
   replyToFor,
   sendEmailMessage,
 } from './lib/emails/send.ts'
+import { zonedEpoch } from './lib/conflicts.ts'
 import { normalizeReviewInput } from './lib/reviews.ts'
 import {
   applyTransition,
@@ -259,38 +260,52 @@ function slugify(name: string): string {
     .slice(0, 60)
 }
 
+/** Date-only inputs stay day keys until the event timezone is known. */
+const DAY_KEY = z.string().regex(/^\d{4}-\d{2}-\d{2}$/)
+
+/**
+ * Resolve the event's date-only bounds to instants THROUGH the event timezone.
+ *
+ * Storing `T00:00:00Z` / `T23:59:59Z` and re-reading them in the event timezone
+ * is off by the zone's offset, which pushes the last day into the next one for
+ * any positive-offset event and drops the first day for a negative one. The
+ * agenda then shows a phantom day the conference does not run on.
+ */
+function resolveEventBounds({
+  startsAt,
+  endsAt,
+  timezone,
+}: {
+  startsAt: string
+  endsAt: string
+  timezone: string
+}): { startsAt: number; endsAt: number } {
+  const start = zonedEpoch(startsAt, 0, timezone)
+  // 23:59 local on the closing day, so the whole last day is inside the range.
+  const end = zonedEpoch(endsAt, 23 * 60 + 59, timezone)
+  if (end <= start) throw new Error('The event must end after it starts')
+  return { startsAt: start, endsAt: end }
+}
+
 const createEventSchema = z.object({
   orgId: z.string().min(1),
   name: z.string().trim().min(1).max(120),
   slug: z.string().trim().toLowerCase().regex(SLUG_RE).max(60).optional(),
   timezone: z.string().min(1).max(60),
-  /** Epoch ms. */
-  startsAt: z.number().int().positive(),
-  endsAt: z.number().int().positive(),
+  /** Local calendar day, `YYYY-MM-DD`. Resolved to an instant through the
+   *  event timezone, NOT UTC — see resolveEventBounds. */
+  startsAt: DAY_KEY,
+  endsAt: DAY_KEY,
 })
 
 /** Create an event in the org and redirect to it. Any member can create
  *  events (org-level authz, no per-event roles). */
-export async function createEvent(input: {
-  orgId: string
-  name: string
-  slug?: string
-  timezone: string
-  startsAt: number
-  endsAt: number
-}) {
+export async function createEvent(input: z.input<typeof createEventSchema>) {
   const actionRequest = getActionRequest()
   const parsed = createEventSchema.parse(input)
   const { session } = await requireOrgAccess(actionRequest, parsed.orgId)
-  if (parsed.endsAt <= parsed.startsAt) {
-    throw new Error('The event must end after it starts')
-  }
-  // Validate the timezone against the runtime's IANA database.
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: parsed.timezone })
-  } catch {
-    throw new Error(`Unknown timezone: ${parsed.timezone}`)
-  }
+  validateTimezone(parsed.timezone)
+  const bounds = resolveEventBounds(parsed)
 
   const slug = parsed.slug || slugify(parsed.name)
   if (!SLUG_RE.test(slug)) throw new Error('Could not derive a valid slug from the event name')
@@ -319,8 +334,8 @@ export async function createEvent(input: {
         name: parsed.name,
         slug,
         timezone: parsed.timezone,
-        startsAt: parsed.startsAt,
-        endsAt: parsed.endsAt,
+        startsAt: bounds.startsAt,
+        endsAt: bounds.endsAt,
         // Reply-To for every mail this event sends. Seeded from the creator so
         // speaker replies land in a real inbox from day one; editable later in
         // Settings → Details.
@@ -420,9 +435,9 @@ const updateEventSchema = z.object({
   websiteUrl: z.string().trim().max(500),
   location: z.string().trim().max(200),
   timezone: z.string().min(1).max(60),
-  /** Epoch ms. */
-  startsAt: z.number().int().positive(),
-  endsAt: z.number().int().positive(),
+  /** Local calendar day, `YYYY-MM-DD`. */
+  startsAt: DAY_KEY,
+  endsAt: DAY_KEY,
   description: z.string().trim().max(5000),
   /** Reply-To for every outbound email of this event. Empty clears it and
    *  falls back to the platform sender. */
@@ -435,10 +450,8 @@ export async function updateEvent(input: z.input<typeof updateEventSchema>) {
   const actionRequest = getActionRequest()
   const parsed = updateEventSchema.parse(input)
   const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
-  if (parsed.endsAt <= parsed.startsAt) {
-    throw new Error('The event must end after it starts')
-  }
   validateTimezone(parsed.timezone)
+  const bounds = resolveEventBounds(parsed)
 
   try {
     await db
@@ -450,8 +463,8 @@ export async function updateEvent(input: z.input<typeof updateEventSchema>) {
         websiteUrl: parsed.websiteUrl || null,
         location: parsed.location || null,
         timezone: parsed.timezone,
-        startsAt: parsed.startsAt,
-        endsAt: parsed.endsAt,
+        startsAt: bounds.startsAt,
+        endsAt: bounds.endsAt,
         description: parsed.description || null,
         contactEmail: parsed.contactEmail.trim() || null,
         updatedAt: Date.now(),

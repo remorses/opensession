@@ -17,7 +17,8 @@ import {
   deleteTrack,
   updateEvent,
 } from '../actions.tsx'
-import { cn, epochToDateInputUTC } from '../lib/utils.ts'
+import { cn } from '../lib/utils.ts'
+import { toZonedSlot } from '../lib/conflicts.ts'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
 import { Input, NativeSelect, Textarea, TimezoneSelect } from './ui/primitives.tsx'
@@ -110,10 +111,10 @@ function DetailsTab({ orgId, event }: { orgId: string; event: EventRow }) {
       websiteUrl: String(formData.get('websiteUrl') ?? '').trim(),
       location: String(formData.get('location') ?? '').trim(),
       timezone: String(formData.get('timezone') ?? '').trim(),
-      // Date-only inputs: start of day → end of day (UTC), same convention
-      // as the create-event dialog.
-      startsAt: Date.parse(`${String(formData.get('startsAt'))}T00:00:00Z`),
-      endsAt: Date.parse(`${String(formData.get('endsAt'))}T23:59:59Z`),
+      // Send the raw day keys. The server resolves them through the event
+      // timezone; converting here would bake in the browser's zone instead.
+      startsAt: String(formData.get('startsAt') ?? ''),
+      endsAt: String(formData.get('endsAt') ?? ''),
       description: String(formData.get('description') ?? '').trim(),
       contactEmail: String(formData.get('contactEmail') ?? '').trim(),
     })
@@ -177,11 +178,11 @@ function DetailsTab({ orgId, event }: { orgId: string; event: EventRow }) {
           </FieldLabel>
           <FieldLabel>
             Starts
-            <Input required name="startsAt" type="date" defaultValue={epochToDateInputUTC(event.startsAt)} />
+            <Input required name="startsAt" type="date" defaultValue={toZonedSlot(event.startsAt, event.timezone).dayKey} />
           </FieldLabel>
           <FieldLabel>
             Ends
-            <Input required name="endsAt" type="date" defaultValue={epochToDateInputUTC(event.endsAt)} />
+            <Input required name="endsAt" type="date" defaultValue={toZonedSlot(event.endsAt, event.timezone).dayKey} />
           </FieldLabel>
         </div>
         <FieldLabel>
