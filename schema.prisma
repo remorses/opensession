@@ -47,7 +47,8 @@ generator client {
 // AUTH + ORGS — ported 1:1 from the akarso project (db/src/schema.ts), which
 // this codebase is built on. akarso runs BetterAuth on D1/SQLite via drizzle.
 // One User table serves BOTH organizers and submitters/speakers. Organizers
-// get OrgMember + EventMember rows; submitters get Speaker rows.
+// get OrgMember rows (org-level authz, no per-event roles); submitters get
+// Speaker rows.
 //
 // Porting rules (keep identical to akarso so its code ports unchanged):
 // - Physical table names: user / session / account / verification /
@@ -84,7 +85,6 @@ model User {
   ownedOrgs         Org[]
   memberships       OrgMember[]
   invitationsCreated OrgInvitation[]
-  eventMemberships  EventMember[]
   speakerIdentities Speaker[] // linked speaker rows across events
   reviews           Review[]
 
@@ -242,17 +242,9 @@ model Event {
   logoFileId  String? @unique
   logoFile    File?   @relation("EventLogo", fields: [logoFileId], references: [id])
 
-  // Per-user submission cap (counts drafts too).
-  submissionLimitPerUser Int @default(3)
-
-  // Race-safe friendlyId allocation: UPDATE ... SET next_session_number =
-  // next_session_number + 1 RETURNING; never SELECT max()+1.
-  nextSessionNumber Int @default(1)
-
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  members         EventMember[]
   tracks          Track[]
   formats         Format[]
   rooms           Room[]
@@ -266,24 +258,9 @@ model Event {
   @@index([orgId])
 }
 
-enum EventRole {
-  ORGANIZER // full event admin
-  REVIEWER  // can only see/score assigned submissions
-}
-
-model EventMember {
-  id        String    @id @default(cuid())
-  eventId   String
-  event     Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  userId    String
-  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
-  role      EventRole @default(ORGANIZER)
-  createdAt DateTime  @default(now())
-
-  // A user can hold several roles (e.g. ORGANIZER and REVIEWER).
-  @@unique([eventId, userId, role])
-  @@index([userId])
-}
+// NOTE: there is NO per-event membership table. Authorization is org-level
+// (OrgMember): every member of the owning org can manage and review every
+// event of that org. Per-event roles/external reviewers can come back later.
 
 // ═════════════════════════════════════════════════════════════════════════════
 // EVENT LIBRARY — option sources for dropdowns, agenda dimensions, roles,
@@ -405,10 +382,8 @@ model Form {
   slug   String // public URL: /submit/{event.slug}/{form.slug}
   status FormStatus @default(DRAFT)
 
-  // The live MDX (denormalized pointer to the latest FormVersion; new
-  // responses snapshot this version).
-  currentVersionId String?      @unique
-  currentVersion   FormVersion? @relation("CurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
+  // The live MDX is DERIVED: the newest FormVersion (ORDER BY createdAt DESC
+  // LIMIT 1). No stored pointer to keep in sync.
 
   closesAt DateTime? // hard-coded draft reminders fire 3 days and 1 day before
 
@@ -417,7 +392,6 @@ model Form {
 
   versions        FormVersion[]
   responses       FormResponse[]
-  sessions        Session[] // submissions created through this form
   taskDefinitions TaskDefinition[]
 
   @@unique([eventId, slug]) // slug is per-event ("cfp" can exist in every event)
@@ -436,7 +410,6 @@ model FormVersion {
   mdxSource String   // the whole form: structure, copy, field props, logic
   createdAt DateTime @default(now())
 
-  currentOf Form?          @relation("CurrentVersion")
   responses FormResponse[]
 
   @@index([formId, createdAt])
@@ -533,15 +506,9 @@ model Session {
   eventId String
   event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
 
-  // Human-readable id shown in UI/portal ("SESS-4"). Allocated atomically from
-  // Event.nextSessionNumber (never SELECT max()+1 — race under concurrency).
-  friendlyId Int
-
-  // Provenance: null form = manually created by an admin.
-  formId String?
-  form   Form?   @relation(fields: [formId], references: [id], onDelete: SetNull)
   // The single source of truth for who submitted it (their portal User is
-  // reachable via Speaker.userId). No duplicate submitter flags elsewhere.
+  // reachable via Speaker.userId). Null = created by an admin. Which form
+  // created it is derivable via FormResponse (sessionId + formId).
   submitterSpeakerId String?
   submitterSpeaker   Speaker? @relation(fields: [submitterSpeakerId], references: [id], onDelete: SetNull)
 
@@ -583,39 +550,19 @@ model Session {
 
   participants    SessionParticipant[]
   formResponses   FormResponse[]
-  transitions     SessionTransition[]
   reviews         Review[]
   taskAssignments TaskAssignment[]
-  files           File[]               @relation("SessionFiles")
   emailMessages   EmailMessage[]
 
-  @@unique([eventId, friendlyId])
   @@unique([id, eventId]) // target for composite tenant-boundary FKs
   @@index([eventId, status])
   @@index([eventId, startsAt])
   @@index([eventId, roomId, startsAt])
-  @@index([formId])
   @@index([submitterSpeakerId])
   @@index([trackId])
   // BetterAuth owns the physical `session` table (akarso parity), so the
   // domain session entity lives in `event_session`.
   @@map("event_session")
-}
-
-// Append-only audit log of every stage/status change (who, when, why).
-// Written in the same atomic batch as the change itself. Actor ids are
-// snapshots (no FK) so history survives user deletion.
-model SessionTransition {
-  id         String        @id @default(cuid())
-  sessionId  String
-  session    Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  fromStatus SessionStatus
-  toStatus   SessionStatus
-  actorUserId String? // null = system (e.g. auto-close, submitter portal action noted in reason)
-  reason      String?
-  occurredAt  DateTime     @default(now())
-
-  @@index([sessionId, occurredAt])
 }
 
 // Speakers/moderators on a session, with role, display order, and
@@ -680,8 +627,7 @@ model FormResponse {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
-  fieldValues   FormFieldValue[]
-  emailMessages EmailMessage[]
+  fieldValues FormFieldValue[]
 
   @@index([formId, status])
   @@index([formVersionId])
@@ -720,7 +666,7 @@ model FormFieldValue {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // EVALUATION — single-round, Sessionize-style quick reviews (MVP). Every
-// EventMember (ORGANIZER or REVIEWER) can review every submission: a
+// member of the owning org can review every submission: a
 // Yes/Maybe/No vote, an optional 1–5 rating, and a comment. No plans, no
 // rounds, no scorecards, no assignments — the admin abstracts table sorts by
 // vote counts and average rating, then the organizer moves submissions to the
@@ -776,13 +722,8 @@ enum TaskSource {
   FORM   // completing the linked portal Form completes the task
 }
 
-// AUTO_ON_ACCEPT tasks are assigned to every accepted speaker/session when
-// they reach ACCEPTED; MANUAL tasks are assigned by hand.
-enum TaskAssignmentMode {
-  AUTO_ON_ACCEPT
-  MANUAL
-}
-
+// Every task definition auto-assigns to every accepted speaker/session at
+// acceptance time (hard-coded; no per-task assignment mode).
 model TaskDefinition {
   id      String     @id @default(cuid())
   eventId String
@@ -796,7 +737,6 @@ model TaskDefinition {
   form   Form?   @relation(fields: [formId], references: [id], onDelete: SetNull)
 
   dueAt     DateTime? // default for NEW assignments (snapshotted per assignment)
-  assignmentMode TaskAssignmentMode @default(AUTO_ON_ACCEPT)
   sortOrder Int       @default(0)
   createdAt DateTime  @default(now())
 
@@ -809,8 +749,7 @@ model TaskDefinition {
 
 enum TaskStatus {
   NOT_STARTED
-  IN_PROGRESS // draft response / partial upload exists
-  SUBMITTED   // awaiting admin review (form/file tasks)
+  IN_PROGRESS // draft response exists
   COMPLETED
 }
 
@@ -836,9 +775,7 @@ model TaskAssignment {
   createdAt   DateTime   @default(now())
   updatedAt   DateTime   @updatedAt
 
-  formResponse  FormResponse?
-  files         File[]        @relation("TaskFiles")
-  emailMessages EmailMessage[]
+  formResponse FormResponse?
 
   // Uniqueness via TWO partial indexes (see header appendix) — a plain
   // composite unique fails for speaker tasks because sessionId is NULL and
@@ -857,12 +794,12 @@ enum FileKind {
   OTHER
 }
 
-// Bytes live in object storage; this row is metadata + ownership links.
-// Ownership rule: the EVENT owns every file (deleting the event deletes its
-// files + storage bytes). Deleting a session/task/answer only CLEARS the
-// attachment (SetNull) — a background job garbage-collects rows with no
-// remaining references and deletes the storage bytes. A file serves exactly
-// one purpose (a HEADSHOT is never also a logo) — app-enforced via `kind`.
+// Bytes live in object storage; this row is metadata. The EVENT owns every
+// file (deleting the event deletes its files + storage bytes). A file is
+// referenced from exactly one usage point: Event.logoFileId,
+// Speaker.headshotFileId, Session.coverImageFileId, or FormFieldValue.fileId
+// (slides/documents flow through form uploads). Detaching is SetNull; a
+// background job garbage-collects rows with no remaining references.
 model File {
   id      String   @id @default(cuid())
   eventId String
@@ -876,11 +813,6 @@ model File {
 
   uploadedBySpeakerId String?
   uploadedBySpeaker   Speaker? @relation("UploadedBySpeaker", fields: [uploadedBySpeakerId], references: [id], onDelete: SetNull)
-  // What the file is attached to (any may be null).
-  sessionId        String?
-  session          Session?        @relation("SessionFiles", fields: [sessionId], references: [id], onDelete: SetNull)
-  taskAssignmentId String?
-  taskAssignment   TaskAssignment? @relation("TaskFiles", fields: [taskAssignmentId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
 
@@ -891,8 +823,6 @@ model File {
   formFieldValues   FormFieldValue[]
 
   @@index([eventId])
-  @@index([sessionId])
-  @@index([taskAssignmentId])
   @@index([uploadedBySpeakerId])
 }
 
@@ -952,11 +882,7 @@ model EmailMessage {
   speaker   Speaker? @relation(fields: [speakerId], references: [id], onDelete: SetNull)
   sessionId String?
   session   Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
-  // Provenance links for reminder/task/draft emails.
-  taskAssignmentId String?
-  taskAssignment   TaskAssignment? @relation(fields: [taskAssignmentId], references: [id], onDelete: SetNull)
-  formResponseId   String?
-  formResponse     FormResponse?   @relation(fields: [formResponseId], references: [id], onDelete: SetNull)
+  // Finer provenance (task, response, ...) is encoded in dedupeKey — no FKs.
 
   subject  String
   bodyHtml String // rendered snapshot
@@ -975,7 +901,6 @@ model EmailMessage {
   @@index([eventId, status])
   @@index([speakerId])
   @@index([sessionId])
-  @@index([taskAssignmentId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

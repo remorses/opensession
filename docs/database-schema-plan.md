@@ -131,8 +131,9 @@ transcriptions/recordings, sponsors/exhibitors.
 
 1. **Auth = BetterAuth for BOTH populations.** One `User` table serves organizers and
    submitters. Organizers get `OrgMember` rows (app-level org membership ported from
-   akarso — NOT a BetterAuth plugin) and `EventMember` rows (per-event role incl.
-   `REVIEWER`). Submitters get a `Speaker` row per event. `Speaker.userId` is nullable:
+   akarso — NOT a BetterAuth plugin); authorization is org-level only — every org
+   member manages and reviews every event of the org (no per-event membership table).
+   Submitters get a `Speaker` row per event. `Speaker.userId` is nullable:
    a submitter can add co-speakers by email who have never logged in; when that person
    later signs in (magic link to the same email), the Speaker row links to their User.
 
@@ -169,8 +170,8 @@ transcriptions/recordings, sponsors/exhibitors.
      entity field-value tables; the latest submitted response is the source of truth
      for custom fields, and admin tables derive custom columns from distinct names.
 
-5. **Evaluation is one `Review` table** (MVP, Sessionize-style): every `EventMember`
-   (ORGANIZER or REVIEWER) can review every submission — a Yes/Maybe/No `vote`, an
+5. **Evaluation is one `Review` table** (MVP, Sessionize-style): every member of the
+   owning org can review every submission — a Yes/Maybe/No `vote`, an
    optional 1–5 `rating`, and a `comment`, unique per (session, reviewer). The admin
    table sorts by vote counts and average rating; the organizer then moves submissions
    to the accept/decline queues. No plans, rounds, scorecards, pools, or assignments.
@@ -214,8 +215,8 @@ Form:  DRAFT → OPEN → CLOSED (auto at closesAt) → ARCHIVED; every save cre
 Task:  NOT_STARTED → IN_PROGRESS → SUBMITTED → COMPLETED (OVERDUE derived from dueAt)
 Email: QUEUED → SENT | FAILED (retried on the same row, deduped by dedupeKey)
 
-Every Session status change also appends a SessionTransition row (who/when/why)
-in the same atomic batch — the full audit trail from submission to agenda.
+Lifecycle timestamps on Session (submittedAt/decidedAt/notifiedAt/withdrawnAt)
+summarize the history — no separate transition log in the MVP.
 ```
 
 ## Gap-filling assumptions
@@ -235,10 +236,8 @@ in the same atomic batch — the full audit trail from submission to agenda.
 - Decision emails: bulk "notify" action sends per-submission decision emails and stamps
   `Session.notifiedAt` **after** the message reaches `SENT` (matches the "Notified"
   column in the abstracts table).
-- Submission limits: event-level default (`Event.submissionLimitPerUser`, default 3) with
-  optional per-form override (`Form.submissionLimit`), counting drafts + submitted.
-- `friendlyId` is allocated from the atomic `Event.nextSessionNumber` counter (never
-  `SELECT max()+1`, which races under concurrent submissions).
+- Submission limit is hard-coded in the app (3 per user per event, counting drafts).
+- Sessions have no human-readable sequential id — cuids/ULIDs in URLs, titles in tables.
 
 # Design review round (oracle + Sessionize research)
 
@@ -376,6 +375,23 @@ later; nothing cut loses data that the MVP workflows need.
 | Field trims | Event: eventType, background image. Session: clientSessionId, capacity, ceuCredits. Speaker: salutation, honorific, gender, phone, facebookUrl. Form: per-form submissionLimit, draftPolicy, afterSubmit (hard-coded behavior) |
 
 What deliberately STAYS despite MVP pressure: `FormVersion` (immutable response
-evidence), `SessionTransition` (audit), `EmailMessage.dedupeKey` outbox (no double
-sends), composite tenant-boundary FKs, partial unique indexes, ICS sequence handling —
-these prevent corruption, not features.
+evidence), `EmailMessage.dedupeKey` outbox (no double sends), composite
+tenant-boundary FKs, partial unique indexes, ICS sequence handling — these prevent
+corruption, not features.
+
+# MVP cut (round 5)
+
+Second squeeze: **25 → 23 models**, mostly by deriving instead of storing.
+
+| Cut | Why |
+|---|---|
+| `Session.friendlyId` + `Event.nextSessionNumber` | sequential human ids need race-safe counters; cuids in URLs and titles in tables are enough |
+| `EventMember` + `EventRole` | authorization is org-level: every `OrgMember` manages/reviews every event of the org |
+| `SessionTransition` | lifecycle timestamps on Session (submitted/decided/notified/withdrawn) summarize history; full audit is post-MVP |
+| `Session.formId` | derivable via `FormResponse(sessionId, formId)` |
+| `Form.currentVersionId` | derive: newest `FormVersion` by createdAt — no pointer to keep in sync |
+| `Event.submissionLimitPerUser` | hard-coded (3) |
+| `TaskDefinition.assignmentMode` | all tasks auto-assign on accept, hard-coded |
+| `TaskStatus.SUBMITTED` | no admin-review step on task completion |
+| `File.sessionId`, `File.taskAssignmentId` | files reference exactly one usage point: event logo, speaker headshot, session cover, or `FormFieldValue.fileId` (slides flow through form uploads) |
+| `EmailMessage.taskAssignmentId/formResponseId` FKs | finer provenance is already encoded in `dedupeKey` |
