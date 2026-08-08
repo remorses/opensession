@@ -1,0 +1,60 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "opensessions-website",
+  "main": "spiceflow/cloudflare-entrypoint",
+  "workers_dev": true,
+  "compatibility_date": "2026-06-02",
+  "compatibility_flags": ["nodejs_compat"],
+  "placement": { "mode": "smart" },
+
+  // ── Production (top-level) ──────────────────────────────────────────
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "opensessions-db",
+      "database_id": "eeb4bbf9-ea59-449f-b543-28b21c301641",
+      "migrations_dir": "../db/drizzle",
+      "migrations_pattern": "../db/drizzle/*/migration.sql"
+    }
+  ],
+  "vars": {
+    "APP_URL": "https://opensessions-website.remorses.workers.dev"
+  },
+  "secrets": {
+    "required": [
+      "BETTER_AUTH_SECRET",
+      "BETTER_AUTH_URL",
+      "GOOGLE_CLIENT_ID",
+      "GOOGLE_CLIENT_SECRET"
+    ]
+  },
+
+  // ── Preview ─────────────────────────────────────────────────────────
+  // Bindings are NOT inherited — must duplicate everything here
+  "env": {
+    "preview": {
+      "name": "opensessions-website-preview",
+      "workers_dev": true,
+      "d1_databases": [
+        {
+          "binding": "DB",
+          "database_name": "opensessions-preview-db",
+          "database_id": "56259181-384e-41cd-9d50-6d9cc59b8a02",
+          "migrations_dir": "../db/drizzle",
+          "migrations_pattern": "../db/drizzle/*/migration.sql"
+        }
+      ],
+      "vars": {
+        "APP_URL": "https://opensessions-website-preview.remorses.workers.dev"
+      },
+      "secrets": {
+        "required": [
+          "BETTER_AUTH_SECRET",
+          "BETTER_AUTH_URL",
+          "GOOGLE_CLIENT_ID",
+          "GOOGLE_CLIENT_SECRET"
+        ]
+      }
+    }
+  }
+}

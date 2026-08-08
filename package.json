@@ -1,0 +1,13 @@
+{
+  "private": true,
+  "pnpm": {
+    "overrides": {
+      "spiceflow": "1.26.0-rsc.15"
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "typescript": "^5.8.3",
+    "vitest": "^3.2.1"
+  }
+}

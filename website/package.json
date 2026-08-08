@@ -1,0 +1,49 @@
+{
+  "name": "website",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tuistory -- sigillo run -c dev -- vite dev",
+    "build": "tsc && vite build",
+    "typecheck": "tsc",
+    "types": "wrangler types",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "db:migrate:preview": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote --env preview",
+    "db:migrate:prod": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote",
+    "deploy": "pnpm db:migrate:preview && CLOUDFLARE_ENV=preview sigillo run -c preview --command 'tsc && vite build && wrangler deploy --env preview'",
+    "deploy:prod": "pnpm db:migrate:prod && sigillo run -c prod --command 'tsc && vite build && wrangler deploy'"
+  },
+  "dependencies": {
+    "@base-ui/react": "^1.6.0",
+    "@holocron.so/cli": "^0.20.1",
+    "@holocron.so/vite": "0.25.1",
+    "better-auth": "^1.2.8",
+    "better-auth-drizzle-adapter": "^1.0.5",
+    "clsx": "^2.1.1",
+    "date-fns": "^4.4.0",
+    "db": "workspace:^",
+    "drizzle-orm": "1.0.0-beta.22",
+    "lucide-react": "^1.23.0",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "safe-mdx": "^1.11.5",
+    "spiceflow": "1.26.0-rsc.15",
+    "string-dedent": "^3.0.2",
+    "tailwind-merge": "^3.6.0",
+    "ulid": "^3.0.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.42.4",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "class-variance-authority": "^0.7.1",
+    "radix-ui": "^1.4.2",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^5.8.3",
+    "vite": "^8.1.0",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.106.0"
+  }
+}

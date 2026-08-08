@@ -1,0 +1,16 @@
+{
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "jsx": "react-jsx",
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "noEmit": true,
+    "strict": true,
+    "skipLibCheck": true,
+    "target": "ESNext",
+    "types": []
+  },
+  "include": ["src", "worker-configuration.d.ts", "vite.config.ts"],
+  "exclude": ["src/pages"]
+}

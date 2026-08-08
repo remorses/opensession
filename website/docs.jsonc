@@ -1,0 +1,52 @@
+{
+  "$schema": "https://holocron.so/docs.json",
+  "name": "OpenSessions",
+  "description": "Open-source speaker and session management: CFP forms, abstract review, agenda builder, and a speaker portal.",
+  "colors": {
+    "primary": "#fb7185"
+  },
+  "appearance": {
+    "default": "dark"
+  },
+  "icons": { "library": "lucide" },
+  // App routes served by the same worker — the broken-link checker only
+  // sees .mdx pages, so anything the landing page links to must be here.
+  "knownPaths": ["/login", "/login/*", "/dashboard", "/invite/*", "/org", "/org/*"],
+  "navbar": {
+    "links": [
+      {
+        "label": "Dashboard",
+        "href": "/dashboard"
+      }
+    ],
+    "primary": {
+      "type": "button",
+      "label": "Login with Google",
+      "href": "/login/google"
+    }
+  },
+  "navigation": {
+    "global": {
+      "anchors": [
+        {
+          "anchor": "GitHub",
+          "href": "https://github.com/remorses/opensessions",
+          "icon": "lucide:github"
+        }
+      ]
+    },
+    "tabs": [
+      {
+        "tab": "Home",
+        "icon": "lucide:home",
+        "groups": [
+          {
+            "group": "Overview",
+            "icon": "lucide:rocket",
+            "pages": ["index"]
+          }
+        ]
+      }
+    ]
+  }
+}
