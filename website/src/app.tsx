@@ -22,7 +22,16 @@ import {
   requireSession,
 } from './db.ts'
 import { libraryOptions, type FieldOption } from './forms/collect-fields.ts'
+import { loadAgendaSessions, speakerDisplayName } from './lib/agenda-server.ts'
 import { canAccessFile } from './lib/cfp-submission.ts'
+import {
+  eventDayKeys,
+  findConflicts,
+  formatSlotRange,
+  toZonedSlot,
+  type AgendaConflictRow,
+  type AgendaSessionRow,
+} from './lib/conflicts.ts'
 import { getOrCreateCfpDraft, getPublicCfp, type PublicCfpForm } from './lib/cfp-server.ts'
 import {
   coverageBySession,
@@ -1055,12 +1064,39 @@ export const app = new Spiceflow()
     })
   })
 
-  .page('/org/:orgId/e/:eventId/sessions', async () => (
-    <ComingSoonPage
-      title="Sessions"
-      description="Accepted and service sessions with times, rooms, tracks, and visibility."
-    />
-  ))
+  // ── Sessions (ACCEPTED content + SERVICE blocks) ──────────────────
+  // Times are converted to the event timezone HERE (server-side Intl) and
+  // handed to the client as plain day keys + minute offsets, so nothing in a
+  // hydrating component ever re-derives a zoned value.
+
+  .loader('/org/:orgId/e/:eventId/sessions', async ({ params }) => {
+    const db = getDb()
+    const [event, rows] = await Promise.all([
+      db.query.event.findFirst({
+        where: { id: params.eventId, orgId: params.orgId },
+        columns: { id: true, timezone: true },
+      }),
+      loadAgendaSessions(getDb(), params.eventId),
+    ])
+    if (!event) throw redirect(`/org/${params.orgId}`)
+    return {
+      sessions: rows.map((row) => toAgendaRow(row, event.timezone)),
+      timezone: event.timezone,
+    }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/sessions',
+    query: z.object({
+      // zod .default() is not applied by spiceflow query validation.
+      tab: z.enum(['all', 'scheduled', 'unscheduled', 'service']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { SessionsPage } = await import('./components/sessions-page.tsx')
+      return <SessionsPage tab={query.tab ?? 'all'} />
+    },
+  })
+
   .page('/org/:orgId/e/:eventId/files', async () => (
     <ComingSoonPage
       title="Files"
@@ -1195,12 +1231,75 @@ export const app = new Spiceflow()
     },
   })
 
-  .page('/org/:orgId/e/:eventId/agenda', async () => (
-    <ComingSoonPage
-      title="Agenda"
-      description="Schedule sessions across days and rooms, and spot room or speaker conflicts."
-    />
-  ))
+  // ── Agenda (?view=list|day|week|rooms|conflicts&day=YYYY-MM-DD) ───
+
+  .loader('/org/:orgId/e/:eventId/agenda', async ({ params, request }) => {
+    const db = getDb()
+    const [event, rows] = await Promise.all([
+      db.query.event.findFirst({
+        where: { id: params.eventId, orgId: params.orgId },
+        columns: { id: true, timezone: true, startsAt: true, endsAt: true },
+      }),
+      loadAgendaSessions(getDb(), params.eventId),
+    ])
+    if (!event) throw redirect(`/org/${params.orgId}`)
+
+    const sessions = rows.map((row) => toAgendaRow(row, event.timezone))
+    const byId = new Map(sessions.map((row) => [row.id, row]))
+    const days = eventDayKeys(event.startsAt, event.endsAt, event.timezone)
+    const requestedDay = new URL(request.url).searchParams.get('day')
+    const selectedDay = requestedDay && days.includes(requestedDay)
+      ? requestedDay
+      : (days[0] ?? '')
+
+    const conflicts = findConflicts(
+      rows.map((row) => ({
+        id: row.id,
+        roomId: row.roomId,
+        startsAt: row.startsAt,
+        endsAt: row.endsAt,
+        speakerIds: row.participants.map((part) => part.speakerId),
+      })),
+    ).map((conflict): AgendaConflictRow => {
+      const a = byId.get(conflict.aId)
+      const b = byId.get(conflict.bId)
+      const speakerNames = (conflict.speakerIds ?? []).map((speakerId) => {
+        const part = rows
+          .find((row) => row.id === conflict.aId)
+          ?.participants.find((row) => row.speakerId === speakerId)
+        return part?.speaker ? speakerDisplayName(part.speaker) : 'Speaker'
+      })
+      return {
+        aId: conflict.aId,
+        bId: conflict.bId,
+        aTitle: a?.title ?? 'Untitled',
+        bTitle: b?.title ?? 'Untitled',
+        aKind: a?.kind ?? 'CONTENT',
+        bKind: b?.kind ?? 'CONTENT',
+        reason: conflict.reason,
+        detail:
+          conflict.reason === 'ROOM'
+            ? (a?.roomName ?? 'Same room')
+            : speakerNames.join(', ') || 'Shared speaker',
+        dayKey: a?.dayKey ?? null,
+        timeLabel: a?.timeLabel ?? '',
+      }
+    })
+
+    return { sessions, days, selectedDay, conflicts, timezone: event.timezone }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/agenda',
+    query: z.object({
+      view: z.enum(['list', 'day', 'week', 'rooms', 'conflicts']).optional(),
+      day: z.string().optional(),
+    }),
+    handler: async ({ query }) => {
+      const { AgendaPage } = await import('./components/agenda-page.tsx')
+      return <AgendaPage view={query.view ?? 'list'} />
+    },
+  })
 
   // ── Tasks ─────────────────────────────────────────────────────────
 
@@ -1376,6 +1475,42 @@ function toFormListRow<T extends { responses: { status: 'DRAFT' | 'SUBMITTED' }[
     ...form,
     submitted: responses.filter((row) => row.status === 'SUBMITTED').length,
     drafts: responses.filter((row) => row.status === 'DRAFT').length,
+  }
+}
+
+/** Map one agenda DB row to the client row shape. Timezone conversion happens
+ *  HERE (server-side Intl); the client only ever sees day keys and minutes. */
+function toAgendaRow(
+  row: Awaited<ReturnType<typeof loadAgendaSessions>>[number],
+  timezone: string,
+): AgendaSessionRow {
+  const start = row.startsAt != null ? toZonedSlot(row.startsAt, timezone) : null
+  const end = row.endsAt != null ? toZonedSlot(row.endsAt, timezone) : null
+  // A block running past local midnight is clamped so the day grid stays inside
+  // one column set; the list view shows the real end via endsAt.
+  const endMinute = end ? (end.dayKey === start?.dayKey ? end.minutes : 24 * 60) : null
+  return {
+    id: row.id,
+    kind: row.kind,
+    status: row.status,
+    title: row.title?.trim() || 'Untitled',
+    visibility: row.visibility,
+    roomId: row.roomId,
+    roomName: row.room?.name ?? null,
+    trackName: row.track?.name ?? null,
+    trackColor: row.track?.color ?? null,
+    formatName: row.format?.name ?? null,
+    defaultDurationMinutes: row.format?.defaultDurationMinutes ?? null,
+    startsAt: row.startsAt,
+    endsAt: row.endsAt,
+    dayKey: start?.dayKey ?? null,
+    startMinute: start?.minutes ?? null,
+    endMinute,
+    timeLabel:
+      start && endMinute != null ? formatSlotRange(start.minutes, endMinute) : null,
+    speakerNames: row.participants.flatMap((part) =>
+      part.speaker ? [speakerDisplayName(part.speaker)] : [],
+    ),
   }
 }
 

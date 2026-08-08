@@ -26,6 +26,11 @@ import {
   starterSessionMaterialsTemplate,
   starterSpeakerProfileTemplate,
 } from './forms/starter-template.ts'
+import {
+  clearSessionSlot,
+  scheduleSessionSlot,
+  MAX_SLOT_MINUTES,
+} from './lib/agenda-server.ts'
 import { cfpSubmissionSchema, saveCfpDraft, submitCfpResponse } from './lib/cfp-server.ts'
 import {
   completeManualTaskAssignment as completeManualTaskAssignmentServer,
@@ -1221,6 +1226,170 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
   }
 
   return { updated: planned.length, emailsQueued, emailsSent }
+}
+
+// ── Agenda: sessions list + schedule placement ──────────────────────
+//
+// The client sends a WALL CLOCK ({ dayKey, startMinute, durationMinutes }) and
+// never an epoch: the conversion to UTC ms happens in agenda-server.ts with the
+// event's timezone, so a speaker's browser tz can never shift the schedule.
+
+const scheduleSessionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+  roomId: z.string().min(1),
+  /** Local calendar day in the event timezone, `YYYY-MM-DD`. */
+  dayKey: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+  /** Minutes since local midnight. */
+  startMinute: z.number().int().min(0).max(24 * 60 - 1),
+  durationMinutes: z.number().int().min(5).max(MAX_SLOT_MINUTES),
+  /** Second call after the organizer accepted the conflict warning. */
+  confirmConflicts: z.boolean().optional(),
+})
+
+/** Place or move a session on the agenda. Overlaps warn (returns
+ *  `scheduled: false` + the conflicts) instead of blocking; calling again with
+ *  confirmConflicts writes it. Bumps icsSequence and mails the invite/update. */
+export async function scheduleSession(input: z.input<typeof scheduleSessionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = scheduleSessionSchema.parse(input)
+  const { db, event } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  return scheduleSessionSlot({
+    db,
+    event,
+    sessionId: parsed.sessionId,
+    roomId: parsed.roomId,
+    dayKey: parsed.dayKey,
+    startMinute: parsed.startMinute,
+    durationMinutes: parsed.durationMinutes,
+    confirmConflicts: parsed.confirmConflicts ?? false,
+    now: Date.now(),
+  })
+}
+
+const unscheduleSessionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+})
+
+/** Remove a session from the agenda and send the calendar cancellation. */
+export async function unscheduleSession(input: z.input<typeof unscheduleSessionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = unscheduleSessionSchema.parse(input)
+  const { db, event } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  return clearSessionSlot({ db, event, sessionId: parsed.sessionId, now: Date.now() })
+}
+
+const setSessionVisibilitySchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+  visibility: z.enum(['PUBLIC', 'PRIVATE']),
+})
+
+/** PUBLIC sessions appear in the public agenda, feeds, and embeds. */
+export async function setSessionVisibility(input: z.input<typeof setSessionVisibilitySchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = setSessionVisibilitySchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const updated = await db
+    .update(schema.eventSession)
+    .set({ visibility: parsed.visibility, updatedAt: Date.now() })
+    .where(
+      orm.and(
+        orm.eq(schema.eventSession.id, parsed.sessionId),
+        orm.eq(schema.eventSession.eventId, parsed.eventId),
+      ),
+    )
+    .limit(1)
+    .returning({ id: schema.eventSession.id })
+  if (updated.length === 0) throw new Error('Session not found')
+  return { sessionId: parsed.sessionId, visibility: parsed.visibility }
+}
+
+const createServiceSessionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  title: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(2000).optional(),
+  visibility: z.enum(['PUBLIC', 'PRIVATE']).optional(),
+})
+
+/** Breaks, lunch, registration: agenda blocks with no speakers and no CFP.
+ *  Created ACCEPTED so they are schedulable straight away. */
+export async function createServiceSession(input: z.input<typeof createServiceSessionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = createServiceSessionSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const now = Date.now()
+  const [row] = await db
+    .insert(schema.eventSession)
+    .values({
+      eventId: parsed.eventId,
+      kind: 'SERVICE',
+      status: 'ACCEPTED',
+      title: parsed.title,
+      description: parsed.description || null,
+      // Breaks and lunch are what attendees look for on a public agenda, so
+      // service blocks default to PUBLIC (content sessions default PRIVATE).
+      visibility: parsed.visibility ?? 'PUBLIC',
+      decidedAt: now,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .returning({ id: schema.eventSession.id })
+  return { sessionId: row?.id ?? null }
+}
+
+const deleteServiceSessionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+})
+
+/** Only SERVICE blocks can be deleted; submitted abstracts are withdrawn. */
+export async function deleteServiceSession(input: z.input<typeof deleteServiceSessionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = deleteServiceSessionSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const row = await db.query.eventSession.findFirst({
+    where: { id: parsed.sessionId, eventId: parsed.eventId },
+    columns: { id: true, kind: true },
+  })
+  if (!row) throw new Error('Session not found')
+  if (row.kind !== 'SERVICE') throw new Error('Only service sessions can be deleted')
+  await db
+    .delete(schema.eventSession)
+    .where(
+      orm.and(
+        orm.eq(schema.eventSession.id, parsed.sessionId),
+        orm.eq(schema.eventSession.eventId, parsed.eventId),
+      ),
+    )
+    .limit(1)
+  return { sessionId: parsed.sessionId }
 }
 
 const retryEmailSchema = z.object({
