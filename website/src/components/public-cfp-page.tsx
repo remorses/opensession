@@ -5,9 +5,9 @@
 
 import * as React from 'react'
 import { Link } from 'spiceflow/react'
-import { savePublicCfpDraft, submitPublicCfp } from '../actions.tsx'
+import { savePublicCfpDraft, startPublicCfpSubmission, submitPublicCfp } from '../actions.tsx'
 import type { FieldOption, FormSubmission, ValuesRecord } from '../forms/collect-fields.ts'
-import { formatDateRangeUTC, formatDateTimeUTC } from '../lib/utils.ts'
+import { formatDateRange, formatDateTimeUTC } from '../lib/utils.ts'
 import { OpenSessionLogo } from './auth-page.tsx'
 import { PublicFormWizard, SubmittedSuccess } from './public-form-wizard.tsx'
 import { Button } from './ui/button.tsx'
@@ -33,7 +33,7 @@ export function PublicCfpPage({
   accountEmail,
   accountName,
 }: {
-  event: { id: string; slug: string; name: string; startsAt: number; endsAt: number; location: string | null }
+  event: { id: string; slug: string; name: string; startsAt: number; endsAt: number; timezone: string; location: string | null }
   form: { id: string; slug: string; name: string; closesAt: number | null }
   scope: { tracks: FieldOption[]; formats: FieldOption[] }
   mdxSource: string
@@ -45,6 +45,7 @@ export function PublicCfpPage({
 }) {
   const [lastSubmission, setLastSubmission] = React.useState<FormSubmission | null>(null)
   const [saving, setSaving] = React.useState(false)
+  const [starting, setStarting] = React.useState(false)
   const [savedAt, setSavedAt] = React.useState<number | null>(null)
   const [error, setError] = React.useState<string | null>(null)
   const [submitted, setSubmitted] = React.useState<{
@@ -113,7 +114,7 @@ export function PublicCfpPage({
         <span className="text-sm font-medium text-muted-foreground">{form.name}</span>
         <h1 className="text-2xl font-semibold tracking-tight text-balance sm:text-3xl">{event.name}</h1>
         <p className="text-sm text-muted-foreground">
-          {formatDateRangeUTC(event.startsAt, event.endsAt)}
+          {formatDateRange({ startMs: event.startsAt, endMs: event.endsAt, timezone: event.timezone })}
           {event.location ? ` · ${event.location}` : ''}
         </p>
         {form.closesAt ? <p className="text-sm text-muted-foreground">Closes {formatDateTimeUTC(form.closesAt)}</p> : null}
@@ -153,6 +154,33 @@ export function PublicCfpPage({
               <Link href={`/portal/${event.slug}`} className="text-sm underline underline-offset-4">
                 View your submissions
               </Link>
+            </section>
+          </>
+        ) : !draft && accountEmail ? (
+          <>
+            {header}
+            <section className="flex flex-col items-center gap-4 py-8 text-center text-balance">
+              <div className="flex flex-col gap-2">
+                <h2 className="text-xl font-semibold">Start another submission</h2>
+                <p className="text-sm text-muted-foreground">
+                  Your previous responses are in the speaker portal. Start a new draft only when you are ready.
+                </p>
+              </div>
+              <Button
+                loading={starting}
+                onClick={async () => {
+                  setStarting(true)
+                  try {
+                    await startPublicCfpSubmission({ eventSlug: event.slug, formSlug: form.slug })
+                  } catch (cause) {
+                    toastActionError(cause, 'Could not start a submission')
+                  } finally {
+                    setStarting(false)
+                  }
+                }}
+              >
+                Start submission
+              </Button>
             </section>
           </>
         ) : (

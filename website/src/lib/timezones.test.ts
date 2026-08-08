@@ -2,6 +2,7 @@
 // server rejects unknown ids on save), ids must be unique, and the derived
 // labels must stay unambiguous inside their group.
 import { describe, expect, test } from 'vitest'
+import { formatDateRange } from './utils.ts'
 import {
   defaultTimezone,
   isKnownTimezone,
@@ -80,5 +81,21 @@ describe('timezoneGroupsWith', () => {
 describe('defaultTimezone', () => {
   test('is always a curated id', () => {
     expect(isKnownTimezone(defaultTimezone())).toBe(true)
+  })
+})
+
+describe('formatDateRange', () => {
+  test('formats event bounds in the event timezone', () => {
+    expect(formatDateRange({
+      startMs: Date.parse('2027-06-15T07:00:00.000Z'),
+      endMs: Date.parse('2027-06-18T06:59:00.000Z'),
+      timezone: 'America/Los_Angeles',
+    })).toBe('Jun 15 – 17, 2027')
+
+    expect(formatDateRange({
+      startMs: Date.parse('2027-06-14T22:00:00.000Z'),
+      endMs: Date.parse('2027-06-17T21:59:00.000Z'),
+      timezone: 'Europe/Rome',
+    })).toBe('Jun 15 – 17, 2027')
   })
 })

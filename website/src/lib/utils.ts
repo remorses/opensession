@@ -5,11 +5,7 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
-// ── Deterministic UTC date formatting ───────────────────────────────
-// Event dates are stored as UTC start/end-of-day epochs, so UTC getters
-// recover the intended calendar dates. Never use toLocaleDateString for
-// SSR'd dates — workerd and browsers format locales differently, causing
-// hydration mismatches.
+// ── Deterministic date formatting ───────────────────────────────────
 
 const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const
 
@@ -17,6 +13,32 @@ const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'S
 export function formatDateUTC(epochMs: number): string {
   const d = new Date(epochMs)
   return `${MONTHS_SHORT[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}`
+}
+
+function dateParts(epochMs: number, timezone: string) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    day: 'numeric',
+    month: 'numeric',
+    year: 'numeric',
+    timeZone: timezone,
+  }).formatToParts(epochMs)
+  const value = (type: Intl.DateTimeFormatPartTypes) => Number(parts.find((part) => part.type === type)?.value)
+  return { day: value('day'), month: value('month') - 1, year: value('year') }
+}
+
+/** Formats an event's start and closing calendar days in its own timezone. */
+export function formatDateRange({ startMs, endMs, timezone }: {
+  startMs: number
+  endMs: number
+  timezone: string
+}): string {
+  const a = dateParts(startMs, timezone)
+  const b = dateParts(endMs, timezone)
+  const full = (date: typeof a) => `${MONTHS_SHORT[date.month]} ${date.day}, ${date.year}`
+  if (a.year !== b.year) return `${full(a)} – ${full(b)}`
+  if (a.month !== b.month) return `${MONTHS_SHORT[a.month]} ${a.day} – ${MONTHS_SHORT[b.month]} ${b.day}, ${b.year}`
+  if (a.day !== b.day) return `${MONTHS_SHORT[a.month]} ${a.day} – ${b.day}, ${b.year}`
+  return full(a)
 }
 
 /** "Oct 12 – 14, 2026", "Oct 30 – Nov 2, 2026", or "Dec 30, 2026 – Jan 2, 2027" */

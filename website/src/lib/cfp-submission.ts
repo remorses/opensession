@@ -12,6 +12,20 @@ export function assertCfpResponseLimit(existingResponseCount: number) {
   }
 }
 
+export function shouldCreateCfpDraft({ existingResponseCount, explicitlyRequested }: {
+  existingResponseCount: number
+  explicitlyRequested: boolean
+}) {
+  return existingResponseCount === 0 || explicitlyRequested
+}
+
+export function isResumableCfpDraft({ responseStatus, sessionStatus }: {
+  responseStatus: 'DRAFT' | 'SUBMITTED'
+  sessionStatus: string
+}) {
+  return responseStatus === 'DRAFT' && sessionStatus === 'DRAFT'
+}
+
 export type StoredFieldValue = {
   responseId: string
   name: string

@@ -7,6 +7,8 @@ import {
   assertCfpResponseLimit,
   canAccessFile,
   flattenSubmissionValues,
+  isResumableCfpDraft,
+  shouldCreateCfpDraft,
   validatePinnedSubmission,
 } from './cfp-submission.ts'
 
@@ -16,6 +18,22 @@ describe('assertCfpResponseLimit', () => {
     expect(() => assertCfpResponseLimit(3)).toThrowError(
       'You can submit at most 3 sessions to this event',
     )
+  })
+})
+
+describe('shouldCreateCfpDraft', () => {
+  test('creates the first draft automatically but requires intent after a submission', () => {
+    expect(shouldCreateCfpDraft({ existingResponseCount: 0, explicitlyRequested: false })).toBe(true)
+    expect(shouldCreateCfpDraft({ existingResponseCount: 1, explicitlyRequested: false })).toBe(false)
+    expect(shouldCreateCfpDraft({ existingResponseCount: 1, explicitlyRequested: true })).toBe(true)
+  })
+})
+
+describe('isResumableCfpDraft', () => {
+  test('does not reopen a withdrawn session through its draft response', () => {
+    expect(isResumableCfpDraft({ responseStatus: 'DRAFT', sessionStatus: 'DRAFT' })).toBe(true)
+    expect(isResumableCfpDraft({ responseStatus: 'DRAFT', sessionStatus: 'WITHDRAWN' })).toBe(false)
+    expect(isResumableCfpDraft({ responseStatus: 'SUBMITTED', sessionStatus: 'PENDING' })).toBe(false)
   })
 })
 

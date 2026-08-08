@@ -256,11 +256,22 @@ export async function withdrawPortalSubmission({
     now,
   )
   const db = getDb()
-  await db
+  const updateSession = db
     .update(schema.eventSession)
     .set(patch)
     .where(orm.eq(schema.eventSession.id, sessionId))
     .limit(1)
+  const draftResponse = loaded.session.formResponses.find((response) => response.status === 'DRAFT')
+  if (draftResponse) {
+    await db.batch([
+      db.delete(schema.formResponse)
+        .where(orm.eq(schema.formResponse.id, draftResponse.id))
+        .limit(1),
+      updateSession,
+    ] as const)
+  } else {
+    await updateSession
+  }
   return { sessionId, status: 'WITHDRAWN' as const }
 }
 

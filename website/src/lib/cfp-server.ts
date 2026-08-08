@@ -15,7 +15,9 @@ import {
   assertCfpResponseLimit,
   flattenSubmissionValues,
   getFileFieldNames,
+  isResumableCfpDraft,
   restoreSubmissionValues,
+  shouldCreateCfpDraft,
 } from './cfp-submission.ts'
 import { dedupeKeys, enqueueAndSend, replyToFor } from './emails/send.ts'
 import { linkSpeakerIdentity, normalizeSpeakerEmail } from './speaker-link.ts'
@@ -66,7 +68,11 @@ function sessionProfile(session: Session) {
   return { firstName: parts[0] ?? 'Speaker', lastName: parts.slice(1).join(' ') }
 }
 
-export async function getOrCreateCfpDraft(cfp: PublicCfpForm, session: Session) {
+export async function getOrCreateCfpDraft({ cfp, session, explicitlyRequested = false }: {
+  cfp: PublicCfpForm
+  session: Session
+  explicitlyRequested?: boolean
+}) {
   const speaker = await linkSpeakerIdentity({
     eventId: cfp.event.id,
     session,
@@ -74,7 +80,12 @@ export async function getOrCreateCfpDraft(cfp: PublicCfpForm, session: Session) 
   })
   const db = getDb()
   let response = await db.query.formResponse.findFirst({
-    where: { formId: cfp.form.id, speakerId: speaker.id, status: 'DRAFT' },
+    where: {
+      formId: cfp.form.id,
+      speakerId: speaker.id,
+      status: 'DRAFT',
+      session: { status: 'DRAFT' },
+    },
     with: {
       fieldValues: true,
       session: {
@@ -95,6 +106,25 @@ export async function getOrCreateCfpDraft(cfp: PublicCfpForm, session: Session) 
       columns: { id: true },
     })
     assertCfpResponseLimit(existing.length)
+    if (!shouldCreateCfpDraft({
+      existingResponseCount: existing.length,
+      explicitlyRequested,
+    })) return null
+    if (explicitlyRequested) {
+      const abandoned = await db.query.formResponse.findFirst({
+        where: {
+          formId: cfp.form.id,
+          speakerId: speaker.id,
+          status: 'DRAFT',
+          session: { status: 'WITHDRAWN' },
+        },
+      })
+      if (abandoned) {
+        await db.delete(schema.formResponse)
+          .where(orm.eq(schema.formResponse.id, abandoned.id))
+          .limit(1)
+      }
+    }
     const sessionId = ulid()
     const responseId = ulid()
     try {
@@ -120,12 +150,22 @@ export async function getOrCreateCfpDraft(cfp: PublicCfpForm, session: Session) 
       ] as const)
     } catch (cause) {
       const winner = await db.query.formResponse.findFirst({
-        where: { formId: cfp.form.id, speakerId: speaker.id, status: 'DRAFT' },
+        where: {
+          formId: cfp.form.id,
+          speakerId: speaker.id,
+          status: 'DRAFT',
+          session: { status: 'DRAFT' },
+        },
       })
       if (!winner) throw cause
     }
     response = await db.query.formResponse.findFirst({
-      where: { formId: cfp.form.id, speakerId: speaker.id, status: 'DRAFT' },
+      where: {
+        formId: cfp.form.id,
+        speakerId: speaker.id,
+        status: 'DRAFT',
+        session: { status: 'DRAFT' },
+      },
       with: {
         fieldValues: true,
         session: {
@@ -191,7 +231,17 @@ async function loadOwnedDraft({ eventId, formId, responseId, session, submission
     db.query.track.findMany({ where: { eventId }, orderBy: { sortOrder: 'asc', name: 'asc' } }),
     db.query.format.findMany({ where: { eventId }, orderBy: { sortOrder: 'asc', name: 'asc' } }),
   ] as const)
-  if (!event || !form || !response?.formVersion || !response.session || response.session.eventId !== eventId) {
+  if (
+    !event
+    || !form
+    || !response?.formVersion
+    || !response.session
+    || response.session.eventId !== eventId
+    || !isResumableCfpDraft({
+      responseStatus: response.status,
+      sessionStatus: response.session.status,
+    })
+  ) {
     throw new Error('CFP draft not found')
   }
   if (form.closesAt != null && form.closesAt <= Date.now()) throw new Error('This CFP is closed')

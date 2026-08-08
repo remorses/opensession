@@ -59,7 +59,7 @@ import {
   sessionMatchesQuery,
 } from './lib/submissions.ts'
 import { summarizeAssignmentProgress } from './lib/tasks.ts'
-import { cn, formatDateRangeUTC } from './lib/utils.ts'
+import { cn, formatDateRange } from './lib/utils.ts'
 import { Badge } from './components/ui/primitives.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
 import { OpenSessionLogo } from './components/auth-page.tsx'
@@ -391,7 +391,7 @@ export const app = new Spiceflow()
       return { cfp, draft: null, capReached: false, accountEmail: null, accountName: null }
     }
     try {
-      const draft = await getOrCreateCfpDraft(cfp, session)
+      const draft = await getOrCreateCfpDraft({ cfp, session })
       return {
         cfp,
         draft,
@@ -782,7 +782,7 @@ export const app = new Spiceflow()
             <EventStatusBadge status={event.status} />
           </div>
           <p className="text-sm text-muted-foreground">
-            {formatDateRangeUTC(event.startsAt, event.endsAt)}
+            {formatDateRange({ startMs: event.startsAt, endMs: event.endsAt, timezone: event.timezone })}
             {' · '}
             {event.timezone}
             {event.location ? ` · ${event.location}` : ''}

@@ -30,7 +30,7 @@ import {
   speakerDisplayImage,
   type PortalTasksTab,
 } from '../lib/portal.ts'
-import { cn, formatDateRangeUTC, formatDateTimeUTC } from '../lib/utils.ts'
+import { cn, formatDateRange, formatDateTimeUTC } from '../lib/utils.ts'
 import { OpenSessionLogo } from './auth-page.tsx'
 import { PublicFormWizard, SubmittedSuccess } from './public-form-wizard.tsx'
 import { Button } from './ui/button.tsx'
@@ -48,6 +48,7 @@ type PortalShellData = {
     name: string
     startsAt: number
     endsAt: number
+    timezone: string
   } | null
   speaker: {
     id: string
@@ -133,7 +134,7 @@ export function PortalShell({
               <div className="flex flex-col">
                 <span className="text-sm font-semibold tracking-tight">{event.name}</span>
                 <span className="text-xs text-muted-foreground">
-                  {formatDateRangeUTC(event.startsAt, event.endsAt)}
+                  {formatDateRange({ startMs: event.startsAt, endMs: event.endsAt, timezone: event.timezone })}
                 </span>
               </div>
             </div>

@@ -31,7 +31,13 @@ import {
   scheduleSessionSlot,
   MAX_SLOT_MINUTES,
 } from './lib/agenda-server.ts'
-import { cfpSubmissionSchema, saveCfpDraft, submitCfpResponse } from './lib/cfp-server.ts'
+import {
+  cfpSubmissionSchema,
+  getOrCreateCfpDraft,
+  getPublicCfp,
+  saveCfpDraft,
+  submitCfpResponse,
+} from './lib/cfp-server.ts'
 import {
   completeManualTaskAssignment as completeManualTaskAssignmentServer,
   savePortalProfile as savePortalProfileServer,
@@ -807,6 +813,22 @@ const cfpActionSchema = z.object({
   responseId: z.string().min(1),
   submission: cfpSubmissionSchema,
 })
+
+const startPublicCfpSchema = z.object({
+  eventSlug: z.string().min(1),
+  formSlug: z.string().min(1),
+})
+
+export async function startPublicCfpSubmission(input: z.input<typeof startPublicCfpSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = startPublicCfpSchema.parse(input)
+  const cfp = await getPublicCfp(parsed.eventSlug, parsed.formSlug)
+  if (!cfp) throw new Error('This CFP is not open')
+  const draft = await getOrCreateCfpDraft({ cfp, session, explicitlyRequested: true })
+  if (!draft) throw new Error('Could not start a submission')
+  throw redirect(`/submit/${parsed.eventSlug}/${parsed.formSlug}`)
+}
 
 /** Save an incomplete CFP response. Authentication happens before parsing
  * any caller-controlled identifiers because server actions are public. */

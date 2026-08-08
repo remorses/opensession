@@ -23,7 +23,7 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { Link, useLoaderData, useRouterState } from 'spiceflow/react'
-import { cn, formatDateRangeUTC } from '../lib/utils.ts'
+import { cn, formatDateRange } from '../lib/utils.ts'
 
 type NavItem = {
   label: string
@@ -88,7 +88,7 @@ export function EventSidebar() {
       <div className="flex flex-col px-2 pb-3">
         <span className="truncate text-sm font-semibold">{event.name}</span>
         <span className="text-xs text-muted-foreground tabular-nums">
-          {formatDateRangeUTC(event.startsAt, event.endsAt)}
+          {formatDateRange({ startMs: event.startsAt, endMs: event.endsAt, timezone: event.timezone })}
         </span>
       </div>
       <nav className="flex flex-col gap-0.5">
