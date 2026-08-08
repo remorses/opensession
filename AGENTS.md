@@ -34,6 +34,19 @@ A **track** is an event topic lane (e.g. AI, Security). Tracks belong to the
   non-draft responses per speaker per event (`website/src/lib/cfp-submission.ts`).
 - Do not invent form-owned tracks or one-form-per-track unless product asks for it.
 
+## Email sender and reply-to
+
+| Thing | Value |
+| --- | --- |
+| From | `OpenSession <notifications@opensession.dev>` |
+| Reply-To | `event.contactEmail` — seeded from the event creator's account email, editable in Settings → Details |
+| Transport | Cloudflare Email Service `send_email` binding (`env.EMAIL`), raw MIME via `cloudflare:email` when an ICS part is attached |
+
+Replies must reach the organizer, never a black hole. Every outbound email sets
+`Reply-To` to the event's contact email so speakers can just hit reply. Never send
+from a per-user address; the envelope sender is always `notifications@opensession.dev`
+so SPF/DKIM stay aligned with the onboarded sending domain.
+
 ## NEVER hardcode secrets — this repo is public
 
 `remorses/opensession` is a **public open-source repository**. Anything committed here
@@ -72,6 +85,10 @@ Context documents (in this repo):
   per page, MDX form engine design, email/ICS design, milestones. Follow it.
 - `docs/database-schema-plan.md` — product research + schema rationale (23 models,
   4 simplification rounds; do not re-add removed features).
+- `docs/sessionboard.md` — screenshot-derived reference for the SessionBoard organizer
+  shell, sidebar, dashboard tabs, forms, abstracts, agenda, and speaker portal.
+- `docs/sessionize.md` — live Sessionize organizer route map and the comparison between
+  Sessionize, SessionBoard, and OpenSession.
 - `schema.prisma` — design artifact for the schema. The live schema is
   `db/src/schema.ts` (1:1 drizzle translation). Never edit schema.prisma to change the
   DB; edit `db/src/schema.ts` + write a migration.
@@ -121,6 +138,13 @@ Reference implementations (the products we clone; consult when unsure about beha
 - **Mutations** are server actions in `website/src/actions.tsx` (`'use server'`), typed
   input objects validated with zod, auth-checked via `getActionRequest()` +
   `requireSession`/`requireOrgAccess` FIRST. Actions redirect with `throw redirect(...)`.
+- **Action errors must be visible.** Never call a server action from a click/change
+  handler without a try/catch (or `runAction`). Surface failures with
+  `toastActionError(err)` / `runAction(() => …)` from `website/src/components/ui/toast.tsx`
+  so the user always gets a bottom-right toast. Optional: also set local inline error
+  state near the control. Silent failures are a bug. Mount `<Toaster />` in every
+  top-level shell (dashboard `AppShell`, portal shell, public CFP page) if you add a
+  new shell. Do not use `router.refresh()` after actions (Spiceflow re-renders loaders).
 - **Tables**: use `Frame` + `Table` components like `access-tab.tsx`. All list-like data
   is a table.
 - **Tabs** = query params (`?status=`, `?tab=`, `?view=`) with zod `query` schemas on
