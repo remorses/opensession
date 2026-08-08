@@ -171,7 +171,6 @@ function DecisionActions({
     startTransition(async () => {
       try {
         await updateSessionStatus({ orgId, eventId, sessionId, status: next })
-        router.refresh()
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Status update failed')
       }
@@ -292,7 +291,6 @@ function ReviewPanel({
                   comment: comment.trim() || null,
                 })
                 setMessage('Saved')
-                router.refresh()
               })
             }}
           >

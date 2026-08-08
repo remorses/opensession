@@ -235,7 +235,6 @@ function TaskRow({
                     eventId,
                     taskDefinitionId: task.id,
                   })
-                  router.refresh()
                 } catch (err) {
                   setError(err instanceof Error ? err.message : 'Delete failed')
                 }
@@ -358,7 +357,6 @@ function TaskDialog({
                       })
                     }
                     onOpenChange(false)
-                    router.refresh()
                   } catch (err) {
                     setError(err instanceof Error ? err.message : 'Save failed')
                   }

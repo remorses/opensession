@@ -109,7 +109,6 @@ export function AbstractsPage({
           status: nextStatus,
         })
         setSelected(new Set())
-        router.refresh()
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Bulk update failed')
       }
@@ -121,7 +120,6 @@ export function AbstractsPage({
     startTransition(async () => {
       try {
         await notifyQueue({ orgId: currentOrgId, eventId: event.id, queue })
-        router.refresh()
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Notify failed')
       }
@@ -369,7 +367,6 @@ function StatusCell({
             if (next === status) return
             startTransition(async () => {
               await updateSessionStatus({ orgId, eventId, sessionId, status: next })
-              router.refresh()
             })
           }}
         >

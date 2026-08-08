@@ -211,7 +211,6 @@ function InlineReviewCard({
                     comment: comment.trim() || null,
                   })
                   if (!initial) setDone(true)
-                  router.refresh()
                 })
               }}
             >
