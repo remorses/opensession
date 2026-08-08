@@ -553,7 +553,9 @@ function DashboardNavbar({ orgId, orgSlot, eventSlot, userSlot }: {
           <div className="flex items-center gap-3">
             {/* Link straight to the current org — /dashboard would 302 and
                 re-run session + org resolution on every logo click. */}
-            <Link href={`/org/${orgId}`} className="hover:opacity-80 transition-opacity">
+            {/* self-end: the logo is shorter than the org/event switcher
+                buttons, so bottom-align it with their baseline row. */}
+            <Link href={`/org/${orgId}`} className="self-end hover:opacity-80 transition-opacity">
               <OpenSessionLogo />
             </Link>
             {orgSlot}
