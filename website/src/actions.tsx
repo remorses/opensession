@@ -1,6 +1,6 @@
-// Server actions for the OpenSessions website.
+// Server actions for the OpenSession website.
 // Org management (create, rename, invites, member roles) is ported from
-// akarso/sigillo's access implementation. Event actions are OpenSessions'.
+// akarso/sigillo's access implementation. Event actions are OpenSession's.
 //
 // SECURITY: server actions are public POST endpoints — every action
 // authenticates via getActionRequest() + requireSession/requireOrgAccess.
@@ -271,6 +271,5 @@ export async function createEvent(input: {
     // Global unique slug — the most likely failure mode.
     throw new Error(`The slug "${slug}" is already taken. Pick another one.`)
   }
-  // TODO: redirect to /org/:orgId/e/:eventId once the event shell exists.
-  throw redirect(`/org/${parsed.orgId}`)
+    throw redirect(`/org/${parsed.orgId}/e/${eventId}`)
 }

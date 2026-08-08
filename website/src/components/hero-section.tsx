@@ -1,4 +1,4 @@
-// Hero section for the OpenSessions landing page.
+// Hero section for the OpenSession landing page.
 // Uses VideoBackgroundShader from @holocron.so/vite/mdx (same as holocron.so).
 // IvarText serif font for the heading.
 'use client'
@@ -26,9 +26,9 @@ export function HeroSection() {
         className='absolute inset-0 w-full h-full'
         canvasClassName='dark:opacity-60 opacity-40'
         dotStyle='ascii'
-        dotColor='#fb7185'
+        dotColor='#38cbdd'
         dotSize={10}
-        chars=' .:-~=sessions'
+        chars=' .:-~=session'
       />
 
       {/* Foreground content */}

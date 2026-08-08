@@ -1,9 +1,9 @@
 {
   "$schema": "https://holocron.so/docs.json",
-  "name": "OpenSessions",
+  "name": "OpenSession",
   "description": "Open-source speaker and session management: CFP forms, abstract review, agenda builder, and a speaker portal.",
   "colors": {
-    "primary": "#fb7185"
+    "primary": "#38cbdd"
   },
   "appearance": {
     "default": "dark"

@@ -1,4 +1,4 @@
-// OpenSessions website: Cloudflare Worker serving the holocron landing page,
+// OpenSession website: Cloudflare Worker serving the holocron landing page,
 // user auth (better-auth Google login), and the org dashboard. Built on the
 // akarso skeleton — auth flow, org resolution, and shell chrome are ported.
 import './globals.css'
@@ -18,7 +18,7 @@ import {
 } from './db.ts'
 import { cn } from './lib/utils.ts'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
-import { OpenSessionsLogo } from './components/auth-page.tsx'
+import { OpenSessionLogo } from './components/auth-page.tsx'
 
 // ── Schemas ─────────────────────────────────────────────────────────
 
@@ -211,11 +211,13 @@ export const app = new Spiceflow()
 
   .layout('/org/:orgId/*', async ({ children, request, loaderData }) => {
     const { OrgSwitch, UserMenu, ThemeSelect } = await import('./components/dashboard-shell.tsx')
+    const { EventSwitch } = await import('./components/event-switch.tsx')
     return (
       <AppShell request={request}>
         <DashboardNavbar
           orgId={loaderData.currentOrgId}
           orgSlot={<OrgSwitch />}
+          eventSlot={<EventSwitch />}
           userSlot={<UserMenu />}
         />
         <div className="border-t border-border" />
@@ -231,11 +233,40 @@ export const app = new Spiceflow()
     )
   })
 
-  // ── Events page (org index) ───────────────────────────────────────
+  // ── Org index: land on the first event ────────────────────────────
+  // No events list page — the navbar event switcher covers navigation.
+  // The org index redirects to the newest event, or shows the create-
+  // your-first-event empty state when the org has none.
 
-  .page('/org/:orgId', async () => {
-    const { EventsTab } = await import('./components/events-tab.tsx')
-    return <EventsTab />
+  .page('/org/:orgId', async ({ params, loaderData }) => {
+    const [first] = loaderData.events
+    if (first) throw redirect(`/org/${params.orgId}/e/${first.id}`)
+    const { NoEventsPage } = await import('./components/event-switch.tsx')
+    return <NoEventsPage />
+  })
+
+  // ── Event page (placeholder until the event shell lands) ──────────
+
+  .page('/org/:orgId/e/:eventId', async ({ params, loaderData }) => {
+    const event = loaderData.events.find((row) => row.id === params.eventId)
+    if (!event) throw redirect(`/org/${params.orgId}`)
+    return (
+      <div className="flex flex-col gap-5">
+        <div className="flex flex-col gap-1">
+          <h1 className="text-xl font-semibold tracking-tight">{event.name}</h1>
+          <p className="text-sm text-muted-foreground">
+            <span className="font-mono text-xs">{event.slug}</span>
+            {' · '}
+            {event.status.toLowerCase()}
+            {' · '}
+            {event.timezone}
+          </p>
+        </div>
+        <p className="text-sm text-muted-foreground text-balance">
+          Forms, abstracts, agenda, and the speaker portal will show up here.
+        </p>
+      </div>
+    )
   })
 
   // ── Members page (org members + invite links) ─────────────────────
@@ -291,7 +322,7 @@ function AppShell({ children, request }: { children: React.ReactNode; request: R
       <Head>
         <Head.Meta charSet="UTF-8" />
         <Head.Meta name="viewport" content="width=device-width, initial-scale=1.0" />
-        <Head.Title>OpenSessions Dashboard</Head.Title>
+        <Head.Title>OpenSession Dashboard</Head.Title>
       </Head>
       <body className="relative flex flex-col min-h-screen bg-background font-sans antialiased">
         <script dangerouslySetInnerHTML={{ __html: appThemeScript }} />
@@ -333,9 +364,10 @@ function ContentFrame({ children, className }: { children: React.ReactNode; clas
   )
 }
 
-function DashboardNavbar({ orgId, orgSlot, userSlot }: {
+function DashboardNavbar({ orgId, orgSlot, eventSlot, userSlot }: {
   orgId: string
   orgSlot: React.ReactNode
+  eventSlot: React.ReactNode
   userSlot: React.ReactNode
 }) {
   return (
@@ -348,9 +380,11 @@ function DashboardNavbar({ orgId, orgSlot, userSlot }: {
             {/* Link straight to the current org — /dashboard would 302 and
                 re-run session + org resolution on every logo click. */}
             <Link href={`/org/${orgId}`} className="hover:opacity-80 transition-opacity">
-              <OpenSessionsLogo />
+              <OpenSessionLogo />
             </Link>
             {orgSlot}
+            <span className="text-muted-foreground/50 select-none">/</span>
+            {eventSlot}
           </div>
           <div className="flex items-center gap-4">
             <Link
@@ -371,7 +405,7 @@ function DashboardNavbar({ orgId, orgSlot, userSlot }: {
 
 function DashboardTabBar({ pathname, orgId }: { pathname: string; orgId: string }) {
   const tabs = [
-    { label: 'Events', href: `/org/${orgId}` },
+    { label: 'Overview', href: `/org/${orgId}` },
     { label: 'Members', href: `/org/${orgId}/members` },
   ] as const
 
@@ -382,8 +416,8 @@ function DashboardTabBar({ pathname, orgId }: { pathname: string; orgId: string 
       <div className="flex h-10 items-stretch gap-4 sm:gap-6 px-4 sm:px-6 overflow-x-auto scrollbar-hide">
         {tabs.map((tab) => {
           const active =
-            tab.label === 'Events'
-              ? pathname === tab.href
+            tab.label === 'Overview'
+              ? pathname === tab.href || pathname.includes('/e/')
               : pathname === tab.href || pathname.startsWith(`${tab.href}/`)
           return (
             <Link
@@ -413,7 +447,7 @@ function DashboardFooter({ themeSlot }: { themeSlot: React.ReactNode }) {
         <GridDot position="tr" />
         <div className="flex flex-wrap items-center justify-end gap-4 px-6 py-5">
           {themeSlot}
-          <span className="text-xs text-muted-foreground">© {new Date().getFullYear()} OpenSessions</span>
+          <span className="text-xs text-muted-foreground">© {new Date().getFullYear()} OpenSession</span>
         </div>
       </div>
     </footer>

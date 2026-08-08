@@ -2,7 +2,7 @@
 // (no cloudflare:workers import) so plain vitest can cover it — the
 // effectful org resolution lives in db.ts.
 
-const redirectBase = 'https://opensessions.local'
+const redirectBase = 'https://opensession.local'
 
 export function normalizeAuthRedirectPath(value: string | undefined): string {
   if (!value || !value.startsWith('/') || value.startsWith('//')) return '/dashboard'
