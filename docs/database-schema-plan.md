@@ -130,11 +130,11 @@ transcriptions/recordings, sponsors/exhibitors.
 ## Key decisions
 
 1. **Auth = BetterAuth for BOTH populations.** One `User` table serves organizers and
-   submitters. Organizers get `OrgMember` rows (BetterAuth organization plugin) and
-   `EventMember` rows (per-event role incl. `REVIEWER`). Submitters get a `Speaker` row
-   per event. `Speaker.userId` is nullable: a submitter can add co-speakers by email who
-   have never logged in; when that person later signs in (magic link to the same email),
-   the Speaker row links to their User.
+   submitters. Organizers get `OrgsUsers` rows (app-level org membership, ported from
+   akarso — NOT a BetterAuth plugin) and `EventMember` rows (per-event role incl.
+   `REVIEWER`). Submitters get a `Speaker` row per event. `Speaker.userId` is nullable:
+   a submitter can add co-speakers by email who have never logged in; when that person
+   later signs in (magic link to the same email), the Speaker row links to their User.
 
 2. **One `Session` table for abstract AND session** — mirrors the real API
    (`is_abstract`), modeled as `stage: ABSTRACT | SESSION`. Acceptance is a state
@@ -271,7 +271,7 @@ drove these schema changes:
 - `AnswerOption.libraryRefId` (unchecked string) replaced with **typed FKs** per library
   dimension; logic conditions and routing rules gained typed track/format/tag refs.
 - BetterAuth tables are marked **generated** (`@better-auth/cli generate` is the source);
-  added `AuthAccount UNIQUE(providerId, accountId)` and the inviter FK.
+  added `AuthAccount UNIQUE(providerId, accountId)`.
 
 **Model corrections**
 
@@ -309,3 +309,22 @@ drove these schema changes:
 **Dropped**: `ConflictWaiver` (wrong cardinality for unary/multi-session conflicts;
 replaced by always-visible computed conflicts + explicit commit confirmation) and the
 `FORM_CLOSING` reminder trigger (undefined recipient set).
+
+# Alignment with the akarso project
+
+This product is built on the **akarso** codebase, so shared concepts must be shaped
+IDENTICALLY for direct code porting. Org-layer tables are copied 1:1 from
+`akarso-sso/db/schema.prisma`:
+
+| akarso model | Shape kept identical | Notes |
+|---|---|---|
+| `Org` | PK `orgId` (cuid), `name @default("")`, timestamps | billing fields (`stripeCustomerId`, `Subscription`) omitted — payments out of scope |
+| `OrgsUsers` | composite `@@id([userId, orgId])`, `role UserRole @default(MEMBER)` | queries like `prisma.orgsUsers.upsert({ where: { userId_orgId } })` port directly |
+| `UserRole` | `ADMIN \| MEMBER` | replaces the earlier three-value OrgRole |
+| `OrgInviteLink` | `key String @id`, `orgId`, `createdAt` | link-based invites (`/invite/{key}` joins as MEMBER); replaces email-targeted invitation rows |
+
+Differences that stay: akarso pairs these with **Supabase auth** (`auth.users`); we pair
+them with **BetterAuth** (`User`) — only the FK target of `OrgsUsers.userId` differs.
+`Event.orgId` references `Org.orgId` the same way akarso's `Site.orgId` does. akarso's
+SSO-specific models (`Site`, `PortalSession`, `SSOConnection`, `saml_*`) are not ported;
+the speaker portal uses BetterAuth magic links instead.
