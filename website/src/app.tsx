@@ -360,10 +360,57 @@ export const app = new Spiceflow()
       description="Every file uploaded to this event: headshots, slides, cover images, and logos."
     />
   ))
-  // TEMPORARY demo — replaced by task 3 (real forms list + MDX editor).
-  .page('/org/:orgId/e/:eventId/forms', async () => {
-    const { FormsDemoPage } = await import('./forms/form-demo.tsx')
-    return <FormsDemoPage />
+  // ── Forms (CFP) list + MDX editor ─────────────────────────────────
+  // The live MDX of a form is the newest FormVersion. List counts come
+  // from ONE db.query (responses relation aggregated in JS — form counts
+  // are small).
+
+  .loader('/org/:orgId/e/:eventId/forms', async ({ params }) => {
+    const db = getDb()
+    const rows = await db.query.form.findMany({
+      where: { eventId: params.eventId, purpose: 'CFP' },
+      with: { responses: { columns: { id: true, status: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    return { forms: rows.map(toFormListRow) }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/forms',
+    query: z.object({
+      // NOTE: zod .default() is not applied by spiceflow query validation —
+      // use .optional() and normalize in the handler.
+      status: z.enum(['all', 'draft', 'open', 'closed', 'archived']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { FormsListPage } = await import('./components/forms-list.tsx')
+      return <FormsListPage status={query.status ?? 'all'} />
+    },
+  })
+
+  .loader('/org/:orgId/e/:eventId/forms/:formId', async ({ params }) => {
+    const db = getDb()
+    const found = await db.query.form.findFirst({
+      where: { id: params.formId, eventId: params.eventId },
+      with: {
+        versions: { orderBy: { createdAt: 'desc', id: 'desc' } },
+        responses: { columns: { id: true, status: true } },
+      },
+    })
+    // Wrong event / stale id → back to the forms list.
+    if (!found) throw redirect(`/org/${params.orgId}/e/${params.eventId}/forms`)
+    const { versions, responses, ...form } = found
+    return {
+      form,
+      versions: versions.map(({ id, createdAt, mdxSource }) => ({ id, createdAt, mdxSource })),
+      submitted: responses.filter((row) => row.status === 'SUBMITTED').length,
+      drafts: responses.filter((row) => row.status === 'DRAFT').length,
+    }
+  })
+
+  .page('/org/:orgId/e/:eventId/forms/:formId', async () => {
+    const { FormEditorPage } = await import('./components/form-editor.tsx')
+    return <FormEditorPage />
   })
   .page('/org/:orgId/e/:eventId/evaluation', async () => (
     <ComingSoonPage
@@ -383,12 +430,28 @@ export const app = new Spiceflow()
       description="Speaker and submission tasks with per-assignment progress and due dates."
     />
   ))
-  .page('/org/:orgId/e/:eventId/portal-forms', async () => (
-    <ComingSoonPage
-      title="Portal Forms"
-      description="Forms speakers fill from the portal, linkable from tasks."
-    />
-  ))
+  // ── Portal forms (?tab=speaker|submission) — same editor route ────
+
+  .loader('/org/:orgId/e/:eventId/portal-forms', async ({ params }) => {
+    const db = getDb()
+    const rows = await db.query.form.findMany({
+      where: { eventId: params.eventId, purpose: 'PORTAL' },
+      with: { responses: { columns: { id: true, status: true } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    return { forms: rows.map(toFormListRow) }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/portal-forms',
+    query: z.object({
+      tab: z.enum(['speaker', 'submission']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { PortalFormsPage } = await import('./components/forms-list.tsx')
+      return <PortalFormsPage tab={query.tab ?? 'speaker'} />
+    },
+  })
   .page('/org/:orgId/e/:eventId/speakers', async () => (
     <ComingSoonPage
       title="Speakers"
@@ -452,6 +515,16 @@ export const app = new Spiceflow()
   .use(holocronApp)
 
 // ── Event page helpers ──────────────────────────────────────────────
+
+/** Map a form row (with its responses relation) to the list-row shape the
+ *  forms/portal-forms tables render: response rows collapse to counts. */
+function toFormListRow<T extends { responses: { status: 'DRAFT' | 'SUBMITTED' }[] }>({ responses, ...form }: T) {
+  return {
+    ...form,
+    submitted: responses.filter((row) => row.status === 'SUBMITTED').length,
+    drafts: responses.filter((row) => row.status === 'DRAFT').length,
+  }
+}
 
 function EventStatusBadge({ status }: { status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED' }) {
   const variant = status === 'ACTIVE' ? 'success' : status === 'ARCHIVED' ? 'outline' : 'secondary'

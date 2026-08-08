@@ -98,8 +98,8 @@ opensession/
         │   ├── form-scope.ts          # builds { values, tracks, formats } scope
         │   ├── collect-fields.ts      # visible-field collector (validation)
         │   ├── validate.ts            # validate submitted values vs collected fields
-        │   ├── well-known-names.ts    # name → typed column copy map
-        │   └── starter-template.ts    # default CFP MDX for new forms
+        │   ├── well-known-names.ts    # stable public field registry → typed columns
+        │   └── starter-template.ts    # default CFP, speaker profile, materials MDX
         ├── components/
         │   ├── event-shell.tsx        # adapted akarso dashboard-shell (sidebar nav)
         │   ├── auth-page.tsx          # copied from akarso
@@ -465,7 +465,7 @@ Requests are FORM tasks with `<FileUpload>`; Email Templates/Themes are hard-cod
 | **Evaluation** (COLLECT & REVIEW) | `To Review` \| `My Reviews` \| `Progress` | To Review: pending sessions the caller hasn't voted on — quick Yes/Maybe/No + stars + comment inline. My Reviews: editable past votes. Progress: per-reviewer counts, per-session coverage (replaces SB's evaluation plans) |
 | **Agenda** (COLLECT & REVIEW) | `List` \| `Day` \| `Week` \| `Rooms` \| `Conflicts` (img 24) | List: sortable table. Day: day-picker + rooms×time grid, unscheduled rail, click-to-place drawer (drag later). Week: all event days side by side, compact. Rooms: grouped by room. Conflicts: computed room/speaker overlaps with jump-to links. Placement bumps icsSequence + calendar emails |
 | **Tasks** (PORTAL) | `All` \| `Speaker Tasks` \| `Submission Tasks` (img 25) | TaskDefinition cards (title, MANUAL/FORM badge, target chip, dueAt, linked form), Add Task, per-task assignment progress bar (n of m complete), task detail lists assignments with per-speaker status |
-| **Portal Forms** (PORTAL) | `Speaker Forms` \| `Submission Forms` | PORTAL-purpose forms (SB's Portal > Forms, img 26-29); same MDX editor; linkable from FORM tasks |
+| **Portal Forms** (PORTAL) | `Speaker Forms` \| `Submission Forms` | Every event starts with editable Speaker Profile and Session Materials forms. Organizers may add rare event-specific forms (travel, dietary, visa, release forms). Same MDX editor; forms can be linked from FORM tasks |
 | **Speakers** (PORTAL) | `All` \| `Confirmed` \| `Pending` \| `Declined` (derived confirmation) | table: name, email, company, headshot, sessions, linked-user badge, outstanding tasks count; detail: profile fields, participations w/ per-session confirmation, task assignments, files, email history |
 | **Emails** (COMMUNICATIONS) | `All` \| `Queued` \| `Sent` \| `Failed` \| `Reminders` | outbox log (kind, to, subject, status, attempts, ICS badge), retry-now on FAILED, message preview; Reminders tab: read-only description of the hard-coded schedule (task −3d/−1d/overdue, draft −3d/−1d) + next cron run |
 | **Settings** (CONFIGURE) | `Details` \| `Tracks` \| `Formats` \| `Rooms` \| `Team` (img 02-04) | Details: name, slug, type, website, location, timezone, starts/ends, description, logo upload, status. Tracks: name+color+order CRUD. Formats: name+default duration. Rooms: name+order. Team: org members + secret invite links (org-level, from akarso access-tab) |
@@ -475,9 +475,12 @@ Members, Settings.
 
 ### Portal shell (speakers, separate from admin shell)
 
-Matches img 17: centered layout, no sidebar — pill nav `Home | Submissions | Profile |
-Tasks`, user menu top-right. Home = My Submissions card (code, title, format, status
-badge) + My Profile card + Tasks panel with `All | My Tasks | Submission Tasks` tabs.
+Matches img 17–18: centered layout, no admin sidebar — pill nav `Home | Submissions |
+Profile | Tasks`, user menu top-right (including `Back to Admin Mode` when the same user
+is an org member). Home = My Submissions panel (code, title, format, status badge) + My
+Profile panel + Tasks panel with `All | My Tasks | Submission Tasks` tabs. The Profile
+page renders the event's default, editable Speaker Profile MDX form inside this separate
+portal layout; it never reuses the admin dashboard shell.
 
 ## 5b. Component inventory (akarso reuse map)
 
@@ -507,7 +510,7 @@ ACCEPT_QUEUE/ACCEPTED green, DECLINE_QUEUE orange, DECLINED red, WITHDRAWN gray,
 muted — img 20), `abstracts-table.tsx`, `review-panel.tsx`, `agenda-grid.tsx` /
 `agenda-list.tsx`, `mdx-editor.tsx` (`@monaco-editor/react`), `form-renderer.tsx` +
 `field-components.tsx` (§6), `portal-shell.tsx`, `portal-tasks.tsx`,
-`speaker-profile-form.tsx`, `library-settings.tsx`.
+`speaker-profile-page.tsx`, `library-settings.tsx`.
 
 Design: tailwind v4 + shadcn tokens per the tailwind skill (minimal Vercel-like, no
 cards-for-grouping, gap-based spacing, `@variant dark`).
@@ -516,8 +519,34 @@ cards-for-grouping, gap-based spacing, `@variant dark`).
 
 The whole form is one MDX source per immutable `FormVersion` (live = newest version).
 safe-mdx renders it with `{ values, tracks, formats, Math }` in scope; conditional logic
-is plain MDX expressions evaluated by safe-mdx's safe AST interpreter (no eval,
-workerd-safe — verified in `safe-mdx/src/safe-mdx.tsx`).
+uses `<Show when={expression}>` because safe-mdx does not evaluate JSX nested inside a
+JavaScript expression. Attribute expressions are evaluated by safe-mdx's safe AST
+interpreter (no eval, workerd-safe — verified in `safe-mdx/src/safe-mdx.tsx`).
+
+### Default forms created with every event
+
+The form engine stays fully generic, but organizers should not begin from an empty form
+library or rebuild fields that every conference needs. `createEvent` pre-generates the
+event id, three form ids, and three version ids, then inserts the event and the following
+forms + first immutable `FormVersion` snapshots in one `db.batch`:
+
+| Default form | Purpose / target | Initial status | Why it exists |
+|---|---|---|---|
+| **Call for Papers** | `CFP / SUBMISSION` | `DRAFT` | Title, abstract, track, format, event-specific questions, and `<Participants>`. Organizer reviews copy/settings, then opens it publicly |
+| **Speaker Profile** | `PORTAL / SPEAKER` | `OPEN` | The standard profile every event needs: first/last name, email, bio, job title, company, pronouns, headshot, website, LinkedIn, X/Twitter |
+| **Session Materials** | `PORTAL / SUBMISSION` | `OPEN` | Cover image, presentation/slides upload, final A/V requirements, and other accepted-session material |
+
+These are normal MDX forms, not special schemas or hardcoded React forms. Organizers can
+edit their wording, required flags, conditional sections, and add custom questions. The
+default names that feed typed columns are reserved (next section); removing or renaming
+one produces the editor's field-contract warning. A default form can be deleted only
+before it has responses, exactly like a manually created form.
+
+Acceptance creates standard assignments from these defaults: **Complete Speaker
+Profile** targets each speaker and **Upload Session Materials** targets each accepted
+submission. Events can add optional FORM tasks for less common workflows such as travel,
+dietary needs, visas, release agreements, or hotel details. Confirmation remains a
+first-class participation action, not a custom form.
 
 ### Field component library (`name` prop = data contract)
 
@@ -545,7 +574,7 @@ parses with `mdxParse` (browser-safe), holds `values` state (+ participants arra
 renders `<SafeMdxRenderer components={fieldComponents} scope={{ values, tracks, formats }} />`.
 Field components read/write values through a React context keyed by `name` (with a
 participant-index prefix inside `<Participants>`). Every value change re-renders, so
-`{values.format === 'workshop' && <TextField … />}` conditionals are live. Autosave
+`<Show when={values.format === 'workshop'}>…</Show>` conditionals are live. Autosave
 debounces a `saveDraft` server action (FormResponse DRAFT + Session DRAFT for CFP).
 
 ### Server-side re-validation (`collect-fields.ts` + `validate.ts`)
@@ -567,13 +596,41 @@ well-known names to typed columns (`title/description/track/format` → Session,
 `speaker.*` → Speaker rows + SessionParticipants), Session DRAFT → PENDING with
 `submittedAt`, enqueue `SUBMISSION_CONFIRMATION` email.
 
+### Well-known fields and the public data projection
+
+Every answer is always preserved in `FormFieldValue`, pinned through `FormResponse` to
+the exact `FormVersion` that displayed it. A hardcoded registry in
+`well-known-names.ts` additionally projects common answers into typed columns:
+
+| Reserved form names | Typed destination | Used by |
+|---|---|---|
+| `title`, `description`, `track`, `format`, `coverImage` | `event_session` title/description/trackId/formatId/coverImageFileId | Abstracts and sessions tables, agenda block/popover, public schedule, embeds, JSON/ICS feeds |
+| `speaker.firstName`, `speaker.lastName`, `speaker.email`, `speaker.bio` | `speaker` identity/profile columns | Portal profile, admin speaker detail, agenda speakers, speaker embed |
+| `speaker.jobTitle`, `speaker.companyName`, `speaker.pronouns` | `speaker` profile columns | Agenda/session popover, speaker cards and embeds |
+| `speaker.headshot`, `speaker.websiteUrl`, `speaker.linkedinUrl`, `speaker.twitterUrl` | `speaker` file/link columns | Speaker profile and public speaker cards |
+
+The typed rows are the **current stable projection** used by product UI. Submitting the
+default Speaker Profile form patches the linked Speaker row; submitting a CFP creates
+the initial Speaker and Session projections. Later profile/material submissions update
+only the well-known fields present in that form. Responses and field values remain the
+immutable history and hold every custom answer.
+
+Public surfaces never guess which arbitrary custom questions are safe to display. The
+agenda block and its click popover read the typed projection only: title, description
+excerpt, track, format, room/time, cover image, and participant name/headshot/job title/
+company. The agenda and speaker embeds use the same projection and expose only
+`ACCEPTED + PUBLIC` sessions. Custom values (dietary, travel, internal notes, release
+answers) stay private and appear only in authenticated admin/session/task detail views
+unless a future explicit display setting is added.
+
 ### Editor + versioning
 
 `/org/:orgId/e/:eventId/forms/:formId`: Monaco left, live preview right (same renderer with sample
 scope), settings drawer. Save = insert new `FormVersion` (immutable); the editor diffs
 field `name`s between the previous and new version and warns when a name disappears.
-New forms start from `starter-template.ts` (CFP MDX mirroring img 08-11: title,
-description, track/format selects, participants block).
+New events seed all three templates from `starter-template.ts`. Additional forms start
+from the template matching their purpose/target (CFP, speaker, or submission materials)
+instead of an empty document.
 
 **FUTURE (do not build now):** an AI chat that edits the form MDX from a prompt ("add an
 input for the user phone number"). The editor is already API-driven — "create new
@@ -667,12 +724,12 @@ AGENTS.md once the user picks them — placeholder until then). NO React email r
 Idempotent (stable slugs + upserts), logs each step. Creates: demo org + admin user
 note (real users come from Google login; seed attaches the first signed-in user via a
 `--owner-email` flag), an "AI Engineer Sandbox" event (tz America/Los_Angeles, 3 tracks
-with colors, 4 formats with durations, 3 rooms), the starter CFP form OPEN with a
-`closesAt`, ~12 speakers, ~16 sessions spread across every status (some scheduled into
-the agenda incl. one deliberate conflict), reviews from 2 reviewers, 3 task definitions
-(confirm participation MANUAL/SPEAKER, upload slides FORM/SUBMISSION with a
-`<FileUpload>` portal form, speaker info FORM/SPEAKER), assignments in mixed states.
-This makes every screen demoable immediately.
+with colors, 4 formats with durations, 3 rooms), the same three default forms created by
+`createEvent` (CFP OPEN with `closesAt`, Speaker Profile OPEN, Session Materials OPEN),
+~12 speakers, ~16 sessions spread across every status (some scheduled into the agenda
+including one deliberate conflict), reviews from 2 reviewers, standard profile/material
+task definitions, and assignments in mixed states. This makes every screen demoable
+immediately while testing the same defaults as real event creation.
 
 ### Test plan (vitest inside workerd, per spiceflow testing docs)
 
@@ -686,6 +743,9 @@ This makes every screen demoable immediately.
 | `db-migrations.test.ts` | migrations apply; partial uniques + CHECKs reject bad rows |
 | `forms/collect-fields.test.ts` | pure: visible-field collection under conditionals, Participants expansion, safe-mdx error surfacing (inline snapshots) |
 | `forms/validate.test.ts` | pure: required/maxLength/options/unknown-name cases |
+| `forms/starter-template.test.ts` | all three default templates collect the expected reserved fields; accidental field-contract changes fail snapshots |
+| `forms/well-known-names.test.ts` | CFP/profile/material answers project to the expected Session/Speaker columns; custom/internal answers remain KV values |
+| `event-create.test.ts` | createEvent atomically creates the event, three default Forms, and first immutable FormVersions with the expected purpose/target/status |
 | `cfp-flow.test.ts` | end-to-end: create org/event/form → public page renders (res.text) → draft → submit action → Session PENDING + FormFieldValues + typed copies + confirmation outbox row; submission limit; re-validation rejects tampered hidden fields |
 | `review-decision.test.ts` | review upsert uniqueness; queues; notify → status, notifiedAt after SENT, task auto-assignment idempotency (run twice) |
 | `agenda.test.ts` | pure conflict cases (room overlap, speaker overlap, touching edges); placement action bumps icsSequence + enqueues ICS |
@@ -744,9 +804,10 @@ throughout.
 1. **Skeleton + auth + orgs** — copy the akarso file list from §5b verbatim and edit in
    place; db package with full schema + initial migration + migrations test,
    wrangler/vite/tailwind config, holocron homepage (`index.mdx` + ai-logo), BetterAuth
-   Google login, personal org invariant, `/dashboard` resolver, event CRUD + the sidebar
-   EventShell with event/org switcher, settings tabs (details, tracks/formats/rooms,
-   team). *Gate: login → create event → see empty dashboard on preview deploy.*
+   Google login, personal org invariant, `/dashboard` resolver, event CRUD that seeds
+   the editable CFP/Speaker Profile/Session Materials forms, the sidebar EventShell with
+   event/org switcher, settings tabs (details, tracks/formats/rooms, team). *Gate: login
+   → create event → see the dashboard and three default forms on preview deploy.*
 2. **MDX form engine + public CFP** — field components, FormRenderer, collector +
    validation, starter template, Monaco editor with versioning, `/submit/*` flow with
    drafts + speaker creation + typed-column copy, R2 upload route, submission limit.

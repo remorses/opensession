@@ -35,6 +35,14 @@ export function formatDateRangeUTC(startMs: number, endMs: number): string {
   return formatDateUTC(startMs)
 }
 
+/** "Oct 12, 2026 14:30 UTC" — deadline display (closesAt). */
+export function formatDateTimeUTC(epochMs: number): string {
+  const d = new Date(epochMs)
+  const hh = String(d.getUTCHours()).padStart(2, '0')
+  const mm = String(d.getUTCMinutes()).padStart(2, '0')
+  return `${formatDateUTC(epochMs)} ${hh}:${mm} UTC`
+}
+
 /** "2026-10-12" — the value format of <input type="date">. */
 export function epochToDateInputUTC(epochMs: number): string {
   const d = new Date(epochMs)

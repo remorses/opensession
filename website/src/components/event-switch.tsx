@@ -11,7 +11,8 @@ import { CalendarIcon, CheckIcon, ChevronDownIcon, PlusIcon } from 'lucide-react
 import { cn } from '../lib/utils.ts'
 import { createEvent } from '../actions.tsx'
 import { Button } from './ui/button.tsx'
-import { Input } from './ui/primitives.tsx'
+import { Input, TimezoneSelect } from './ui/primitives.tsx'
+import { defaultTimezone } from '../lib/timezones.ts'
 import {
   Dialog, DialogDescription, DialogHeader,
   DialogPanel, DialogPopup, DialogTitle,
@@ -86,9 +87,11 @@ export function CreateEventDialog({ open, onOpenChange, orgId }: {
   onOpenChange: (open: boolean) => void
   orgId: string
 }) {
-  // Best-effort browser timezone; the server validates against IANA.
-  const defaultTimezone =
-    typeof Intl !== 'undefined' ? Intl.DateTimeFormat().resolvedOptions().timeZone : 'UTC'
+  // Best-effort browser timezone (falls back to UTC when it is not one of the
+  // curated ids); the server re-validates against IANA. Reading Intl during
+  // render is safe here because the dialog body only mounts once the user opens
+  // it on the client, so there is no SSR/hydration mismatch.
+  const browserTimezone = defaultTimezone()
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -140,7 +143,7 @@ export function CreateEventDialog({ open, onOpenChange, orgId }: {
               </div>
               <label className="flex flex-col gap-1.5 text-sm font-medium">
                 Timezone
-                <Input required name="timezone" defaultValue={defaultTimezone} placeholder="America/Los_Angeles" />
+                <TimezoneSelect required name="timezone" value={browserTimezone} />
               </label>
               <Button type="submit" className="w-full">
                 Create event

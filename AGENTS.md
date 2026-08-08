@@ -23,6 +23,36 @@ Never write `opensessions`, `OpenSessions`, `opensession.com`, or any other doma
 The only legacy exceptions are the local checkout folder (`opensessions/`) and the
 sigillo org name, which cannot be renamed from the CLI.
 
+## NEVER hardcode secrets — this repo is public
+
+`remorses/opensession` is a **public open-source repository**. Anything committed here
+is visible to everyone, forever, including in git history. A leaked credential cannot be
+un-leaked by a later commit; it must be rotated.
+
+Rules, no exceptions:
+
+- **Never write a secret value into any file.** No API keys, OAuth client secrets,
+  auth secrets, database tokens, session cookies, bearer tokens, private keys, or
+  passwords — not in source, not in config, not in tests, not in docs, not in comments,
+  not in a commit message, not in a script you plan to delete.
+- **Never paste a secret into a chat message or a PR/issue body.**
+- **All secrets come from the environment.** Server code reads them from
+  `import { env } from 'cloudflare:workers'` (worker) or `process.env` (node scripts).
+  Declare each one in `wrangler.jsonc` under `secrets.required` so it is typed and the
+  deploy fails loudly when it is missing. Values live in **sigillo** only.
+- **Never read secret values.** Do not `cat` a `.env`, do not run `sigillo secrets get`,
+  do not print `env.BETTER_AUTH_SECRET`. Run commands under `sigillo run -c dev -- ...`
+  so the values are injected without you ever seeing them.
+- **Never commit `.env`, `.dev.vars`, `*.pem`, or `*.key`.** They are gitignored; do not
+  force-add them.
+- **Placeholders in examples must be obviously fake**, like `GOOGLE_CLIENT_ID=""` or
+  `sk-xxxxxxxx`. Never copy a real value "just for the example".
+- Non-secret identifiers are fine to commit: D1 `database_id`, worker names, the
+  Cloudflare account slug, public URLs. They are useless without a credential.
+
+Before any commit, scan the staged diff for secret-looking strings. If you find one,
+stop, tell the user, and treat the credential as compromised so it can be rotated.
+
 ## MANDATORY: read these before writing any code
 
 Context documents (in this repo):

@@ -18,9 +18,8 @@ import {
   ensurePersonalOrg,
   getDb,
 } from './db.ts'
-import { collectFields, libraryOptions } from './forms/collect-fields.ts'
-import { starterCfpTemplate } from './forms/starter-template.ts'
-import { validateSubmission } from './forms/validate.ts'
+import { collectFields } from './forms/collect-fields.ts'
+import { starterCfpTemplate, starterPortalTemplate } from './forms/starter-template.ts'
 
 // ── Org actions (multi-org + team access) ───────────────────────────
 //
@@ -450,35 +449,6 @@ export async function deleteFormat(input: z.input<typeof deleteFormatSchema>) {
   return { formatId: parsed.formatId }
 }
 
-// ── Form engine demo action ─────────────────────────────────────────
-// TEMPORARY demo — replaced by task 3/4 (real form CRUD + submit flow).
-// Runs the server-side collector + validation on the starter CFP template
-// with the event's real tracks/formats, returning the typed result (no
-// throw on validation failure — the demo page displays it).
-
-const fieldValueSchema = z.union([z.string(), z.array(z.string())])
-const validateFormDemoSchema = z.object({
-  orgId: z.string().min(1),
-  eventId: z.string().min(1),
-  values: z.record(z.string(), fieldValueSchema),
-  participants: z.array(z.record(z.string(), fieldValueSchema)),
-})
-
-export async function validateFormDemo(input: z.input<typeof validateFormDemoSchema>) {
-  const actionRequest = getActionRequest()
-  const parsed = validateFormDemoSchema.parse(input)
-  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
-  const [tracks, formats] = await db.batch([
-    db.query.track.findMany({ where: { eventId: parsed.eventId }, columns: { id: true, name: true } }),
-    db.query.format.findMany({ where: { eventId: parsed.eventId }, columns: { id: true, name: true } }),
-  ] as const)
-  const collected = collectFields({
-    mdxSource: starterCfpTemplate,
-    scope: { values: parsed.values, tracks: libraryOptions(tracks), formats: libraryOptions(formats) },
-  })
-  return validateSubmission({ collected, values: parsed.values, participants: parsed.participants })
-}
-
 const createRoomSchema = z.object({
   orgId: z.string().min(1),
   eventId: z.string().min(1),
@@ -517,4 +487,182 @@ export async function deleteRoom(input: z.input<typeof deleteRoomSchema>) {
     db.delete(schema.room).where(orm.eq(schema.room.id, parsed.roomId)).limit(1),
   ] as const)
   return { roomId: parsed.roomId }
+}
+
+// ── Form actions (forms list + MDX editor) ──────────────────────────
+//
+// The live MDX of a form is DERIVED: the newest FormVersion. Versions are
+// immutable — "save" always inserts a new row, never updates one, so every
+// FormResponse keeps pointing at the exact MDX it was filled against.
+
+const MDX_SOURCE_MAX = 100_000
+
+/** requireEventAccess + the form must belong to that event. Never trust
+ *  the formId alone — it comes from the client. */
+async function requireFormAccess({ actionRequest, orgId, eventId, formId }: {
+  actionRequest: Request
+  orgId: string
+  eventId: string
+  formId: string
+}) {
+  const { db, event } = await requireEventAccess({ actionRequest, orgId, eventId })
+  const form = await db.query.form.findFirst({ where: { id: formId, eventId } })
+  if (!form) throw new Error('Form not found')
+  return { db, event, form }
+}
+
+const createFormSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  name: z.string().trim().min(1).max(120),
+  slug: z.string().trim().toLowerCase().regex(SLUG_RE).max(60).optional(),
+  purpose: z.enum(['CFP', 'PORTAL']),
+  /** Portal only; CFP forms are always about the submission. */
+  target: z.enum(['SUBMISSION', 'SPEAKER']).optional(),
+})
+
+/** Create a form with its first FormVersion seeded from the matching
+ *  starter template, then redirect to the editor. */
+export async function createForm(input: z.input<typeof createFormSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = createFormSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+
+  const slug = parsed.slug || slugify(parsed.name)
+  if (!SLUG_RE.test(slug)) throw new Error('Could not derive a valid slug from the form name')
+
+  const formId = ulid()
+  const template = parsed.purpose === 'CFP' ? starterCfpTemplate : starterPortalTemplate
+  try {
+    // Form + first version in one atomic batch (versions FK the form).
+    await db.batch([
+      db.insert(schema.form).values({
+        id: formId,
+        eventId: parsed.eventId,
+        purpose: parsed.purpose,
+        target: parsed.purpose === 'PORTAL' ? (parsed.target ?? 'SUBMISSION') : 'SUBMISSION',
+        name: parsed.name,
+        slug,
+      }),
+      db.insert(schema.formVersion).values({ formId, mdxSource: template }),
+    ] as const)
+  } catch {
+    // Per-event unique slug — the most likely failure mode.
+    throw new Error(`The slug "${slug}" is already used by another form of this event`)
+  }
+  throw redirect(`/org/${parsed.orgId}/e/${parsed.eventId}/forms/${formId}`)
+}
+
+const saveFormVersionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  formId: z.string().min(1),
+  mdxSource: z.string().min(1).max(MDX_SOURCE_MAX),
+})
+
+/** Collect every field name reachable with an empty values scope. Fields
+ *  behind <Show> conditionals that reference values are excluded on BOTH
+ *  sides of the version diff, so the removed-names comparison stays
+ *  consistent. Empty option arrays: names don't depend on options. */
+function collectFieldNames(mdxSource: string): Set<string> {
+  const collected = collectFields({ mdxSource, scope: { values: {}, tracks: [], formats: [] } })
+  return new Set([...collected.fields, ...collected.participantFields].map((field) => field.name))
+}
+
+/** Insert a NEW immutable FormVersion. When field names disappear compared
+ *  to the previous version AND the form already has responses, the version
+ *  still saves but `removedFields` warns the admin (old responses keep
+ *  values under those names). */
+export async function saveFormVersion(input: z.input<typeof saveFormVersionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = saveFormVersionSchema.parse(input)
+  const { db } = await requireFormAccess({
+    actionRequest, orgId: parsed.orgId, eventId: parsed.eventId, formId: parsed.formId,
+  })
+
+  const [previous, responses] = await db.batch([
+    db.query.formVersion.findFirst({
+      where: { formId: parsed.formId },
+      orderBy: { createdAt: 'desc', id: 'desc' },
+    }),
+    db.query.formResponse.findMany({ where: { formId: parsed.formId }, columns: { id: true } }),
+  ] as const)
+
+  let removedFields: string[] = []
+  if (previous && responses.length > 0) {
+    const oldNames = collectFieldNames(previous.mdxSource)
+    const newNames = collectFieldNames(parsed.mdxSource)
+    removedFields = [...oldNames].filter((name) => !newNames.has(name))
+  }
+
+  const [version] = await db
+    .insert(schema.formVersion)
+    .values({ formId: parsed.formId, mdxSource: parsed.mdxSource })
+    .returning({ id: schema.formVersion.id })
+  return { versionId: version!.id, removedFields }
+}
+
+const updateFormSettingsSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  formId: z.string().min(1),
+  name: z.string().trim().min(1).max(120),
+  slug: z.string().trim().toLowerCase().regex(SLUG_RE).max(60),
+  status: z.enum(['DRAFT', 'OPEN', 'CLOSED', 'ARCHIVED']),
+  /** Epoch ms; null clears the deadline. */
+  closesAt: z.number().int().positive().nullable(),
+})
+
+/** Update form settings (name, slug, status, closesAt). Purpose and target
+ *  are immutable after creation — they decide where responses land. */
+export async function updateFormSettings(input: z.input<typeof updateFormSettingsSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = updateFormSettingsSchema.parse(input)
+  const { db } = await requireFormAccess({
+    actionRequest, orgId: parsed.orgId, eventId: parsed.eventId, formId: parsed.formId,
+  })
+  try {
+    await db
+      .update(schema.form)
+      .set({
+        name: parsed.name,
+        slug: parsed.slug,
+        status: parsed.status,
+        closesAt: parsed.closesAt,
+        updatedAt: Date.now(),
+      })
+      .where(orm.eq(schema.form.id, parsed.formId))
+      .limit(1)
+  } catch {
+    // Per-event unique slug — the most likely failure mode.
+    throw new Error(`The slug "${parsed.slug}" is already used by another form of this event`)
+  }
+  return { formId: parsed.formId }
+}
+
+const deleteFormSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  formId: z.string().min(1),
+})
+
+/** Delete a form (cascade removes its versions). Only allowed while the
+ *  form has ZERO responses — the formResponse→form FK is RESTRICT, forms
+ *  with history are archived instead. Redirects to the owning list. */
+export async function deleteForm(input: z.input<typeof deleteFormSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = deleteFormSchema.parse(input)
+  const { db, form } = await requireFormAccess({
+    actionRequest, orgId: parsed.orgId, eventId: parsed.eventId, formId: parsed.formId,
+  })
+  const responses = await db.query.formResponse.findMany({
+    where: { formId: parsed.formId },
+    columns: { id: true },
+  })
+  if (responses.length > 0) {
+    throw new Error('This form has responses and cannot be deleted. Archive it instead.')
+  }
+  await db.delete(schema.form).where(orm.eq(schema.form.id, parsed.formId)).limit(1)
+  const listSegment = form.purpose === 'PORTAL' ? 'portal-forms' : 'forms'
+  throw redirect(`/org/${parsed.orgId}/e/${parsed.eventId}/${listSegment}`)
 }

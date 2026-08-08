@@ -20,7 +20,7 @@ import {
 import { cn, epochToDateInputUTC } from '../lib/utils.ts'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
-import { Input, NativeSelect, Textarea } from './ui/primitives.tsx'
+import { Input, NativeSelect, Textarea, TimezoneSelect } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
 
 export type SettingsTab = 'details' | 'tracks' | 'formats' | 'rooms' | 'team'
@@ -159,7 +159,7 @@ function DetailsTab({ orgId, event }: { orgId: string; event: EventRow }) {
           </FieldLabel>
           <FieldLabel>
             Timezone
-            <Input required name="timezone" defaultValue={event.timezone} placeholder="America/Los_Angeles" />
+            <TimezoneSelect required name="timezone" value={event.timezone} />
           </FieldLabel>
           <FieldLabel>
             Starts
@@ -192,7 +192,7 @@ function useRowDelete() {
   const [pendingId, setPendingId] = useState<string | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  function run(id: string, action: () => Promise<unknown>) {
+  function run<T>(id: string, action: () => Promise<T>) {
     setError(null)
     setPendingId(id)
     void (async () => {

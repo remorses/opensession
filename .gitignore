@@ -4,3 +4,12 @@ dist
 *.tsbuildinfo
 .DS_Store
 tmp
+
+# Secrets — this repo is public. Never commit any of these.
+.env
+.env.*
+!.env.example
+.dev.vars
+.dev.vars.*
+*.pem
+*.key

@@ -1,5 +1,6 @@
-// Input, Textarea, NativeSelect, Badge, EmptyState, Spinner, Tooltip — small
-// UI primitives ported from sigillo, grouped in one file to avoid tiny files.
+// Input, Textarea, NativeSelect, TimezoneSelect, Badge, EmptyState, Spinner,
+// Tooltip — small UI primitives ported from sigillo, grouped in one file to
+// avoid tiny files.
 'use client'
 
 import { ChevronsUpDownIcon, Loader2Icon } from 'lucide-react'
@@ -7,6 +8,7 @@ import { cva, type VariantProps } from 'class-variance-authority'
 import * as React from 'react'
 import { createPortal } from 'react-dom'
 import { Link } from 'spiceflow/react'
+import { timezoneGroupsWith, timezoneLabel } from '../../lib/timezones.ts'
 import { cn } from '../../lib/utils.ts'
 
 // ── Input / Textarea ────────────────────────────────────────────────
@@ -58,6 +60,33 @@ export function NativeSelect({
       </select>
       <ChevronsUpDownIcon className="pointer-events-none absolute right-2 top-1/2 size-4 -translate-y-1/2 opacity-80 sm:size-4" />
     </div>
+  )
+}
+
+// ── TimezoneSelect ──────────────────────────────────────────────────
+// Native select over the curated IANA list in lib/timezones.ts. `value` is the
+// event's stored timezone; it is passed through timezoneGroupsWith so a
+// non-curated (but valid) id stays selectable instead of being silently
+// replaced by the first option.
+
+export function TimezoneSelect({
+  value,
+  ...props
+}: Omit<React.SelectHTMLAttributes<HTMLSelectElement>, 'children' | 'value'> & {
+  value?: string
+}): React.ReactElement {
+  return (
+    <NativeSelect defaultValue={value} {...props}>
+      {timezoneGroupsWith(value).map((group) => (
+        <optgroup key={group.label} label={group.label}>
+          {group.zones.map((zone) => (
+            <option key={zone} value={zone}>
+              {timezoneLabel(zone)}
+            </option>
+          ))}
+        </optgroup>
+      ))}
+    </NativeSelect>
   )
 }
 
