@@ -15,17 +15,16 @@
 // Partial unique indexes (SQLite treats each NULL as distinct in UNIQUE):
 //   task_assignment(task_definition_id, speaker_id)            WHERE session_id IS NULL
 //   task_assignment(task_definition_id, speaker_id, session_id) WHERE session_id IS NOT NULL
-//   answer(response_id, question_id)                    WHERE subject_speaker_id IS NULL
-//   answer(response_id, question_id, subject_speaker_id) WHERE subject_speaker_id IS NOT NULL
+//   form_field_value(response_id, name, value)          WHERE subject_speaker_id IS NULL
+//   form_field_value(response_id, name, value, subject_speaker_id)
+//                                                       WHERE subject_speaker_id IS NOT NULL
 //   speaker(event_id, user_id)                          WHERE user_id IS NOT NULL
 //   org(owner_user_id)                                  WHERE kind = 'personal'
 // CHECK constraints:
 //   session:          status = 'DRAFT' OR length(trim(title)) > 0
 //   session:          (starts_at IS NULL AND ends_at IS NULL) OR ends_at > starts_at
 //   draft_placement:  (starts_at IS NULL AND ends_at IS NULL) OR ends_at > starts_at
-//   answer_option:    exactly one of option_id/track_id/format_id/level_id/language_id/tag_id
 //   embed_filter:     exactly one of track_id/tag_id/format_id
-//   form_routing_rule: exactly one of option_id/match_track_id/match_format_id/match_tag_id
 //   lifecycle enums:  CHECK(col IN (...)) on all status/stage columns (drizzle
 //                     text enums are TypeScript-only; SQLite needs the CHECK)
 // Composite FKs on NULLABLE columns (Prisma forbids mixed required/optional
@@ -33,7 +32,6 @@
 //   session(track_id, event_id)   → track(id, event_id)     (same for format,
 //   level, language, room, form, submitter_speaker, evaluation_plan, slot)
 //   task_assignment(session_id, event_id) → session(id, event_id)
-//   form_routing_rule assign/match refs   → (id, event_id) parents
 // Every event-scoped parent exposes UNIQUE(id, event_id) to support these.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -230,6 +228,22 @@ enum EventStatus {
   ARCHIVED
 }
 
+enum EventType {
+  CONFERENCE
+  SUMMIT
+  MEETUP
+  HACKATHON
+  WORKSHOP
+  OTHER
+}
+
+// Shared ENABLED/DISABLED switch for rule-like rows (scheduling rules,
+// reminder rules) — enum instead of a boolean so states stay extensible.
+enum RuleStatus {
+  ENABLED
+  DISABLED
+}
+
 model Event {
   id    String @id @default(cuid())
   orgId String
@@ -238,7 +252,7 @@ model Event {
   name        String
   slug        String      @unique // public CFP/portal/embed URLs
   status      EventStatus @default(DRAFT)
-  eventType   String? // "Conference", "Summit", ...
+  eventType   EventType   @default(CONFERENCE)
   websiteUrl  String?
   location    String?
   timezone    String // IANA, e.g. "America/Los_Angeles" — agenda renders in this tz
@@ -271,7 +285,6 @@ model Event {
   tags             Tag[]
   rooms            Room[]
   participantRoles ParticipantRole[]
-  fieldDefinitions FieldDefinition[]
   forms            Form[]
   speakers         Speaker[]
   sessions         Session[]
@@ -320,15 +333,15 @@ model Track {
   event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
   name      String
   color     String // hex, used by agenda + embeds
+  // Category routing: submissions choosing this track land in this evaluation
+  // plan (overrides Form.defaultEvaluationPlanId).
+  evaluationPlanId String?
+  evaluationPlan   EvaluationPlan? @relation(fields: [evaluationPlanId], references: [id], onDelete: SetNull)
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
 
-  sessions        Session[]
-  routingAssigns  FormRoutingRule[]    @relation("RoutingAssignTrack")
-  routingMatches  FormRoutingRule[]    @relation("RoutingMatchTrack")
-  logicConditions FormLogicCondition[]
-  answerOptions   AnswerOption[]
-  embedFilters    EmbedFilter[]
+  sessions     Session[]
+  embedFilters EmbedFilter[]
 
   @@unique([eventId, name])
   @@unique([id, eventId]) // target for composite tenant-boundary FKs
@@ -344,11 +357,8 @@ model Format {
   defaultDurationMinutes Int?
   sortOrder Int    @default(0)
 
-  sessions        Session[]
-  routingMatches  FormRoutingRule[]    @relation("RoutingMatchFormat")
-  logicConditions FormLogicCondition[]
-  answerOptions   AnswerOption[]
-  embedFilters    EmbedFilter[]
+  sessions     Session[]
+  embedFilters EmbedFilter[]
 
   @@unique([eventId, name])
   @@unique([id, eventId])
@@ -362,8 +372,7 @@ model Level {
   name      String // "Beginner", "Intermediate", "Advanced"
   sortOrder Int    @default(0)
 
-  sessions      Session[]
-  answerOptions AnswerOption[]
+  sessions Session[]
 
   @@unique([eventId, name])
   @@unique([id, eventId])
@@ -377,8 +386,7 @@ model Language {
   name      String
   sortOrder Int    @default(0)
 
-  sessions      Session[]
-  answerOptions AnswerOption[]
+  sessions Session[]
 
   @@unique([eventId, name])
   @@unique([id, eventId])
@@ -392,12 +400,8 @@ model Tag {
   name      String
   sortOrder Int    @default(0)
 
-  sessionTags     SessionTag[]
-  routingAssigns  FormRoutingRule[]    @relation("RoutingAssignTag")
-  routingMatches  FormRoutingRule[]    @relation("RoutingMatchTag")
-  logicConditions FormLogicCondition[]
-  answerOptions   AnswerOption[]
-  embedFilters    EmbedFilter[]
+  sessionTags  SessionTag[]
+  embedFilters EmbedFilter[]
 
   @@unique([eventId, name])
   @@unique([id, eventId])
@@ -457,7 +461,6 @@ model ParticipantRole {
   coreRole   CoreRole @default(SPEAKER)
   sortOrder  Int      @default(0)
 
-  formRoles    FormParticipantRole[]
   participants SessionParticipant[]
 
   @@unique([eventId, name])
@@ -465,113 +468,39 @@ model ParticipantRole {
   @@index([eventId])
 }
 
-// ─── Custom field catalog ────────────────────────────────────────────────────
-// Field definitions live at the event level and target an entity type.
-// System fields (Title, Description, First Name, Email...) exist as rows too,
-// marked SYSTEM + a systemKey mapping to a typed column on Session/Speaker.
-// Form questions BIND to these definitions (like the app's "+ Add Field" picker).
-
-enum FieldTarget {
-  SUBMISSION // stored on Session / SessionFieldValue
-  SPEAKER    // stored on Speaker / SpeakerFieldValue
-}
-
-enum FieldSource {
-  SYSTEM // maps to a typed entity column via systemKey; locked in forms
-  CUSTOM // stored in SessionFieldValue / SpeakerFieldValue
-}
-
-enum FieldType {
-  TEXT
-  TEXTAREA
-  RICH_TEXT
-  EMAIL
-  PHONE
-  URL
-  NUMBER
-  DATE
-  DATETIME
-  DROPDOWN
-  MULTI_SELECT
-  CHECKBOX
-  FILE
-}
-
-// Where DROPDOWN/MULTI_SELECT options come from. Library-backed sources are
-// what enables category routing (a "Track" question writes Session.trackId).
-enum OptionSource {
-  NONE      // non-choice field types
-  CUSTOM    // FieldOption rows
-  TRACKS
-  FORMATS
-  LEVELS
-  LANGUAGES
-  TAGS
-}
-
-// Archive instead of delete once referenced by submitted answers — history
-// must survive. Same for FieldOption.
-enum LibraryItemStatus {
-  ACTIVE
-  ARCHIVED // hidden from builders/pickers; kept for historical answers
-}
-
-model FieldDefinition {
-  id           String       @id @default(cuid())
-  eventId      String
-  event        Event        @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  status       LibraryItemStatus @default(ACTIVE)
-  target       FieldTarget
-  source       FieldSource  @default(CUSTOM)
-  // For SYSTEM fields: which entity column this maps to
-  // ("title" | "description" | "firstName" | "lastName" | "email" | "bio" |
-  //  "headshot" | "track" | "format" | "level" | "language" | "capacity" | ...)
-  systemKey    String?
-  internalName String // stable machine name, unique per event
-  label        String // public label
-  helpText     String?
-  fieldType    FieldType
-  optionSource OptionSource @default(NONE)
-  maxChars     Int?
-  containsPii  Boolean      @default(false)
-  sortOrder    Int          @default(0)
-  createdAt    DateTime     @default(now())
-
-  options            FieldOption[]
-  formQuestions      FormQuestion[]
-  sessionFieldValues SessionFieldValue[]
-  speakerFieldValues SpeakerFieldValue[]
-
-  @@unique([eventId, target, internalName])
-  @@unique([id, eventId])
-  @@index([eventId])
-}
-
-// Options for CUSTOM-sourced choice fields.
-model FieldOption {
-  id                String          @id @default(cuid())
-  fieldDefinitionId String
-  fieldDefinition   FieldDefinition @relation(fields: [fieldDefinitionId], references: [id], onDelete: Cascade)
-  status            LibraryItemStatus @default(ACTIVE)
-  label             String
-  value             String // stable machine value
-  sortOrder         Int             @default(0)
-
-  logicConditions          FormLogicCondition[]
-  routingRules             FormRoutingRule[]
-  answerOptions            AnswerOption[]
-  sessionFieldValueOptions SessionFieldValueOption[]
-  speakerFieldValueOptions SpeakerFieldValueOption[]
-
-  @@unique([fieldDefinitionId, value])
-  @@unique([id, fieldDefinitionId]) // target for option-belongs-to-field FKs
-  @@index([fieldDefinitionId])
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
-// FORMS — CFP submission forms AND portal forms share one builder.
-// A form = ordered sections of questions bound to FieldDefinitions,
-// plus logic rules, routing rules, participant-role config, and settings.
+// FORMS — MDX documents rendered with safe-mdx. There is NO form builder and
+// NO structural tables: the whole form (copy, layout, field components,
+// conditional logic) is one MDX source per FormVersion.
+//
+//   <TextField name="title" label="Session title" required maxLength={80} />
+//   <Select name="track" label="Track" options={tracks} />
+//   {values.format === 'workshop' && <TextField name="duration" required />}
+//   <Participants min={1} max={3}>
+//     <TextField name="speaker.firstName" required />
+//     <RichText name="speaker.bio" maxLength={5000} />
+//     <FileUpload name="speaker.headshot" accept="image/*" />
+//   </Participants>
+//
+// Rendering: safe-mdx with { values, tracks, formats, levels, languages,
+// tags } in scope; conditional logic is plain MDX expressions evaluated by
+// safe-mdx's safe AST interpreter (no eval, Workers-compatible).
+//
+// The `name` prop is the data contract:
+//   well-known names       → typed entity columns on submit
+//     "title" "description" "track" "format" "level" "language" "capacity"
+//     "speaker.firstName" "speaker.bio" "speaker.headshot" ...
+//   any other name         → stays as FormFieldValue KV rows (custom data)
+//
+// Server-side validation: on submit the server re-renders the response's
+// FormVersion.mdxSource with the submitted values in scope, collects the
+// VISIBLE field components + their props (required, maxLength, options), and
+// validates — the same conditional logic the user saw, enforced server-side.
+//
+// Editing: Monaco editor with a starter template + live preview. Saving
+// creates a new FormVersion; responses keep the version they were filled
+// against, so renaming a `name` prop never corrupts old data (the editor
+// warns when a name disappears between versions).
 // ═════════════════════════════════════════════════════════════════════════════
 
 enum FormPurpose {
@@ -584,15 +513,22 @@ enum FormTarget {
   SPEAKER    // portal form about the speaker/contact
 }
 
-// Structure lock rule: once a form has its first SUBMITTED response, its
-// sections, questions, bindings, and options are locked. To change structure,
-// clone the form (new version). Delete is only allowed while DRAFT; used
-// forms get ARCHIVED. This keeps FormResponse/Answer history immutable.
 enum FormStatus {
   DRAFT
   OPEN
   CLOSED   // manually or automatically after closesAt
-  ARCHIVED // retired; kept for response history
+  ARCHIVED // retired; kept for response history (delete only while DRAFT)
+}
+
+// What a saved draft policy allows and what happens after submit.
+enum DraftPolicy {
+  SINGLE_DRAFT
+  MULTIPLE_DRAFTS
+}
+
+enum AfterSubmitAction {
+  SHOW_MESSAGE       // success content is part of the MDX
+  REDIRECT_TO_PORTAL
 }
 
 model Form {
@@ -607,29 +543,25 @@ model Form {
   slug         String // public URL: /submit/{event.slug}/{form.slug}
   status       FormStatus @default(DRAFT)
 
-  // CFP setup (step 1): collect participants step on/off
-  collectParticipants Boolean @default(true)
+  // The live MDX (denormalized pointer to the latest FormVersion; new
+  // responses snapshot this version).
+  currentVersionId String?      @unique
+  currentVersion   FormVersion? @relation("CurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
 
-  // Welcome (step 2)
-  showWelcomeMessage Boolean @default(true)
-  welcomeMessageHtml String?
+  closesAt        DateTime? // enables draft reminder emails
+  submissionLimit Int? // per-user; null → Event.submissionLimitPerUser
+  draftPolicy     DraftPolicy       @default(SINGLE_DRAFT)
+  afterSubmit     AfterSubmitAction @default(SHOW_MESSAGE)
 
-  // Settings (step 6)
-  closesAt              DateTime? // enables draft reminder emails
-  submissionLimit       Int? // per-user; null → Event.submissionLimitPerUser
-  allowMultipleDrafts   Boolean   @default(false)
-  autoRedirectToPortal  Boolean   @default(false)
-  successMessageHtml    String?
+  // CFP routing default: submissions land in this evaluation plan unless the
+  // chosen track overrides it via Track.evaluationPlanId.
+  defaultEvaluationPlanId String?
+  defaultEvaluationPlan   EvaluationPlan? @relation(fields: [defaultEvaluationPlanId], references: [id], onDelete: SetNull)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  sections               FormSection[]
-  questions              FormQuestion[]
-  participantRoles       FormParticipantRole[]
-  logicRules             FormLogicRule[]
-  routingRules           FormRoutingRule[]
-  validationRules        FormValidationRule[]
+  versions               FormVersion[]
   notificationRecipients FormNotificationRecipient[]
   responses              FormResponse[]
   sessions               Session[] // submissions created through this form
@@ -639,224 +571,24 @@ model Form {
   @@unique([eventId, slug]) // slug is per-event ("cfp" can exist in every event)
   @@unique([id, eventId])
   @@index([eventId])
+  @@index([defaultEvaluationPlanId])
 }
 
-enum SectionKind {
-  SUBMISSION  // "Abstract Information" questions about the session
-  PARTICIPANT // questions repeated per participant
-  CUSTOM
-}
+// Immutable MDX snapshot, created on every save/publish from the editor.
+// Replaces the old "lock structure after first submission" rule: editing just
+// creates a new version, and each response keeps pointing at the exact MDX it
+// was filled against (validation re-runs against that snapshot).
+model FormVersion {
+  id        String   @id @default(cuid())
+  formId    String
+  form      Form     @relation(fields: [formId], references: [id], onDelete: Cascade)
+  mdxSource String   // the whole form: structure, copy, field props, logic
+  createdAt DateTime @default(now())
 
-model FormSection {
-  id              String      @id @default(cuid())
-  formId          String
-  form            Form        @relation(fields: [formId], references: [id], onDelete: Cascade)
-  kind            SectionKind
-  title           String // "Tell us about your submission"
-  pageHeading     String // <=15 chars, public step label ("Submission")
-  descriptionHtml String?
-  sortOrder       Int         @default(0)
+  currentOf Form?          @relation("CurrentVersion")
+  responses FormResponse[]
 
-  questions FormQuestion[]
-
-  @@unique([id, formId]) // target for same-form composite FKs
-  @@index([formId])
-}
-
-model FormQuestion {
-  id      String @id @default(cuid())
-  formId  String
-  form    Form   @relation(fields: [formId], references: [id], onDelete: Cascade)
-  eventId String // denormalized from form to enforce the field-definition boundary
-  sectionId String
-  // Composite: the section must belong to the same form.
-  section   FormSection @relation(fields: [sectionId, formId], references: [id, formId], onDelete: Cascade)
-  fieldDefinitionId String
-  // Composite: the bound field must belong to the same event. Restrict:
-  // deleting a used field definition must not destroy questions/answers.
-  fieldDefinition FieldDefinition @relation(fields: [fieldDefinitionId, eventId], references: [id, eventId], onDelete: Restrict)
-
-  required     Boolean @default(false)
-  // SYSTEM identity fields (Title, First Name, Email...) are locked: cannot be
-  // removed or retyped, only toggled required where allowed.
-  locked       Boolean @default(false)
-  labelOverride    String?
-  helpTextOverride String?
-  maxCharsOverride Int?
-  sortOrder    Int     @default(0)
-
-  logicRulesTargeting  FormLogicRule[]      @relation("LogicTarget")
-  logicConditionSource FormLogicCondition[] @relation("LogicSource")
-  routingRules         FormRoutingRule[]
-  validationRuleLinks  FormValidationRuleQuestion[]
-  answers              Answer[]
-
-  @@unique([formId, fieldDefinitionId])
-  @@unique([id, formId])            // target for same-form composite FKs
-  @@unique([id, fieldDefinitionId]) // target for option-matches-question FKs
-  @@index([sectionId])
-  @@index([fieldDefinitionId])
-}
-
-// Which participant roles a CFP form accepts, with min/max counts per role.
-model FormParticipantRole {
-  id                String          @id @default(cuid())
-  formId            String
-  form              Form            @relation(fields: [formId], references: [id], onDelete: Cascade)
-  participantRoleId String
-  participantRole   ParticipantRole @relation(fields: [participantRoleId], references: [id], onDelete: Cascade)
-  minCount          Int             @default(0)
-  maxCount          Int? // null = unlimited
-
-  @@unique([formId, participantRoleId])
-  @@index([formId])
-}
-
-// ─── Conditional logic ───────────────────────────────────────────────────────
-// "IF (conditions match ALL/ANY) THEN action ON targetQuestion".
-// Evaluated live on the public form and re-validated server-side on submit.
-//
-// Deterministic semantics (enforced by the evaluator, documented here):
-//   initial visibility: hidden if the question has any SHOW rule, else visible
-//   evaluation:         any matching HIDE rule wins; else any matching SHOW
-//                       rule shows the question; REQUIRE affects validation
-//                       only while the question is visible
-//   cycles:             rejected at form publish time (source graph must be a DAG)
-
-enum LogicAction {
-  SHOW    // target hidden by default, shown when rule matches
-  HIDE    // target shown by default, hidden when rule matches
-  REQUIRE // target becomes required when rule matches
-}
-
-enum LogicMatch {
-  ALL
-  ANY
-}
-
-model FormLogicRule {
-  id               String       @id @default(cuid())
-  formId           String
-  form             Form         @relation(fields: [formId], references: [id], onDelete: Cascade)
-  targetQuestionId String
-  // Composite: target must belong to the same form.
-  targetQuestion   FormQuestion @relation("LogicTarget", fields: [targetQuestionId, formId], references: [id, formId], onDelete: Cascade)
-  action           LogicAction
-  match            LogicMatch   @default(ALL)
-
-  conditions FormLogicCondition[]
-
-  @@index([formId])
-  @@index([targetQuestionId])
-}
-
-enum ConditionOperator {
-  EQUALS
-  NOT_EQUALS
-  CONTAINS
-  NOT_CONTAINS
-  IS_EMPTY
-  IS_NOT_EMPTY
-  GREATER_THAN
-  LESS_THAN
-}
-
-model FormLogicCondition {
-  id               String            @id @default(cuid())
-  ruleId           String
-  rule             FormLogicRule     @relation(fields: [ruleId], references: [id], onDelete: Cascade)
-  formId           String // denormalized to enforce same-form source
-  sourceQuestionId String
-  sourceQuestion   FormQuestion      @relation("LogicSource", fields: [sourceQuestionId, formId], references: [id, formId], onDelete: Cascade)
-  operator         ConditionOperator
-
-  // Compared value — exactly one group is set (app-validated by field type):
-  // CUSTOM-option questions → comparedOptionId; library-backed questions →
-  // the typed ref (comparedTrackId/FormatId/TagId); text/number → the scalars.
-  comparedOptionId String?
-  comparedOption   FieldOption? @relation(fields: [comparedOptionId], references: [id], onDelete: Restrict)
-  comparedTrackId  String?
-  comparedTrack    Track?       @relation(fields: [comparedTrackId], references: [id], onDelete: Cascade)
-  comparedFormatId String?
-  comparedFormat   Format?      @relation(fields: [comparedFormatId], references: [id], onDelete: Cascade)
-  comparedTagId    String?
-  comparedTag      Tag?         @relation(fields: [comparedTagId], references: [id], onDelete: Cascade)
-  comparedText     String?
-  comparedNumber   Float?
-
-  @@index([ruleId])
-  @@index([sourceQuestionId])
-  @@index([comparedOptionId])
-}
-
-// ─── Category-based routing ──────────────────────────────────────────────────
-// When the submitted answer to `question` matches (exactly one match ref is
-// set — CHECK in migration), the created submission is auto-assigned a track/
-// tag and/or dropped into an evaluation plan (its first round).
-model FormRoutingRule {
-  id                String       @id @default(cuid())
-  formId            String
-  form              Form         @relation(fields: [formId], references: [id], onDelete: Cascade)
-  eventId           String // denormalized: assign refs must be same-event
-  fieldDefinitionId String // denormalized: option must belong to the question's field
-  questionId        String
-  question          FormQuestion @relation(fields: [questionId, fieldDefinitionId], references: [id, fieldDefinitionId], onDelete: Cascade)
-
-  // Match — exactly one set. CUSTOM-option questions use optionId; library-
-  // backed questions use the typed match ref. Drizzle adds the composite FK
-  // (optionId, fieldDefinitionId) → field_option(id, field_definition_id) so
-  // the option must belong to the question's bound field (Prisma can't mix
-  // nullable optionId with required fieldDefinitionId in one relation).
-  optionId      String?
-  option        FieldOption? @relation(fields: [optionId], references: [id], onDelete: Restrict)
-  matchTrackId  String?
-  matchTrack    Track?       @relation("RoutingMatchTrack", fields: [matchTrackId], references: [id], onDelete: Cascade)
-  matchFormatId String?
-  matchFormat   Format?      @relation("RoutingMatchFormat", fields: [matchFormatId], references: [id], onDelete: Cascade)
-  matchTagId    String?
-  matchTag      Tag?         @relation("RoutingMatchTag", fields: [matchTagId], references: [id], onDelete: Cascade)
-
-  assignTrackId          String?
-  assignTrack            Track?          @relation("RoutingAssignTrack", fields: [assignTrackId], references: [id], onDelete: SetNull)
-  assignTagId            String?
-  assignTag              Tag?            @relation("RoutingAssignTag", fields: [assignTagId], references: [id], onDelete: SetNull)
-  assignEvaluationPlanId String?
-  assignEvaluationPlan   EvaluationPlan? @relation(fields: [assignEvaluationPlanId], references: [id], onDelete: SetNull)
-
-  @@index([formId])
-  @@index([questionId])
-  @@index([assignTrackId])
-  @@index([assignTagId])
-  @@index([assignEvaluationPlanId])
-}
-
-// ─── Cross-field validation ("combined character limits") ────────────────────
-enum ValidationScope {
-  SUBMISSION      // combined limit across submission-level answers
-  PER_PARTICIPANT // limit applies to each participant's answers separately
-}
-
-model FormValidationRule {
-  id               String          @id @default(cuid())
-  formId           String
-  form             Form            @relation(fields: [formId], references: [id], onDelete: Cascade)
-  name             String // "Printed program block"
-  combinedMaxChars Int
-  scope            ValidationScope @default(SUBMISSION)
-
-  questions FormValidationRuleQuestion[]
-
-  @@index([formId])
-}
-
-model FormValidationRuleQuestion {
-  id         String             @id @default(cuid())
-  ruleId     String
-  rule       FormValidationRule @relation(fields: [ruleId], references: [id], onDelete: Cascade)
-  questionId String
-  question   FormQuestion       @relation(fields: [questionId], references: [id], onDelete: Cascade)
-
-  @@unique([ruleId, questionId])
+  @@index([formId, createdAt])
 }
 
 // Admin alert recipients per form.
@@ -923,10 +655,9 @@ model Speaker {
   participations     SessionParticipant[]
   submittedSessions  Session[]
   availability       SpeakerAvailability[]
-  fieldValues        SpeakerFieldValue[]
   taskAssignments    TaskAssignment[]
   formResponses      FormResponse[]
-  subjectAnswers     Answer[] // per-participant answers about this speaker
+  subjectFieldValues FormFieldValue[] // per-participant values about this speaker
   emailMessages      EmailMessage[]
   uploadedFiles      File[]               @relation("UploadedBySpeaker")
 
@@ -957,37 +688,6 @@ model SpeakerAvailability {
   @@index([speakerId])
 }
 
-// Custom field values for speakers (target SPEAKER, source CUSTOM).
-// App-validated: fieldDefinition.target = SPEAKER and same event as speaker.
-model SpeakerFieldValue {
-  id                String          @id @default(cuid())
-  speakerId         String
-  speaker           Speaker         @relation(fields: [speakerId], references: [id], onDelete: Cascade)
-  fieldDefinitionId String
-  fieldDefinition   FieldDefinition @relation(fields: [fieldDefinitionId], references: [id], onDelete: Cascade)
-
-  valueText   String?
-  valueNumber Float?
-  valueDate   DateTime?
-  valueFileId String?
-  valueFile   File?     @relation(fields: [valueFileId], references: [id], onDelete: SetNull)
-
-  selectedOptions SpeakerFieldValueOption[]
-
-  @@unique([speakerId, fieldDefinitionId])
-  @@index([fieldDefinitionId])
-}
-
-model SpeakerFieldValueOption {
-  id           String            @id @default(cuid())
-  fieldValueId String
-  fieldValue   SpeakerFieldValue @relation(fields: [fieldValueId], references: [id], onDelete: Cascade)
-  optionId     String
-  option       FieldOption       @relation(fields: [optionId], references: [id], onDelete: Cascade)
-
-  @@unique([fieldValueId, optionId])
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 // SUBMISSIONS / SESSIONS — one table for the whole lifecycle (mirrors the real
 // SessionBoard API where a Session has is_abstract). stage=ABSTRACT while under
@@ -1014,6 +714,12 @@ enum SessionStatus {
 enum SessionKind {
   CONTENT
   SERVICE
+}
+
+// PUBLIC sessions appear in embeds and the public agenda/feeds.
+enum SessionVisibility {
+  PUBLIC
+  PRIVATE
 }
 
 model Session {
@@ -1044,7 +750,7 @@ model Session {
   clientSessionId String? // external system id
   capacity        Int?
   ceuCredits      Float?
-  isPublic        Boolean @default(false) // visible in embeds/public agenda
+  visibility      SessionVisibility @default(PRIVATE)
   // Public cover image the speaker can set from the portal.
   coverImageFileId String? @unique
   coverImageFile   File?   @relation("SessionCoverImage", fields: [coverImageFileId], references: [id], onDelete: SetNull)
@@ -1087,7 +793,6 @@ model Session {
 
   tags              SessionTag[]
   participants      SessionParticipant[]
-  fieldValues       SessionFieldValue[]
   formResponses     FormResponse[]
   transitions       SessionTransition[]
   roundEntries      RoundSession[]
@@ -1164,41 +869,13 @@ model SessionParticipant {
   @@index([participantRoleId])
 }
 
-// Custom field values for submissions (target SUBMISSION, source CUSTOM).
-// App-validated: fieldDefinition.target = SUBMISSION and same event as session.
-model SessionFieldValue {
-  id                String          @id @default(cuid())
-  sessionId         String
-  session           Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  fieldDefinitionId String
-  fieldDefinition   FieldDefinition @relation(fields: [fieldDefinitionId], references: [id], onDelete: Cascade)
-
-  valueText   String?
-  valueNumber Float?
-  valueDate   DateTime?
-  valueFileId String?
-  valueFile   File?     @relation(fields: [valueFileId], references: [id], onDelete: SetNull)
-
-  selectedOptions SessionFieldValueOption[]
-
-  @@unique([sessionId, fieldDefinitionId])
-  @@index([fieldDefinitionId])
-}
-
-model SessionFieldValueOption {
-  id           String            @id @default(cuid())
-  fieldValueId String
-  fieldValue   SessionFieldValue @relation(fields: [fieldValueId], references: [id], onDelete: Cascade)
-  optionId     String
-  option       FieldOption       @relation(fields: [optionId], references: [id], onDelete: Cascade)
-
-  @@unique([fieldValueId, optionId])
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 // FORM RESPONSES — the immutable record of a form fill. CFP responses create a
-// Session; portal responses complete a TaskAssignment. On submit, answers are
-// copied to entity values (Session columns / SessionFieldValue / Speaker...).
+// Session; portal responses complete a TaskAssignment. On submit, well-known
+// names are copied to typed entity columns (Session.title, Speaker.bio, ...);
+// every other name stays here as FormFieldValue KV rows — that IS the custom
+// data (no separate entity field-value tables; the latest submitted response
+// is the source of truth for custom fields).
 // ═════════════════════════════════════════════════════════════════════════════
 
 enum ResponseStatus {
@@ -1212,6 +889,10 @@ model FormResponse {
   // Restrict: forms with responses are archived, never deleted — the response
   // record is the immutable evidence of what was submitted.
   form      Form           @relation(fields: [formId], references: [id], onDelete: Restrict)
+  // The exact MDX snapshot this response was filled against. Validation and
+  // rendering of past responses always use this version, never the live one.
+  formVersionId String
+  formVersion   FormVersion @relation(fields: [formVersionId], references: [id], onDelete: Restrict)
   // Respondent (the portal speaker filling it in). Restrict: anonymize
   // speakers instead of deleting once history exists.
   speakerId String
@@ -1229,70 +910,42 @@ model FormResponse {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
-  answers Answer[]
+  fieldValues   FormFieldValue[]
   emailMessages EmailMessage[]
 
-  @@unique([id, formId]) // target for same-form composite FKs
   @@index([formId, status])
+  @@index([formVersionId])
   @@index([speakerId])
   @@index([sessionId])
 }
 
-model Answer {
+// One row per submitted field value. `name` is the component's name prop —
+// the data contract between the MDX and the database. Everything a form posts
+// is a string; well-known names are ALSO copied to typed entity columns on
+// submit (library choices like "track" store the library row id as value and
+// resolve through Session.trackId — the typed column is the FK-checked copy).
+// Multi-select = multiple rows with the same name, one per selected value.
+model FormFieldValue {
   id         String       @id @default(cuid())
-  formId     String // denormalized: response and question must share the form
   responseId String
-  response   FormResponse @relation(fields: [responseId, formId], references: [id, formId], onDelete: Cascade)
-  questionId String
-  // Restrict: used questions are locked/archived, never deleted (immutability).
-  question   FormQuestion @relation(fields: [questionId, formId], references: [id, formId], onDelete: Restrict)
-  // For PARTICIPANT-section questions: which participant this answer describes.
+  response   FormResponse @relation(fields: [responseId], references: [id], onDelete: Cascade)
+  name       String // "title", "track", "speaker.bio", "gpuNeeds", ...
+  value      String
+  // File-upload fields also link the uploaded File row.
+  fileId     String?
+  file       File?        @relation(fields: [fileId], references: [id], onDelete: SetNull)
+  // For fields inside <Participants>: which participant this value describes.
   // App-validated: must be a participant of the response's session. Restrict:
-  // anonymize speakers, never destroy answer history.
+  // anonymize speakers, never destroy response history.
   subjectSpeakerId String?
   subjectSpeaker   Speaker? @relation(fields: [subjectSpeakerId], references: [id], onDelete: Restrict)
-
-  valueText   String?
-  valueNumber Float?
-  valueDate   DateTime?
-  valueFileId String?
-  valueFile   File?     @relation(fields: [valueFileId], references: [id], onDelete: SetNull)
-
-  selectedOptions AnswerOption[]
 
   // Uniqueness via TWO partial indexes (see header appendix) — a plain
   // composite unique fails in SQLite because NULL subjectSpeakerId rows
   // are always considered distinct.
-  @@index([responseId])
-  @@index([questionId])
+  @@index([responseId, name])
   @@index([subjectSpeakerId])
-}
-
-// Selected options for choice answers (single- and multi-select).
-// Exactly ONE reference is set (CHECK in migration), matching the question's
-// optionSource: CUSTOM → optionId; TRACKS → trackId; FORMATS → formatId; etc.
-// All refs are real FKs — no unchecked string ids. Restrict/Cascade note:
-// library rows referenced by answers are archived, not deleted.
-model AnswerOption {
-  id       String @id @default(cuid())
-  answerId String
-  answer   Answer @relation(fields: [answerId], references: [id], onDelete: Cascade)
-
-  optionId   String?
-  option     FieldOption? @relation(fields: [optionId], references: [id], onDelete: Restrict)
-  trackId    String?
-  track      Track?       @relation(fields: [trackId], references: [id], onDelete: Restrict)
-  formatId   String?
-  format     Format?      @relation(fields: [formatId], references: [id], onDelete: Restrict)
-  levelId    String?
-  level      Level?       @relation(fields: [levelId], references: [id], onDelete: Restrict)
-  languageId String?
-  language   Language?    @relation(fields: [languageId], references: [id], onDelete: Restrict)
-  tagId      String?
-  tag        Tag?         @relation(fields: [tagId], references: [id], onDelete: Restrict)
-
-  @@index([answerId])
-  @@index([optionId])
+  @@index([fileId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -1314,9 +967,10 @@ model EvaluationPlan {
 
   createdAt DateTime @default(now())
 
-  rounds       EvaluationRound[]
-  routingRules FormRoutingRule[]
-  sessions     Session[] // submissions routed into this plan
+  rounds        EvaluationRound[]
+  sessions      Session[] // submissions routed into this plan
+  tracks        Track[]   // tracks that route into this plan
+  defaultForForms Form[]  // forms using this plan as routing default
 
   @@unique([id, eventId])
   @@index([eventId])
@@ -1572,7 +1226,7 @@ model SchedulingRule {
   event   Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
   name    String
   type    SchedulingRuleType
-  enabled Boolean            @default(true)
+  status  RuleStatus         @default(ENABLED)
   intValue Int? // meaning depends on type (see enum comments)
   // Optional scoping — rule applies only to this room if set.
   roomId  String?
@@ -1600,6 +1254,13 @@ enum TaskSource {
   FILE_REQUEST // uploading to the linked FileRequest completes the task
 }
 
+// AUTO_ON_ACCEPT tasks are assigned to every accepted speaker/session when
+// they reach ACCEPTED; MANUAL tasks are assigned by hand.
+enum TaskAssignmentMode {
+  AUTO_ON_ACCEPT
+  MANUAL
+}
+
 model TaskDefinition {
   id      String     @id @default(cuid())
   eventId String
@@ -1615,8 +1276,7 @@ model TaskDefinition {
   fileRequest   FileRequest? @relation(fields: [fileRequestId], references: [id], onDelete: SetNull)
 
   dueAt     DateTime? // default for NEW assignments (snapshotted per assignment)
-  // Auto-assign to every accepted speaker/session when they reach ACCEPTED.
-  autoAssignOnAccept Boolean @default(true)
+  assignmentMode TaskAssignmentMode @default(AUTO_ON_ACCEPT)
   sortOrder Int       @default(0)
   createdAt DateTime  @default(now())
 
@@ -1730,14 +1390,12 @@ model File {
   createdAt DateTime @default(now())
 
   // Reverse links for typed usages
-  eventLogoOf         Event?              @relation("EventLogo")
-  eventBackgroundOf   Event?              @relation("EventBackground")
-  speakerHeadshotOf   Speaker?            @relation("SpeakerHeadshot")
-  sessionCoverOf      Session?            @relation("SessionCoverImage")
-  answerValues        Answer[]
-  sessionFieldValues  SessionFieldValue[]
-  speakerFieldValues  SpeakerFieldValue[]
-  reviewScores        ReviewScore[]       @relation("ReviewScoreFile")
+  eventLogoOf       Event?           @relation("EventLogo")
+  eventBackgroundOf Event?           @relation("EventBackground")
+  speakerHeadshotOf Speaker?         @relation("SpeakerHeadshot")
+  sessionCoverOf    Session?         @relation("SessionCoverImage")
+  formFieldValues   FormFieldValue[]
+  reviewScores      ReviewScore[]    @relation("ReviewScoreFile")
 
   @@index([eventId])
   @@index([sessionId])
@@ -1811,7 +1469,7 @@ model ReminderRule {
   template   EmailTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
   trigger    ReminderTrigger
   daysOffset Int             @default(1)
-  enabled    Boolean         @default(true)
+  status     RuleStatus      @default(ENABLED)
   // TASK_* triggers: scope to one task definition (null = all with due dates).
   taskDefinitionId String?
   taskDefinition   TaskDefinition? @relation(fields: [taskDefinitionId], references: [id], onDelete: Cascade)
@@ -1892,7 +1550,8 @@ model EmailMessage {
 
 // ═════════════════════════════════════════════════════════════════════════════
 // EMBEDS — auto-updating agenda / speaker widgets for the event website.
-// Served by a public token; only ACCEPTED + isPublic sessions are exposed.
+// Served by a public token; only ACCEPTED sessions with visibility PUBLIC are
+// exposed (same data source as the public JSON/ICS feeds).
 // ═════════════════════════════════════════════════════════════════════════════
 
 enum EmbedWidget {

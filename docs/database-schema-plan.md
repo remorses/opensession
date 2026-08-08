@@ -143,29 +143,31 @@ transcriptions/recordings, sponsors/exhibitors.
    attached to a single row. Merge/composition of multiple abstracts is intentionally
    dropped (enterprise feature the brief does not need).
 
-3. **Forms are fully normalized, no JSON.**
-   - `FieldDefinition` is an event-level field library (system + custom fields targeting
-     `SUBMISSION` or `SPEAKER`). Form questions **bind** to field definitions (exactly
-     what the app does — the "+ Add Field" picker lists submission fields).
-   - Dropdown options either come from a typed source (`optionSource: TRACKS | FORMATS |
-     LEVELS | LANGUAGES | TAGS`) or from `FieldOption` rows (`CUSTOM`). This is how
-     "Track" questions route into agenda tracks with zero duplication.
-   - **Conditional logic**: `FormLogicRule` (target question, action `SHOW/HIDE/REQUIRE`,
-     match ALL/ANY) + `FormLogicCondition` rows (source question, operator, compared
-     value/option). Pure relational, evaluable client-side and server-side.
-   - **Category routing**: `FormRoutingRule` — when a given option is selected on a given
-     question, auto-assign track and/or evaluation plan to the created submission.
-   - Cross-field combined character limits: `FormValidationRule` + join to questions.
+3. **Forms are MDX documents (safe-mdx), not structural tables.** The whole form —
+   copy, layout, field components, conditional logic — is one MDX source stored in
+   immutable `FormVersion` snapshots (`Form.currentVersionId` points at the live one).
+   Field components carry a `name` prop (`<TextField name="title" required />`); options
+   come from scope variables (`options={tracks}`); **conditional logic is plain MDX
+   expressions** (`{values.format === 'workshop' && <TextField name="duration" />}`)
+   evaluated by safe-mdx's safe AST interpreter (no eval, Workers-compatible). Editing
+   is a Monaco editor with a starter template + live preview; saving creates a new
+   version, so renaming a `name` never corrupts old responses. Server-side validation
+   re-renders the response's version with the submitted values in scope, collects the
+   VISIBLE fields + props, and validates — the same logic the user saw.
+   **Category routing** collapsed to two columns: `Track.evaluationPlanId` (per-track
+   override) and `Form.defaultEvaluationPlanId` (fallback); the track field itself
+   writes `Session.trackId`.
 
-4. **Two layers of answer storage.**
-   - `FormResponse` + `Answer` (+ `AnswerOption` for selects) = the immutable record of
-     what was submitted through which form. `Answer.subjectSpeakerId` distinguishes
-     per-participant answers on multi-speaker submissions.
-   - Canonical current values live on the entities: typed columns on `Session`/`Speaker`
-     for system fields, `SessionFieldValue`/`SpeakerFieldValue` for custom fields.
-     On submit, answers are copied to entity values; admins and portal edits then mutate
-     entity values directly. This matches the app (Add Abstract drawer edits entity
-     fields with no form).
+4. **Two layers of value storage.**
+   - `FormResponse` (pinned to its `FormVersion`) + `FormFieldValue` KV rows
+     (`name`/`value`, multi-select = multiple rows, `subjectSpeakerId` for
+     per-participant values, `fileId` for uploads) = the immutable record of what was
+     submitted.
+   - Well-known names are copied to typed entity columns on submit (`title` →
+     `Session.title`, `track` → `Session.trackId`, `speaker.bio` → `Speaker.bio`...).
+     Any other name IS the custom data — there is no field catalog and no separate
+     entity field-value tables; the latest submitted response is the source of truth
+     for custom fields, and admin tables derive custom columns from distinct names.
 
 5. **Evaluation is round-based** (matches "Evaluation 2.0"): `EvaluationPlan` →
    `EvaluationRound` (open/close dates, anonymization) → `ScorecardField` (rating with
@@ -213,8 +215,8 @@ Submission (Session.status):
       │                 │         └───────────────┘ (email) └──────────┘
       └────────────── speaker withdraws ──────────────────► WITHDRAWN
 
-Form:        DRAFT → OPEN → CLOSED (auto at closesAt) → ARCHIVED; structure locks at
-             first submitted response (clone to change)
+Form:        DRAFT → OPEN → CLOSED (auto at closesAt) → ARCHIVED; every save creates an
+             immutable FormVersion, responses pin the version they were filled against
 AgendaDraft: OPEN → COMMITTED (placements copied to sessions, scheduleRevision bumped)
              | DISCARDED; stale baseScheduleRevision blocks commit until rebase
 Round:       PENDING → OPEN → CLOSED; RoundSession outcome PENDING → ADVANCED | REJECTED
@@ -228,10 +230,11 @@ in the same atomic batch — the full audit trail from submission to agenda.
 
 ## Gap-filling assumptions
 
-- **Forms lock instead of versioning.** Once a form has its first submitted response, its
-  structure (sections, questions, options) is locked; organizers clone the form to make a
-  new version, and used forms/fields/options get `ARCHIVED`, never deleted. Historical
-  references use `Restrict` so `FormResponse`/`Answer` rows stay immutable evidence.
+- **Forms version instead of locking.** Every editor save creates an immutable
+  `FormVersion`; responses pin their version, so editing the live MDX never changes the
+  meaning of past submissions. Used forms get `ARCHIVED`, never deleted; historical
+  references use `Restrict` so `FormResponse`/`FormFieldValue` rows stay immutable
+  evidence. The MDX editor warns when a `name` prop disappears between versions.
 - Conflict detection algorithm: overlap when two placements intersect in time AND share a
   room, or share a participant, or hit a `SpeakerAvailability` block, or violate an
   enabled `SchedulingRule`. Personas (attendee-type schedule scoring) are skipped — the
@@ -334,3 +337,29 @@ deterministic default org always exists. Team orgs are explicit.
 Naming consequence: BetterAuth owns the physical `session` table, so the domain session
 entity maps to the **`event_session`** table (Prisma model stays `Session`).
 `Event.orgId` → `Org.orgId` hangs events off the org the way akarso hangs profiles.
+
+# MDX forms simplification (round 3)
+
+The normalized form builder (14 models + 9 enums: FieldDefinition, FieldOption,
+FormSection, FormQuestion, FormParticipantRole, FormLogicRule/Condition,
+FormRoutingRule, FormValidationRule(+Question), Answer, AnswerOption,
+Session/SpeakerFieldValue(+Options)) was replaced by **MDX forms** rendered with
+[safe-mdx](https://github.com/remorses/safe-mdx):
+
+- The whole form is ONE MDX source per immutable `FormVersion`; conditional logic is
+  MDX expressions with `{ values, tracks, formats, ... }` in scope (safe AST
+  interpreter — no eval, works on Cloudflare Workers).
+- Submitted data = `FormFieldValue` KV rows keyed by the component's `name` prop;
+  well-known names copy to typed entity columns, everything else IS the custom data.
+- Editing = Monaco with a starter template + live preview; server-side validation
+  re-renders the pinned version with submitted values in scope and validates the
+  visible fields.
+- Routing = `Track.evaluationPlanId` override + `Form.defaultEvaluationPlanId`
+  fallback (two columns instead of a rules engine).
+- Enum sweep in the same pass: `Event.eventType` (EventType), `Session.visibility`
+  (replaces isPublic), `RuleStatus` for scheduling/reminder rules (replaces enabled
+  booleans), `TaskDefinition.assignmentMode` (replaces autoAssignOnAccept),
+  `Form.draftPolicy` + `Form.afterSubmit` (replace the two form booleans).
+
+Net: schema went from ~55 to ~40 models; the riskiest relational machinery (logic
+rules, option references, question bindings) no longer exists.
