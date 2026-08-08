@@ -160,7 +160,6 @@ function RenameOrgDialog({ open, onOpenChange, orgId, currentName }: {
                 const name = String(formData.get('name') ?? '').trim()
                 await renameOrg({ orgId, name })
                 onOpenChange(false)
-                router.refresh()
               }}
             >
               <Input autoFocus required name="name" defaultValue={currentName} maxLength={60} />
