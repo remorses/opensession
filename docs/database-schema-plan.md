@@ -130,7 +130,7 @@ transcriptions/recordings, sponsors/exhibitors.
 ## Key decisions
 
 1. **Auth = BetterAuth for BOTH populations.** One `User` table serves organizers and
-   submitters. Organizers get `OrgsUsers` rows (app-level org membership, ported from
+   submitters. Organizers get `OrgMember` rows (app-level org membership ported from
    akarso — NOT a BetterAuth plugin) and `EventMember` rows (per-event role incl.
    `REVIEWER`). Submitters get a `Speaker` row per event. `Speaker.userId` is nullable:
    a submitter can add co-speakers by email who have never logged in; when that person
@@ -312,19 +312,25 @@ replaced by always-visible computed conflicts + explicit commit confirmation) an
 
 # Alignment with the akarso project
 
-This product is built on the **akarso** codebase, so shared concepts must be shaped
-IDENTICALLY for direct code porting. Org-layer tables are copied 1:1 from
-`akarso-sso/db/schema.prisma`:
+This product is built on the **akarso** codebase (`~/.kimaki/projects/akarso`,
+`db/src/schema.ts` — BetterAuth on Cloudflare D1 via drizzle), so shared concepts are
+shaped IDENTICALLY for direct code porting:
 
-| akarso model | Shape kept identical | Notes |
+| akarso table | Ported shape | Notes |
 |---|---|---|
-| `Org` | PK `orgId` (cuid), `name @default("")`, timestamps | billing fields (`stripeCustomerId`, `Subscription`) omitted — payments out of scope |
-| `OrgsUsers` | composite `@@id([userId, orgId])`, `role UserRole @default(MEMBER)` | queries like `prisma.orgsUsers.upsert({ where: { userId_orgId } })` port directly |
-| `UserRole` | `ADMIN \| MEMBER` | replaces the earlier three-value OrgRole |
-| `OrgInviteLink` | `key String @id`, `orgId`, `createdAt` | link-based invites (`/invite/{key}` joins as MEMBER); replaces email-targeted invitation rows |
+| `user` / `session` / `account` / `verification` | BetterAuth core, same physical table names (`@@map`) | plugins here: magic-link; akarso's `deviceCode`/mcp/`apikey` tables not ported |
+| `org` | `orgId` PK, `ownerUserId` FK, `kind: personal \| team`, nullable `name` | billing (`stripeCustomerId`, `subscription`) omitted — payments out of scope |
+| `org_member` | ULID `memberId` PK, unique `(orgId, userId)`, `role: admin \| member` (lowercase) | idempotent invite acceptance via `onConflictDoNothing` |
+| `org_invitation` | secret-link invites: `invitationId`, `role`, `createdBy`, `expiresAt` | no email column, no status column — valid until expiry |
 
-Differences that stay: akarso pairs these with **Supabase auth** (`auth.users`); we pair
-them with **BetterAuth** (`User`) — only the FK target of `OrgsUsers.userId` differs.
-`Event.orgId` references `Org.orgId` the same way akarso's `Site.orgId` does. akarso's
-SSO-specific models (`Site`, `PortalSession`, `SSOConnection`, `saml_*`) are not ported;
-the speaker portal uses BetterAuth magic links instead.
+Conventions inherited from akarso: **ULID ids** (`$defaultFn(() => ulid())` — the
+Prisma `cuid()` defaults are stand-ins), **epochMs timestamps** (epoch-ms integers whose
+`toDriver` accepts Date — required for BetterAuth on D1), lowercase text enum values for
+the org layer, and the **personal-org invariant**: every user gets exactly one
+auto-created `personal` org, race-safe via the partial unique index
+`org(owner_user_id) WHERE kind = 'personal'`; the owner can never leave it, so a
+deterministic default org always exists. Team orgs are explicit.
+
+Naming consequence: BetterAuth owns the physical `session` table, so the domain session
+entity maps to the **`event_session`** table (Prisma model stays `Session`).
+`Event.orgId` → `Org.orgId` hangs events off the org the way akarso hangs profiles.
