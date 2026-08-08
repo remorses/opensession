@@ -198,7 +198,7 @@ matches it too — it was switched off the buggy `drizzle-orm/d1` driver):
     "migrations_pattern": "../db/drizzle/*/migration.sql" }],
   "r2_buckets": [{ "binding": "FILES", "bucket_name": "opensession-files" }],
   "send_email": [{ "name": "EMAIL", "remote": true }],
-  "triggers": { "crons": ["*/15 * * * *"] },
+  "triggers": { "crons": ["*/5 * * * *"] },
   "vars": { "APP_URL": "https://opensession.dev" },
   "secrets": { "required": ["BETTER_AUTH_SECRET", "BETTER_AUTH_URL",
     "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] },
