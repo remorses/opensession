@@ -331,7 +331,8 @@ export async function createEvent(input: {
         target: 'SUBMISSION',
         name: 'Call for speakers',
         slug: 'cfp',
-        status: 'OPEN',
+        // DRAFT until the organizer reviews and opens the CFP.
+        status: 'DRAFT',
       }),
       db.insert(schema.formVersion).values({ formId: cfpFormId, mdxSource: starterCfpTemplate }),
       db.insert(schema.form).values({

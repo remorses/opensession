@@ -235,7 +235,10 @@ function collectDraftFields({ mdxSource, tracks, formats, submission }: {
   return collected
 }
 
-async function resolveParticipantSpeakers({ eventId, session, primarySpeakerId, submission }: {
+/** Resolve each submitted participant by email (primary = current user).
+ *  Shared by CFP submit and portal PENDING edit so email changes replace
+ *  the speaker identity instead of keeping the old row by position. */
+export async function resolveParticipantSpeakers({ eventId, session, primarySpeakerId, submission }: {
   eventId: string
   session: Session
   primarySpeakerId: string

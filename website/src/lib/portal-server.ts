@@ -15,7 +15,7 @@ import {
   getFileFieldNames,
   restoreSubmissionValues,
 } from './cfp-submission.ts'
-import { cfpSubmissionSchema } from './cfp-server.ts'
+import { cfpSubmissionSchema, resolveParticipantSpeakers } from './cfp-server.ts'
 import {
   assignmentOwnedBySpeaker,
   canCompleteManualAssignment,
@@ -26,12 +26,14 @@ import {
   type PortalAssignmentRow,
   type PortalSessionRow,
 } from './portal.ts'
-import { namesFromSession, linkSpeakerIdentity } from './speaker-link.ts'
+import { linkSpeakerIdentity } from './speaker-link.ts'
 import { applyTransition, type SessionStatus } from './submissions.ts'
 
 export type PortalEventContext = {
   event: typeof schema.event.$inferSelect
-  speaker: typeof schema.speaker.$inferSelect
+  /** Null when this user has no speaker row yet (must submit CFP or be
+   *  invited as co-speaker first — portal does not invent speakers). */
+  speaker: typeof schema.speaker.$inferSelect | null
   adminOrgPath: string | null
   userEmail: string
   userName: string
@@ -44,10 +46,11 @@ export async function loadPortalContext(
   const db = getDb()
   const event = await db.query.event.findFirst({ where: { slug: eventSlug } })
   if (!event) return null
+  // Claim existing speaker by verified email only — never create on portal
+  // visit (that would let any signed-in user attach to any event + upload).
   const speaker = await linkSpeakerIdentity({
     eventId: event.id,
     session,
-    profile: namesFromSession(session),
   })
   const member = await lookupOrgMember(session.userId, event.orgId)
   return {
@@ -228,10 +231,6 @@ async function assertOwnedFiles({ eventId, ownerSpeakerId, fileIds }: {
   }
 }
 
-function stringValue(value: string | string[] | undefined): string {
-  return typeof value === 'string' ? value.trim() : ''
-}
-
 export async function withdrawPortalSubmission({
   eventId,
   sessionId,
@@ -308,33 +307,12 @@ export async function savePortalSubmission({
     throw new Error(collected.errors.map((error) => error.message).join('\n'))
   }
 
-  // Reuse CFP participant resolution: primary email must match account.
-  const primaryEmail = stringValue(submission.participants[0]?.['speaker.email']).toLowerCase()
-  if (primaryEmail && primaryEmail !== session.user.email.toLowerCase()) {
-    throw new Error('The primary participant email must match your verified account email')
-  }
-
-  const participantSpeakerIds = loaded.session.participants.map((row) => row.speakerId)
-  while (participantSpeakerIds.length < submission.participants.length) {
-    const index = participantSpeakerIds.length
-    const email = stringValue(submission.participants[index]?.['speaker.email']).toLowerCase()
-    if (!email) throw new Error(`Participant ${index + 1} needs a valid email`)
-    const existing = await db.query.speaker.findFirst({ where: { eventId, email } })
-    if (existing) {
-      participantSpeakerIds.push(existing.id)
-      continue
-    }
-    const id = ulid()
-    await db.insert(schema.speaker).values({
-      id,
-      eventId,
-      email,
-      firstName: stringValue(submission.participants[index]?.['speaker.firstName']) || 'Speaker',
-      lastName: stringValue(submission.participants[index]?.['speaker.lastName']),
-    })
-    participantSpeakerIds.push(id)
-  }
-  participantSpeakerIds.length = submission.participants.length
+  const participantSpeakerIds = await resolveParticipantSpeakers({
+    eventId,
+    session,
+    primarySpeakerId: ctx.speaker.id,
+    submission,
+  })
 
   const fileFieldNames = getFileFieldNames(collected)
   const fieldRows = flattenSubmissionValues({
@@ -630,11 +608,10 @@ async function loadPortalContextByEventId(eventId: string, session: Session) {
   const db = getDb()
   const event = await db.query.event.findFirst({ where: { id: eventId } })
   if (!event) throw new Error('Event not found')
-  const speaker = await linkSpeakerIdentity({
-    eventId,
-    session,
-    profile: namesFromSession(session),
-  })
+  const speaker = await linkSpeakerIdentity({ eventId, session })
+  if (!speaker) {
+    throw new Error('No speaker profile for this event. Submit a CFP or accept a co-speaker invite first.')
+  }
   return { event, speaker }
 }
 

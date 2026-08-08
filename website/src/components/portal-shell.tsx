@@ -189,13 +189,24 @@ export function PortalShell({
 
 export function PortalHomePage() {
   const data = usePortalShell()
-  if (data.portalMissing || !data.event || !data.speaker) {
+  if (data.portalMissing || !data.event) {
     return (
       <PortalShell active="home">
         <EmptyState
           icon={<FileTextIcon className="size-5 text-muted-foreground" />}
           title="Event not found"
           description="This speaker portal link is invalid."
+        />
+      </PortalShell>
+    )
+  }
+  if (!data.speaker) {
+    return (
+      <PortalShell active="home">
+        <EmptyState
+          icon={<FileTextIcon className="size-5 text-muted-foreground" />}
+          title="No speaker profile yet"
+          description="Submit a talk through the event CFP, or wait until an organizer adds you as a co-speaker. Your verified Google email must match."
         />
       </PortalShell>
     )
@@ -820,10 +831,9 @@ export function PortalTaskDetailPage() {
           </Link>
           <h1 className="text-xl font-semibold tracking-tight">{assignment.title}</h1>
           {assignment.instructionsHtml ? (
-            <div
-              className="text-sm text-muted-foreground"
-              dangerouslySetInnerHTML={{ __html: assignment.instructionsHtml }}
-            />
+            <p className="whitespace-pre-wrap text-sm text-muted-foreground">
+              {assignment.instructionsHtml}
+            </p>
           ) : null}
           {assignment.sessionTitle ? (
             <p className="text-sm text-muted-foreground">

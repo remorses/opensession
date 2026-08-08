@@ -389,10 +389,11 @@ function WizardStepFields({
         setValues((prev) => ({ ...prev, ...next.values }))
         setParticipants((prev) => {
           if (next.participants.length === 0) return prev
-          const length = Math.max(prev.length, next.participants.length)
-          return Array.from({ length }, (_, index) => ({
+          // Never pad to the old length — removing a participant must drop
+          // their record from the submission payload.
+          return next.participants.map((record, index) => ({
             ...(prev[index] ?? {}),
-            ...(next.participants[index] ?? {}),
+            ...record,
           }))
         })
       }}

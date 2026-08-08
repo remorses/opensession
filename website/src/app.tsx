@@ -434,10 +434,13 @@ export const app = new Spiceflow()
     if (!ctx) {
       return emptyPortalShell(session.user.email, session.user.name)
     }
-    const [sessionRows, assignmentRows] = await Promise.all([
-      listPortalSessions(ctx.event.id, ctx.speaker.id),
-      listPortalAssignments(ctx.event.id, ctx.speaker.id),
-    ])
+    // No speaker row yet: show portal shell with empty lists (must CFP or be invited).
+    const [sessionRows, assignmentRows] = ctx.speaker
+      ? await Promise.all([
+        listPortalSessions(ctx.event.id, ctx.speaker.id),
+        listPortalAssignments(ctx.event.id, ctx.speaker.id),
+      ])
+      : [[], []] as const
     return {
       portalMissing: false,
       event: ctx.event,
@@ -483,7 +486,7 @@ export const app = new Spiceflow()
       throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}/submissions/${params.sessionId}`)}`)
     }
     const ctx = await loadPortalContext(params.eventSlug, session)
-    if (!ctx) {
+    if (!ctx?.speaker) {
       return {
         detail: null,
         draft: null,
@@ -543,7 +546,7 @@ export const app = new Spiceflow()
       throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}/profile`)}`)
     }
     const ctx = await loadPortalContext(params.eventSlug, session)
-    if (!ctx) {
+    if (!ctx?.speaker) {
       return { profileForm: null, profileMdx: null, initialValues: {} as Record<string, string> }
     }
     const form = await getPortalProfileForm(ctx.event.id)
@@ -584,7 +587,7 @@ export const app = new Spiceflow()
       throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}/tasks/${params.assignmentId}`)}`)
     }
     const ctx = await loadPortalContext(params.eventSlug, session)
-    if (!ctx) {
+    if (!ctx?.speaker) {
       return {
         assignment: null,
         formMdx: null as string | null,

@@ -23,6 +23,17 @@ Never write `opensessions`, `OpenSessions`, `opensession.com`, or any other doma
 The only legacy exceptions are the local checkout folder (`opensessions/`) and the
 sigillo org name, which cannot be renamed from the CLI.
 
+## Tracks and sessions
+
+A **track** is an event topic lane (e.g. AI, Security). Tracks belong to the
+**event** library (`track` table), not to a form. Same pattern as formats/rooms.
+
+- One CFP form covers all tracks via `<Select name="track" options={tracks} />`.
+- One submit = one session = one `event_session.trackId`. No multi-track session.
+- Speakers submit again for another session/track. Cap: `MAX_CFP_RESPONSES` (3)
+  non-draft responses per speaker per event (`website/src/lib/cfp-submission.ts`).
+- Do not invent form-owned tracks or one-form-per-track unless product asks for it.
+
 ## NEVER hardcode secrets — this repo is public
 
 `remorses/opensession` is a **public open-source repository**. Anything committed here
@@ -49,9 +60,6 @@ Rules, no exceptions:
   `sk-xxxxxxxx`. Never copy a real value "just for the example".
 - Non-secret identifiers are fine to commit: D1 `database_id`, worker names, the
   Cloudflare account slug, public URLs. They are useless without a credential.
-
-Before any commit, scan the staged diff for secret-looking strings. If you find one,
-stop, tell the user, and treat the credential as compromised so it can be rotated.
 
 ## MANDATORY: read these before writing any code
 
