@@ -44,6 +44,18 @@ export function Info({ children }: { children?: ReactNode }) {
   )
 }
 
+/** Multistep form marker. Full-form preview (admin editor) renders every
+ *  step's children in document order. The public wizard slices MDX per
+ *  step and never mounts this wrapper for a single step body. */
+export function Step({ title, children }: { title?: string; children?: ReactNode }) {
+  return (
+    <section className="flex flex-col gap-4">
+      {title ? <h2 className="text-lg font-semibold tracking-tight">{title}</h2> : null}
+      {children}
+    </section>
+  )
+}
+
 // ── Markdown element styling (welcome copy between fields) ──────────
 
 function P({ children }: { children?: ReactNode }) {
@@ -73,6 +85,7 @@ export const formComponents = {
   Participants,
   Show,
   Section,
+  Step,
   Info,
   p: P,
   h1: H1,

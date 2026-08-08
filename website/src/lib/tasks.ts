@@ -143,8 +143,45 @@ export function summarizeAssignmentProgress(
   }
 }
 
-/** Default MANUAL task definitions seeded on event create (no portal forms
- *  required). FORM-linked defaults land later when portal forms exist. */
+/** Default FORM-linked onboarding tasks seeded with the default portal forms. */
+export function defaultFormTaskDefinitions({
+  eventId,
+  now,
+  speakerProfileFormId,
+  sessionMaterialsFormId,
+}: {
+  eventId: string
+  now: number
+  speakerProfileFormId: string
+  sessionMaterialsFormId: string
+}) {
+  return [
+    {
+      eventId,
+      title: 'Complete Speaker Profile',
+      instructionsHtml: null as string | null,
+      target: 'SPEAKER' as const,
+      source: 'FORM' as const,
+      formId: speakerProfileFormId,
+      dueAt: null as number | null,
+      sortOrder: 0,
+      createdAt: now,
+    },
+    {
+      eventId,
+      title: 'Upload Session Materials',
+      instructionsHtml: null as string | null,
+      target: 'SUBMISSION' as const,
+      source: 'FORM' as const,
+      formId: sessionMaterialsFormId,
+      dueAt: null as number | null,
+      sortOrder: 1,
+      createdAt: now,
+    },
+  ]
+}
+
+/** @deprecated use defaultFormTaskDefinitions — kept only if a caller needs MANUAL seeds. */
 export function defaultManualTaskDefinitions(eventId: string, now: number) {
   return [
     {

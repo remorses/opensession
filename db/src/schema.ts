@@ -289,6 +289,8 @@ export const speaker = s.sqliteTable('speaker', {
   linkedinUrl: s.text('linkedin_url'),
   twitterUrl: s.text('twitter_url'),
   headshotFileId: s.text('headshot_file_id').unique().references((): s.AnySQLiteColumn => file.id, { onDelete: 'set null' }),
+  /** Google profile image URL when the speaker has no uploaded headshot. */
+  avatarUrl: s.text('avatar_url'),
   createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
@@ -297,7 +299,7 @@ export const speaker = s.sqliteTable('speaker', {
   s.uniqueIndex('speaker_event_email_unique').on(table.eventId, table.email),
   s.uniqueIndex('speaker_id_event_unique').on(table.id, table.eventId),
   // One linked speaker identity per user per event. Partial: unlinked
-  // (userId NULL) co-speaker rows can coexist.
+  // (userId NULL) co-speakers can coexist.
   s.uniqueIndex('speaker_event_user_unique').on(table.eventId, table.userId).where(orm.sql`user_id IS NOT NULL`),
 ])
 

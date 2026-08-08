@@ -57,74 +57,45 @@ type FormSubmission = {
 
 ## Full default CFP form
 
-This is the starter template created with every new CFP form (`starterCfpTemplate`):
+This is the starter template created with every new CFP form (`starterCfpTemplate`).
+It uses `<Step>` blocks so the public wizard shows Welcome → Account → Submission → Speakers → Review.
 
-```mdx
-# Call for speakers
+See `website/src/forms/starter-template.ts` for the full source. Event create also seeds:
 
-We are excited to hear what you want to present. Fill out the form below to
-submit your session — you can come back and edit it until the CFP closes.
-
-<Info>
-  Submissions are reviewed by the program committee after the CFP closes.
-  You will be notified by email either way.
-</Info>
-
-<Section title="Your session">
-
-<TextField name="title" label="Session title" required maxLength={80} placeholder="A concise, descriptive title" />
-
-<RichText name="description" label="Abstract" required maxLength={5000} />
-
-<Select name="track" label="Track" options={tracks} required />
-
-<Select name="format" label="Format" options={formats} required />
-
-<Checkbox name="needsAV" label="My session needs special A/V equipment" />
-
-<Show when={values.needsAV === 'true'}>
-  <TextField name="avDetails" label="Describe your A/V needs" required maxLength={500} multiline />
-</Show>
-
-</Section>
-
-<Section title="Speakers">
-
-Add everyone who will be on stage. The first participant is the primary
-contact for this submission.
-
-<Participants min={1} max={3}>
-  <TextField name="speaker.firstName" label="First name" required maxLength={80} />
-  <TextField name="speaker.lastName" label="Last name" required maxLength={80} />
-  <TextField name="speaker.email" label="Email" required maxLength={200} />
-  <RichText name="speaker.bio" label="Bio" maxLength={5000} />
-  <FileUpload name="speaker.headshot" label="Headshot" accept="image/*" />
-</Participants>
-
-</Section>
-```
-
-### Default portal form
-
-```mdx
-# Upload your slides
-
-Please upload the final version of your presentation before the deadline.
-
-<Info>
-  Accepted formats: PDF, Keynote, or PowerPoint. Max 100 MB.
-</Info>
-
-<FileUpload name="slides" label="Presentation file" accept=".pdf,.key,.pptx" required />
-
-<TextField name="slidesNotes" label="Anything the organizers should know?" maxLength={500} multiline />
-```
+- **Speaker profile** (`starterSpeakerProfileTemplate`, slug `speaker-profile`)
+- **Session materials** (`starterSessionMaterialsTemplate`, slug `session-materials`)
 
 ---
 
 ## Layout and copy
 
 Free markdown between components is welcome text. Use headings, paragraphs, and lists.
+
+### `<Step title="...">`
+
+First-class multistep marker for the public CFP and portal wizards.
+
+```mdx
+# Welcome copy (everything before the first Step)
+
+<Step title="Submission">
+  <TextField name="title" label="Title" required />
+</Step>
+
+<Step title="Speakers">
+  <Participants min={1} max={3}>
+    <TextField name="speaker.firstName" label="First name" required />
+  </Participants>
+</Step>
+```
+
+The wizard builds tabs as **1 Welcome → 2 Account → 3… MDX Steps → Review**.
+
+- Markdown and non-Step JSX **before the first `<Step>`** is the Welcome body.
+- Each `<Step title="…">` is one content step. **Next** validates only that step's fields.
+- Final **Submit** runs full validation against the whole form MDX.
+- If the MDX has **zero** `<Step>` blocks, the whole source is one content step titled Submission (compat).
+- The admin editor preview still renders every step's children in document order.
 
 ### `<Section title="...">`
 

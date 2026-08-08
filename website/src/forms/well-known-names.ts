@@ -54,20 +54,34 @@ export type ExtractedWellKnown = {
 
 export function extractWellKnown({ values, participants }: FormSubmission): ExtractedWellKnown {
   const result: ExtractedWellKnown = { session: {}, speakers: [], customValues: [] }
+  // Portal SPEAKER profile forms put speaker.* names on the top-level
+  // values record (no <Participants>). Project those onto speakers[0].
+  const topLevelSpeaker: Partial<Record<SpeakerColumn, string>> = {}
 
   for (const [name, value] of Object.entries(values)) {
-    const column = sessionColumns.get(name)
+    const sessionColumn = sessionColumns.get(name)
     // Well-known session fields are single-valued; arrays (multi-selects)
     // can never map to a typed column, so they fall through to custom.
-    if (column && typeof value === 'string') {
-      result.session[column] = value
+    if (sessionColumn && typeof value === 'string') {
+      result.session[sessionColumn] = value
+      continue
+    }
+    const speakerColumn = speakerColumns.get(name)
+    if (speakerColumn && typeof value === 'string') {
+      topLevelSpeaker[speakerColumn] = value
       continue
     }
     pushCustom({ result, name, value, participantIndex: null })
   }
 
+  if (Object.keys(topLevelSpeaker).length > 0 && participants.length === 0) {
+    result.speakers.push(topLevelSpeaker)
+  }
+
   participants.forEach((record, index) => {
-    const speaker: Partial<Record<SpeakerColumn, string>> = {}
+    const speaker: Partial<Record<SpeakerColumn, string>> = {
+      ...(index === 0 ? topLevelSpeaker : {}),
+    }
     for (const [name, value] of Object.entries(record)) {
       const column = speakerColumns.get(name)
       if (column && typeof value === 'string') {

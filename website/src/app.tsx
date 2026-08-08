@@ -21,7 +21,7 @@ import {
   getDb,
   requireSession,
 } from './db.ts'
-import { libraryOptions } from './forms/collect-fields.ts'
+import { libraryOptions, type FieldOption } from './forms/collect-fields.ts'
 import { canAccessFile } from './lib/cfp-submission.ts'
 import { getOrCreateCfpDraft, getPublicCfp, type PublicCfpForm } from './lib/cfp-server.ts'
 import {
@@ -29,7 +29,17 @@ import {
   progressByReviewer,
   sessionsToReview,
 } from './lib/reviews.ts'
-import { linkSpeakerIdentity } from './lib/speaker-link.ts'
+import {
+  draftValuesFromSpeaker,
+  getPortalAssignment,
+  getPortalProfileForm,
+  getPortalSession,
+  listPortalAssignments,
+  listPortalSessions,
+  loadPortalContext,
+  restoreCfpEditDraft,
+} from './lib/portal-server.ts'
+import { parsePortalTasksTab } from './lib/portal.ts'
 import {
   abstractsToCsv,
   aggregateReviewStats,
@@ -47,6 +57,51 @@ import { OpenSessionLogo } from './components/auth-page.tsx'
 // ── Schemas ─────────────────────────────────────────────────────────
 
 const loginQuerySchema = z.object({ callbackURL: z.string().optional() })
+
+type PortalSubmissionListRow = {
+  id: string
+  title: string | null
+  status: typeof schema.eventSession.$inferSelect.status
+  trackName: string | null
+  formatName: string | null
+}
+
+type PortalAssignmentListRow = {
+  id: string
+  speakerId: string
+  sessionId: string | null
+  status: typeof schema.taskAssignment.$inferSelect.status
+  target: 'SPEAKER' | 'SUBMISSION'
+  source: 'MANUAL' | 'FORM'
+  formId: string | null
+  title: string
+  sessionTitle: string | null
+  dueAt: number | null
+}
+
+type PortalShellLoaderData = {
+  portalMissing: boolean
+  event: typeof schema.event.$inferSelect | null
+  speaker: typeof schema.speaker.$inferSelect | null
+  adminOrgPath: string | null
+  userEmail: string
+  userName: string
+  submissions: PortalSubmissionListRow[]
+  assignments: PortalAssignmentListRow[]
+}
+
+function emptyPortalShell(userEmail: string, userName: string): PortalShellLoaderData {
+  return {
+    portalMissing: true,
+    event: null,
+    speaker: null,
+    adminOrgPath: null,
+    userEmail,
+    userName,
+    submissions: [],
+    assignments: [],
+  }
+}
 
 // ── OAuth redirect helper ───────────────────────────────────────────
 
@@ -314,17 +369,35 @@ export const app = new Spiceflow()
     cfp: PublicCfpForm | null
     draft: Awaited<ReturnType<typeof getOrCreateCfpDraft>> | null
     capReached: boolean
+    accountEmail: string | null
+    accountName: string | null
   }> => {
     const cfp = await getPublicCfp(params.eventSlug, params.formSlug)
-    if (!cfp) return { cfp: null, draft: null, capReached: false }
+    if (!cfp) {
+      return { cfp: null, draft: null, capReached: false, accountEmail: null, accountName: null }
+    }
     const session = await getSession(request)
-    if (!session) return { cfp, draft: null, capReached: false }
+    if (!session) {
+      return { cfp, draft: null, capReached: false, accountEmail: null, accountName: null }
+    }
     try {
       const draft = await getOrCreateCfpDraft(cfp, session)
-      return { cfp, draft, capReached: false }
+      return {
+        cfp,
+        draft,
+        capReached: false,
+        accountEmail: session.user.email,
+        accountName: session.user.name,
+      }
     } catch (cause) {
       if (cause instanceof Error && cause.message.includes('at most 3 sessions')) {
-        return { cfp, draft: null, capReached: true }
+        return {
+          cfp,
+          draft: null,
+          capReached: true,
+          accountEmail: session.user.email,
+          accountName: session.user.name,
+        }
       }
       throw cause
     }
@@ -344,63 +417,218 @@ export const app = new Spiceflow()
         draft={loaderData.draft}
         capReached={loaderData.capReached}
         signInHref={router.href('/login/google', { callbackURL })}
+        accountEmail={loaderData.accountEmail}
+        accountName={loaderData.accountName}
       />
     )
   })
 
-  // Task 6 replaces this small portal summary with the full portal shell.
-  .loader('/portal/:eventSlug', async ({ params, request }): Promise<{
-    portalEvent: typeof schema.event.$inferSelect | null
-    portalSpeaker: ((typeof schema.speaker.$inferSelect) & {
-      submissions: Array<typeof schema.eventSession.$inferSelect>
-    }) | null
-  }> => {
+  // ── Speaker portal (same origin, speaker-owned) ───────────────────
+
+  .loader('/portal/:eventSlug/*', async ({ params, request }): Promise<PortalShellLoaderData> => {
     const session = await getSession(request)
-    if (!session) throw redirect(router.href('/login', { callbackURL: `/portal/${params.eventSlug}` }))
-    const db = getDb()
-    const event = await db.query.event.findFirst({ where: { slug: params.eventSlug } })
-    if (!event) return { portalEvent: null, portalSpeaker: null }
-    const speaker = await linkSpeakerIdentity({ eventId: event.id, session })
-    if (!speaker) return { portalEvent: event, portalSpeaker: null }
-    const submissions = await db.query.eventSession.findMany({
-      where: { eventId: event.id, submitterSpeakerId: speaker.id, kind: 'CONTENT' },
-      orderBy: { createdAt: 'desc' },
-    })
-    return { portalEvent: event, portalSpeaker: { ...speaker, submissions } }
+    if (!session) {
+      throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}`)}`)
+    }
+    const ctx = await loadPortalContext(params.eventSlug, session)
+    if (!ctx) {
+      return emptyPortalShell(session.user.email, session.user.name)
+    }
+    const [sessionRows, assignmentRows] = await Promise.all([
+      listPortalSessions(ctx.event.id, ctx.speaker.id),
+      listPortalAssignments(ctx.event.id, ctx.speaker.id),
+    ])
+    return {
+      portalMissing: false,
+      event: ctx.event,
+      speaker: ctx.speaker,
+      adminOrgPath: ctx.adminOrgPath,
+      userEmail: ctx.userEmail,
+      userName: ctx.userName,
+      submissions: sessionRows.map((row) => ({
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        trackName: row.track?.name ?? null,
+        formatName: row.format?.name ?? null,
+      })),
+      assignments: assignmentRows.map((row) => ({
+        id: row.id,
+        speakerId: row.speakerId,
+        sessionId: row.sessionId,
+        status: row.status,
+        target: row.portal.target,
+        source: row.portal.source,
+        formId: row.portal.formId,
+        title: row.taskDefinition?.title ?? 'Task',
+        sessionTitle: row.session?.title ?? null,
+        dueAt: row.dueAt,
+      })),
+    }
   })
 
-  .page('/portal/:eventSlug', async ({ loaderData }) => {
-    if (!loaderData.portalEvent) return <PublicUnavailable />
-    return (
-      <main className="min-h-screen bg-background px-4 py-8 sm:px-6 sm:py-12">
-        <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
-          <OpenSessionLogo imageClassName="h-8" />
-          <div className="flex flex-col gap-1">
-            <h1 className="text-2xl font-semibold tracking-tight">Speaker portal</h1>
-            <p className="text-sm text-muted-foreground">{loaderData.portalEvent.name}</p>
-          </div>
-          <div className="flex items-center justify-between border-b border-border pb-3">
-            <h2 className="font-medium">My submissions</h2>
-            <Badge variant="outline" className="px-1.5">Task 6 preview</Badge>
-          </div>
-          {loaderData.portalSpeaker?.submissions.length ? (
-            <div className="flex flex-col divide-y divide-border border-y border-border">
-              {loaderData.portalSpeaker.submissions.map((submission) => (
-                <div key={submission.id} className="flex items-center justify-between gap-4 py-4">
-                  <div className="flex min-w-0 flex-col gap-1">
-                    <span className="truncate font-medium">{submission.title || 'Untitled draft'}</span>
-                    <span className="font-mono text-xs text-muted-foreground">{submission.id}</span>
-                  </div>
-                  <Badge variant={submission.status === 'PENDING' ? 'warning' : 'secondary'} className="px-1.5">
-                    {submission.status.toLowerCase()}
-                  </Badge>
-                </div>
-              ))}
-            </div>
-          ) : <p className="text-sm text-muted-foreground">No submissions yet.</p>}
-        </div>
-      </main>
-    )
+  .page('/portal/:eventSlug', async () => {
+    const { PortalHomePage } = await import('./components/portal-shell.tsx')
+    return <PortalHomePage />
+  })
+
+  .page('/portal/:eventSlug/submissions', async () => {
+    const { PortalSubmissionsPage } = await import('./components/portal-shell.tsx')
+    return <PortalSubmissionsPage />
+  })
+
+  .loader('/portal/:eventSlug/submissions/:sessionId', async ({ params, request }) => {
+    const session = await getSession(request)
+    if (!session) {
+      throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}/submissions/${params.sessionId}`)}`)
+    }
+    const ctx = await loadPortalContext(params.eventSlug, session)
+    if (!ctx) {
+      return {
+        detail: null,
+        draft: null,
+        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
+        canEdit: false,
+        canWithdraw: false,
+      }
+    }
+    const loaded = await getPortalSession(ctx.event.id, ctx.speaker.id, params.sessionId)
+    if (!loaded) {
+      return {
+        detail: null,
+        draft: null,
+        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
+        canEdit: false,
+        canWithdraw: false,
+      }
+    }
+    const db = getDb()
+    const [tracks, formats] = await db.batch([
+      db.query.track.findMany({ where: { eventId: ctx.event.id }, orderBy: { sortOrder: 'asc', name: 'asc' } }),
+      db.query.format.findMany({ where: { eventId: ctx.event.id }, orderBy: { sortOrder: 'asc', name: 'asc' } }),
+    ] as const)
+    return {
+      detail: {
+        id: loaded.session.id,
+        title: loaded.session.title,
+        description: loaded.session.description,
+        status: loaded.session.status,
+        trackName: loaded.session.track?.name ?? null,
+        formatName: loaded.session.format?.name ?? null,
+        speakers: loaded.session.participants.flatMap((row) => {
+          if (!row.speaker) return []
+          return [{
+            id: row.speaker.id,
+            firstName: row.speaker.firstName,
+            lastName: row.speaker.lastName,
+            email: row.speaker.email,
+          }]
+        }),
+      },
+      draft: restoreCfpEditDraft(loaded),
+      scope: { tracks: libraryOptions(tracks), formats: libraryOptions(formats) },
+      canEdit: loaded.canEdit,
+      canWithdraw: loaded.canWithdraw,
+    }
+  })
+
+  .page('/portal/:eventSlug/submissions/:sessionId', async () => {
+    const { PortalSubmissionDetailPage } = await import('./components/portal-shell.tsx')
+    return <PortalSubmissionDetailPage />
+  })
+
+  .loader('/portal/:eventSlug/profile', async ({ params, request }) => {
+    const session = await getSession(request)
+    if (!session) {
+      throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}/profile`)}`)
+    }
+    const ctx = await loadPortalContext(params.eventSlug, session)
+    if (!ctx) {
+      return { profileForm: null, profileMdx: null, initialValues: {} as Record<string, string> }
+    }
+    const form = await getPortalProfileForm(ctx.event.id)
+    if (!form) {
+      return { profileForm: null, profileMdx: null, initialValues: {} as Record<string, string> }
+    }
+    const db = getDb()
+    const version = await db.query.formVersion.findFirst({
+      where: { formId: form.id },
+      orderBy: { createdAt: 'desc', id: 'desc' },
+    })
+    return {
+      profileForm: { id: form.id, name: form.name },
+      profileMdx: version?.mdxSource ?? null,
+      initialValues: draftValuesFromSpeaker(ctx.speaker).values as Record<string, string>,
+    }
+  })
+
+  .page('/portal/:eventSlug/profile', async () => {
+    const { PortalProfilePage } = await import('./components/portal-shell.tsx')
+    return <PortalProfilePage />
+  })
+
+  .page({
+    path: '/portal/:eventSlug/tasks',
+    query: z.object({
+      tab: z.enum(['all', 'mine', 'submission']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { PortalTasksPage } = await import('./components/portal-shell.tsx')
+      return <PortalTasksPage tab={parsePortalTasksTab(query.tab)} />
+    },
+  })
+
+  .loader('/portal/:eventSlug/tasks/:assignmentId', async ({ params, request }) => {
+    const session = await getSession(request)
+    if (!session) {
+      throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}/tasks/${params.assignmentId}`)}`)
+    }
+    const ctx = await loadPortalContext(params.eventSlug, session)
+    if (!ctx) {
+      return {
+        assignment: null,
+        formMdx: null as string | null,
+        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
+        initialValues: {} as Record<string, string>,
+        initialParticipants: [] as Array<Record<string, string>>,
+      }
+    }
+    const loaded = await getPortalAssignment(ctx.event.id, ctx.speaker.id, params.assignmentId)
+    if (!loaded) {
+      return {
+        assignment: null,
+        formMdx: null as string | null,
+        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
+        initialValues: {} as Record<string, string>,
+        initialParticipants: [] as Array<Record<string, string>>,
+      }
+    }
+    const db = getDb()
+    const [tracks, formats] = await db.batch([
+      db.query.track.findMany({ where: { eventId: ctx.event.id }, orderBy: { sortOrder: 'asc', name: 'asc' } }),
+      db.query.format.findMany({ where: { eventId: ctx.event.id }, orderBy: { sortOrder: 'asc', name: 'asc' } }),
+    ] as const)
+    const profileDraft = draftValuesFromSpeaker(ctx.speaker)
+    const def = loaded.assignment.taskDefinition
+    return {
+      assignment: {
+        id: loaded.assignment.id,
+        title: def?.title ?? 'Task',
+        instructionsHtml: def?.instructionsHtml ?? null,
+        source: def?.source ?? 'MANUAL',
+        status: loaded.assignment.status,
+        sessionTitle: loaded.assignment.session?.title ?? null,
+      },
+      formMdx: loaded.formVersion?.mdxSource ?? null,
+      scope: { tracks: libraryOptions(tracks), formats: libraryOptions(formats) },
+      initialValues: profileDraft.values as Record<string, string>,
+      initialParticipants: [] as Array<Record<string, string>>,
+    }
+  })
+
+  .page('/portal/:eventSlug/tasks/:assignmentId', async () => {
+    const { PortalTaskDetailPage } = await import('./components/portal-shell.tsx')
+    return <PortalTaskDetailPage />
   })
 
   // ── Org dashboard (/org/:orgId/*) ─────────────────────────────────

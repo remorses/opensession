@@ -3,7 +3,12 @@
 // that change names/required/limits fail loudly.
 import { describe, expect, test } from 'vitest'
 import { collectFields } from './collect-fields.ts'
-import { starterCfpTemplate, starterPortalTemplate } from './starter-template.ts'
+import { extractFormSteps } from './form-steps.ts'
+import {
+  starterCfpTemplate,
+  starterPortalTemplate,
+  starterSpeakerProfileTemplate,
+} from './starter-template.ts'
 
 const scope = {
   values: {},
@@ -134,6 +139,12 @@ describe('starterCfpTemplate', () => {
     const result = collectFields({ mdxSource: starterCfpTemplate, scope: { ...scope, values: { needsAV: 'true' } } })
     expect(result.fields.map((f) => f.name)).toContain('avDetails')
   })
+
+  test('uses multistep Steps for Submission and Speakers', () => {
+    const steps = extractFormSteps(starterCfpTemplate)
+    expect(steps.errors).toEqual([])
+    expect(steps.contentSteps.map((step) => step.title)).toEqual(['Submission', 'Speakers'])
+  })
 })
 
 describe('starterPortalTemplate', () => {
@@ -167,5 +178,25 @@ describe('starterPortalTemplate', () => {
         "participants": null,
       }
     `)
+  })
+})
+
+describe('starterSpeakerProfileTemplate', () => {
+  test('collects speaker.* well-known fields with no errors', () => {
+    const result = collectFields({ mdxSource: starterSpeakerProfileTemplate, scope: { values: {} } })
+    expect(result.errors).toEqual([])
+    expect(result.fields.map((field) => field.name)).toEqual([
+      'speaker.firstName',
+      'speaker.lastName',
+      'speaker.pronouns',
+      'speaker.jobTitle',
+      'speaker.companyName',
+      'speaker.bio',
+      'speaker.headshot',
+      'speaker.websiteUrl',
+      'speaker.linkedinUrl',
+      'speaker.twitterUrl',
+    ])
+    expect(result.participants).toBeNull()
   })
 })

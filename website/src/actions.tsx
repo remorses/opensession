@@ -19,8 +19,20 @@ import {
   getDb,
 } from './db.ts'
 import { collectFields } from './forms/collect-fields.ts'
-import { starterCfpTemplate, starterPortalTemplate } from './forms/starter-template.ts'
+import {
+  starterCfpTemplate,
+  starterPortalTemplate,
+  starterSessionMaterialsTemplate,
+  starterSpeakerProfileTemplate,
+} from './forms/starter-template.ts'
 import { cfpSubmissionSchema, saveCfpDraft, submitCfpResponse } from './lib/cfp-server.ts'
+import {
+  completeManualTaskAssignment as completeManualTaskAssignmentServer,
+  savePortalProfile as savePortalProfileServer,
+  savePortalSubmission as savePortalSubmissionServer,
+  submitPortalFormTask as submitPortalFormTaskServer,
+  withdrawPortalSubmission as withdrawPortalSubmissionServer,
+} from './lib/portal-server.ts'
 import { normalizeReviewInput } from './lib/reviews.ts'
 import {
   applyTransition,
@@ -31,7 +43,7 @@ import {
 import {
   assertTaskDefinitionShape,
   buildAssignmentsForAcceptance,
-  defaultManualTaskDefinitions,
+  defaultFormTaskDefinitions,
   type PlannedTaskAssignment,
 } from './lib/tasks.ts'
 
@@ -274,10 +286,20 @@ export async function createEvent(input: {
   const db = getDb()
   const eventId = ulid()
   const now = Date.now()
-  const defaultTasks = defaultManualTaskDefinitions(eventId, now)
+  const cfpFormId = ulid()
+  const speakerFormId = ulid()
+  const materialsFormId = ulid()
+  const trackId = ulid()
+  const formatId = ulid()
+  const defaultTasks = defaultFormTaskDefinitions({
+    eventId,
+    now,
+    speakerProfileFormId: speakerFormId,
+    sessionMaterialsFormId: materialsFormId,
+  })
   try {
-    // Event + default MANUAL onboarding tasks in one batch so a new event
-    // always has profile/materials tasks ready for acceptance auto-assign.
+    // Event + default OPEN forms (CFP, speaker profile, materials) + FORM
+    // tasks + a starter track/format so CFP selects work immediately.
     await db.batch([
       db.insert(schema.event).values({
         id: eventId,
@@ -287,6 +309,56 @@ export async function createEvent(input: {
         timezone: parsed.timezone,
         startsAt: parsed.startsAt,
         endsAt: parsed.endsAt,
+      }),
+      db.insert(schema.track).values({
+        id: trackId,
+        eventId,
+        name: 'General',
+        color: '#6366f1',
+        sortOrder: 0,
+      }),
+      db.insert(schema.format).values({
+        id: formatId,
+        eventId,
+        name: 'Talk',
+        defaultDurationMinutes: 30,
+        sortOrder: 0,
+      }),
+      db.insert(schema.form).values({
+        id: cfpFormId,
+        eventId,
+        purpose: 'CFP',
+        target: 'SUBMISSION',
+        name: 'Call for speakers',
+        slug: 'cfp',
+        status: 'OPEN',
+      }),
+      db.insert(schema.formVersion).values({ formId: cfpFormId, mdxSource: starterCfpTemplate }),
+      db.insert(schema.form).values({
+        id: speakerFormId,
+        eventId,
+        purpose: 'PORTAL',
+        target: 'SPEAKER',
+        name: 'Speaker profile',
+        slug: 'speaker-profile',
+        status: 'OPEN',
+      }),
+      db.insert(schema.formVersion).values({
+        formId: speakerFormId,
+        mdxSource: starterSpeakerProfileTemplate,
+      }),
+      db.insert(schema.form).values({
+        id: materialsFormId,
+        eventId,
+        purpose: 'PORTAL',
+        target: 'SUBMISSION',
+        name: 'Session materials',
+        slug: 'session-materials',
+        status: 'OPEN',
+      }),
+      db.insert(schema.formVersion).values({
+        formId: materialsFormId,
+        mdxSource: starterSessionMaterialsTemplate,
       }),
       ...defaultTasks.map((task) => db.insert(schema.taskDefinition).values(task)),
     ] as [any, ...any[]])
@@ -553,7 +625,12 @@ export async function createForm(input: z.input<typeof createFormSchema>) {
   if (!SLUG_RE.test(slug)) throw new Error('Could not derive a valid slug from the form name')
 
   const formId = ulid()
-  const template = parsed.purpose === 'CFP' ? starterCfpTemplate : starterPortalTemplate
+  const template =
+    parsed.purpose === 'CFP'
+      ? starterCfpTemplate
+      : parsed.target === 'SPEAKER'
+        ? starterSpeakerProfileTemplate
+        : starterPortalTemplate
   try {
     // Form + first version in one atomic batch (versions FK the form).
     await db.batch([
@@ -712,6 +789,70 @@ export async function submitPublicCfp(input: z.input<typeof cfpActionSchema>) {
   const session = await requireSession(actionRequest)
   const parsed = cfpActionSchema.parse(input)
   return submitCfpResponse({ ...parsed, session })
+}
+
+// ── Speaker portal actions (speaker-owned, not org-admin) ───────────
+
+const portalSessionActionSchema = z.object({
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+})
+
+export async function withdrawPortalSubmission(input: z.input<typeof portalSessionActionSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = portalSessionActionSchema.parse(input)
+  return withdrawPortalSubmissionServer({ ...parsed, session })
+}
+
+const savePortalSubmissionSchema = portalSessionActionSchema.extend({
+  submission: cfpSubmissionSchema,
+  submit: z.boolean().default(true),
+})
+
+export async function savePortalSubmission(input: z.input<typeof savePortalSubmissionSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = savePortalSubmissionSchema.parse(input)
+  return savePortalSubmissionServer({ ...parsed, session })
+}
+
+const savePortalProfileSchema = z.object({
+  eventId: z.string().min(1),
+  formId: z.string().min(1),
+  submission: cfpSubmissionSchema,
+})
+
+export async function savePortalProfile(input: z.input<typeof savePortalProfileSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = savePortalProfileSchema.parse(input)
+  return savePortalProfileServer({ ...parsed, session })
+}
+
+const portalAssignmentActionSchema = z.object({
+  eventId: z.string().min(1),
+  assignmentId: z.string().min(1),
+})
+
+export async function completeManualTaskAssignment(
+  input: z.input<typeof portalAssignmentActionSchema>,
+) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = portalAssignmentActionSchema.parse(input)
+  return completeManualTaskAssignmentServer({ ...parsed, session })
+}
+
+const submitPortalFormTaskSchema = portalAssignmentActionSchema.extend({
+  submission: cfpSubmissionSchema,
+})
+
+export async function submitPortalFormTask(input: z.input<typeof submitPortalFormTaskSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = submitPortalFormTaskSchema.parse(input)
+  return submitPortalFormTaskServer({ ...parsed, session })
 }
 
 // ── Abstracts / evaluation / tasks ──────────────────────────────────

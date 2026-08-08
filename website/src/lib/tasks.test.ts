@@ -3,6 +3,7 @@ import { describe, expect, test } from 'vitest'
 import {
   assertTaskDefinitionShape,
   buildAssignmentsForAcceptance,
+  defaultFormTaskDefinitions,
   defaultManualTaskDefinitions,
   summarizeAssignmentProgress,
 } from './tasks.ts'
@@ -144,17 +145,22 @@ describe('summarizeAssignmentProgress / defaults', () => {
     ).toEqual({ total: 4, completed: 2, inProgress: 1, notStarted: 1 })
   })
 
-  test('default manual task definitions', () => {
-    expect(defaultManualTaskDefinitions('evt', 42)).toMatchInlineSnapshot(`
+  test('default form task definitions link portal forms', () => {
+    expect(defaultFormTaskDefinitions({
+      eventId: 'evt',
+      now: 42,
+      speakerProfileFormId: 'form_profile',
+      sessionMaterialsFormId: 'form_materials',
+    })).toMatchInlineSnapshot(`
       [
         {
           "createdAt": 42,
           "dueAt": null,
           "eventId": "evt",
-          "formId": null,
+          "formId": "form_profile",
           "instructionsHtml": null,
           "sortOrder": 0,
-          "source": "MANUAL",
+          "source": "FORM",
           "target": "SPEAKER",
           "title": "Complete Speaker Profile",
         },
@@ -162,14 +168,19 @@ describe('summarizeAssignmentProgress / defaults', () => {
           "createdAt": 42,
           "dueAt": null,
           "eventId": "evt",
-          "formId": null,
+          "formId": "form_materials",
           "instructionsHtml": null,
           "sortOrder": 1,
-          "source": "MANUAL",
+          "source": "FORM",
           "target": "SUBMISSION",
           "title": "Upload Session Materials",
         },
       ]
     `)
+  })
+
+  test('default manual task definitions still available', () => {
+    expect(defaultManualTaskDefinitions('evt', 42)).toHaveLength(2)
+    expect(defaultManualTaskDefinitions('evt', 42)[0]!.source).toBe('MANUAL')
   })
 })

@@ -148,6 +148,8 @@ const collectorComponents: Record<string, (props: any) => Marker | null> = {
   }),
   Show: (props) => (props.when ? { kind: 'children', children: toChildren(props.children) } : null),
   Section: (props) => ({ kind: 'children', children: toChildren(props.children) }),
+  // Multistep wizard marker — children are still part of the full form field set.
+  Step: (props) => ({ kind: 'children', children: toChildren(props.children) }),
   Info: () => null,
 }
 

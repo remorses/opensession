@@ -1,10 +1,16 @@
 // Race-safe speaker identity linking by verified BetterAuth email.
 // A user can own one Speaker row per event; unlinked co-speakers are claimed
 // when that email first signs in, while conflicting links are rejected.
+// Google name + image prefill empty profile fields on create/claim.
 import * as orm from 'drizzle-orm'
 import * as schema from 'db/schema'
 import { ulid } from 'ulid'
 import { getDb, type Session } from '../db.ts'
+import {
+  googleAvatarFromImage,
+  namesFromGoogleProfile,
+  speakerGooglePrefill as prefillFromGoogle,
+} from './portal.ts'
 
 export type SpeakerIdentityInput = {
   eventId: string
@@ -29,17 +35,29 @@ function cleanName(value: string): string {
   return value.trim().slice(0, 80)
 }
 
-function namesFromSession(session: Session): { firstName: string; lastName: string } {
-  const parts = session.user.name.trim().split(/\s+/).filter(Boolean)
-  return {
-    firstName: cleanName(parts[0] ?? 'Speaker'),
-    lastName: cleanName(parts.slice(1).join(' ')),
-  }
+export function namesFromSession(session: Session): { firstName: string; lastName: string } {
+  return namesFromGoogleProfile(session.user.name)
+}
+
+function speakerPrefill(
+  session: Session,
+  existing?: {
+    firstName?: string | null
+    lastName?: string | null
+    headshotFileId?: string | null
+    avatarUrl?: string | null
+  } | null,
+) {
+  return prefillFromGoogle(
+    { name: session.user.name, image: session.user.image },
+    existing,
+  )
 }
 
 /** Link an existing event speaker to the signed-in user. When `profile` is
  * supplied, create the row if no email match exists. Without it, absence is
- * returned as null so read-only portal loaders do not invent identities. */
+ * returned as null so read-only callers do not invent identities. Portal
+ * loaders pass profile so speakers can enter without a prior CFP. */
 export function linkSpeakerIdentity(input: SpeakerIdentityInput & { profile: { firstName: string; lastName: string } }): Promise<LinkedSpeaker>
 export function linkSpeakerIdentity(input: SpeakerIdentityInput): Promise<LinkedSpeaker | null>
 export async function linkSpeakerIdentity({ eventId, session, profile }: SpeakerIdentityInput): Promise<LinkedSpeaker | null> {
@@ -54,10 +72,12 @@ export async function linkSpeakerIdentity({ eventId, session, profile }: Speaker
     if (byEmail && byEmail.id !== byUser.id) {
       throw new Error('This email and user are linked to different speaker profiles')
     }
-    if (byUser.email !== email) {
+    const prefill = speakerPrefill(session, byUser)
+    const emailPatch = byUser.email !== email ? { email } : {}
+    if (Object.keys(prefill).length > 0 || Object.keys(emailPatch).length > 0) {
       const [updated] = await db
         .update(schema.speaker)
-        .set({ email, updatedAt: Date.now() })
+        .set({ ...emailPatch, ...prefill, updatedAt: Date.now() })
         .where(orm.eq(schema.speaker.id, byUser.id))
         .limit(1)
         .returning()
@@ -70,9 +90,10 @@ export async function linkSpeakerIdentity({ eventId, session, profile }: Speaker
     if (byEmail.userId && byEmail.userId !== session.userId) {
       throw new Error('This speaker profile is linked to another user')
     }
+    const prefill = speakerPrefill(session, byEmail)
     const [claimed] = await db
       .update(schema.speaker)
-      .set({ userId: session.userId, updatedAt: Date.now() })
+      .set({ userId: session.userId, ...prefill, updatedAt: Date.now() })
       .where(orm.and(orm.eq(schema.speaker.id, byEmail.id), orm.isNull(schema.speaker.userId)))
       .limit(1)
       .returning()
@@ -85,6 +106,7 @@ export async function linkSpeakerIdentity({ eventId, session, profile }: Speaker
 
   if (!profile) return null
   const fallback = namesFromSession(session)
+  const avatarUrl = googleAvatarFromImage(session.user.image)
   const speakerId = ulid()
   try {
     const [created] = await db
@@ -96,6 +118,7 @@ export async function linkSpeakerIdentity({ eventId, session, profile }: Speaker
         email,
         firstName: cleanName(profile.firstName) || fallback.firstName,
         lastName: cleanName(profile.lastName) || fallback.lastName,
+        avatarUrl,
       })
       .returning()
     return created!
