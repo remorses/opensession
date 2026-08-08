@@ -52,11 +52,17 @@
       "r2_buckets": [
         { "binding": "FILES", "bucket_name": "opensession-preview-files" }
       ],
-      // Routes ARE inherited — preview must clear them or it would steal
-      // opensession.dev from production. Preview lives on workers.dev.
-      "routes": [],
+      // Routes ARE inherited — preview must set its own host or it steals
+      // opensession.dev from production.
+      "routes": [
+        {
+          "pattern": "preview.opensession.dev",
+          "custom_domain": true,
+          "zone_name": "opensession.dev"
+        }
+      ],
       "vars": {
-        "APP_URL": "https://opensession-website-preview.remorses.workers.dev"
+        "APP_URL": "https://preview.opensession.dev"
       },
       "secrets": {
         "required": [

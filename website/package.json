@@ -11,8 +11,8 @@
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:preview": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote --env preview",
     "db:migrate:prod": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote",
-    "deploy": "pnpm db:migrate:preview && CLOUDFLARE_ENV=preview sigillo run -c preview --command 'tsc && vite build && wrangler deploy --env preview'",
-    "deploy:prod": "pnpm db:migrate:prod && sigillo run -c prod --command 'tsc && vite build && wrangler deploy'"
+    "deploy": "pnpm db:migrate:preview && CLOUDFLARE_ENV=preview sigillo run -c preview --mount /tmp/os-secrets.env --mount-format env --command 'tsc && vite build && wrangler deploy --env preview --secrets-file /tmp/os-secrets.env'",
+    "deploy:prod": "pnpm db:migrate:prod && sigillo run -c prod --mount /tmp/os-secrets.env --mount-format env --command 'tsc && vite build && wrangler deploy --secrets-file /tmp/os-secrets.env'"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

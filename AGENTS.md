@@ -15,7 +15,7 @@ The product is **OpenSession** (singular) and the domain is **opensession.dev**.
 | Slug / package prefix | `opensession` |
 | Production domain | `opensession.dev` |
 | Worker (prod) | `opensession-website` → `opensession.dev` custom domain |
-| Worker (preview) | `opensession-website-preview` → workers.dev, `routes: []` |
+| Worker (preview) | `opensession-website-preview` → `preview.opensession.dev` |
 | D1 (prod / preview) | `opensession-db` / `opensession-preview-db` |
 | GitHub repo | `remorses/opensession` |
 
