@@ -21,6 +21,19 @@ import {
 import { collectFields } from './forms/collect-fields.ts'
 import { starterCfpTemplate, starterPortalTemplate } from './forms/starter-template.ts'
 import { cfpSubmissionSchema, saveCfpDraft, submitCfpResponse } from './lib/cfp-server.ts'
+import { normalizeReviewInput } from './lib/reviews.ts'
+import {
+  applyTransition,
+  planBulkStatusUpdate,
+  planNotifyQueue,
+  type SessionStatus,
+} from './lib/submissions.ts'
+import {
+  assertTaskDefinitionShape,
+  buildAssignmentsForAcceptance,
+  defaultManualTaskDefinitions,
+  type PlannedTaskAssignment,
+} from './lib/tasks.ts'
 
 // ── Org actions (multi-org + team access) ───────────────────────────
 //
@@ -260,21 +273,28 @@ export async function createEvent(input: {
 
   const db = getDb()
   const eventId = ulid()
+  const now = Date.now()
+  const defaultTasks = defaultManualTaskDefinitions(eventId, now)
   try {
-    await db.insert(schema.event).values({
-      id: eventId,
-      orgId: parsed.orgId,
-      name: parsed.name,
-      slug,
-      timezone: parsed.timezone,
-      startsAt: parsed.startsAt,
-      endsAt: parsed.endsAt,
-    })
+    // Event + default MANUAL onboarding tasks in one batch so a new event
+    // always has profile/materials tasks ready for acceptance auto-assign.
+    await db.batch([
+      db.insert(schema.event).values({
+        id: eventId,
+        orgId: parsed.orgId,
+        name: parsed.name,
+        slug,
+        timezone: parsed.timezone,
+        startsAt: parsed.startsAt,
+        endsAt: parsed.endsAt,
+      }),
+      ...defaultTasks.map((task) => db.insert(schema.taskDefinition).values(task)),
+    ] as [any, ...any[]])
   } catch {
     // Global unique slug — the most likely failure mode.
     throw new Error(`The slug "${slug}" is already taken. Pick another one.`)
   }
-    throw redirect(`/org/${parsed.orgId}/e/${eventId}`)
+  throw redirect(`/org/${parsed.orgId}/e/${eventId}`)
 }
 
 // ── Event settings actions ──────────────────────────────────────────
@@ -692,4 +712,559 @@ export async function submitPublicCfp(input: z.input<typeof cfpActionSchema>) {
   const session = await requireSession(actionRequest)
   const parsed = cfpActionSchema.parse(input)
   return submitCfpResponse({ ...parsed, session })
+}
+
+// ── Abstracts / evaluation / tasks ──────────────────────────────────
+
+const sessionStatusSchema = z.enum([
+  'DRAFT',
+  'PENDING',
+  'ACCEPT_QUEUE',
+  'ACCEPTED',
+  'DECLINE_QUEUE',
+  'DECLINED',
+  'WITHDRAWN',
+])
+
+async function loadEventSession({
+  db,
+  eventId,
+  sessionId,
+}: {
+  db: ReturnType<typeof getDb>
+  eventId: string
+  sessionId: string
+}) {
+  const row = await db.query.eventSession.findFirst({
+    where: { id: sessionId, eventId },
+    with: {
+      participants: { columns: { speakerId: true } },
+    },
+  })
+  if (!row) throw new Error('Session not found')
+  return row
+}
+
+const updateSessionStatusSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+  status: sessionStatusSchema,
+})
+
+/** Single-session guarded status change (queues, withdraw, unqueue, etc.). */
+export async function updateSessionStatus(input: z.input<typeof updateSessionStatusSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = updateSessionStatusSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const row = await loadEventSession({
+    db,
+    eventId: parsed.eventId,
+    sessionId: parsed.sessionId,
+  })
+  const now = Date.now()
+  const patch = applyTransition(
+    {
+      status: row.status,
+      title: row.title,
+      submittedAt: row.submittedAt,
+      decidedAt: row.decidedAt,
+      withdrawnAt: row.withdrawnAt,
+    },
+    parsed.status,
+    now,
+  )
+  await db
+    .update(schema.eventSession)
+    .set(patch)
+    .where(
+      orm.and(
+        orm.eq(schema.eventSession.id, parsed.sessionId),
+        orm.eq(schema.eventSession.eventId, parsed.eventId),
+      ),
+    )
+    .limit(1)
+
+  if (patch.status === 'ACCEPTED') {
+    await assignTasksForAcceptedSession({
+      db,
+      eventId: parsed.eventId,
+      sessionId: parsed.sessionId,
+      participants: row.participants,
+      now,
+    })
+  }
+  return { sessionId: parsed.sessionId, status: patch.status }
+}
+
+const bulkUpdateSessionStatusSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionIds: z.array(z.string().min(1)).min(1).max(500),
+  status: sessionStatusSchema,
+})
+
+/** Bulk move selected abstracts (typically into queues). Illegal edges skip. */
+export async function bulkUpdateSessionStatus(
+  input: z.input<typeof bulkUpdateSessionStatusSchema>,
+) {
+  const actionRequest = getActionRequest()
+  const parsed = bulkUpdateSessionStatusSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const rows = await db.query.eventSession.findMany({
+    where: { eventId: parsed.eventId, id: { in: parsed.sessionIds } },
+  })
+  const now = Date.now()
+  const planned = planBulkStatusUpdate(
+    rows.map((row) => ({
+      id: row.id,
+      status: row.status,
+      title: row.title,
+      submittedAt: row.submittedAt,
+      decidedAt: row.decidedAt,
+      withdrawnAt: row.withdrawnAt,
+    })),
+    parsed.status,
+    now,
+  )
+  if (planned.length === 0) return { updated: 0 }
+
+  const statements = planned.map((patch) =>
+    db
+      .update(schema.eventSession)
+      .set({
+        status: patch.status,
+        submittedAt: patch.submittedAt,
+        decidedAt: patch.decidedAt,
+        withdrawnAt: patch.withdrawnAt,
+        updatedAt: patch.updatedAt,
+      })
+      .where(
+        orm.and(
+          orm.eq(schema.eventSession.id, patch.id),
+          orm.eq(schema.eventSession.eventId, parsed.eventId),
+        ),
+      )
+      .limit(1),
+  )
+  await db.batch(statements as [any, ...any[]])
+
+  // Bulk ACCEPT_QUEUE→ACCEPTED is rare (notifyQueue is the normal path) but
+  // still assign tasks when the target is ACCEPTED.
+  if (parsed.status === 'ACCEPTED') {
+    for (const patch of planned) {
+      const full = rows.find((row) => row.id === patch.id)
+      if (!full) continue
+      const withParts = await loadEventSession({
+        db,
+        eventId: parsed.eventId,
+        sessionId: patch.id,
+      })
+      await assignTasksForAcceptedSession({
+        db,
+        eventId: parsed.eventId,
+        sessionId: patch.id,
+        participants: withParts.participants,
+        now,
+      })
+    }
+  }
+  return { updated: planned.length }
+}
+
+const notifyQueueSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  queue: z.enum(['accept', 'decline']),
+  /** Optional subset; default = every session currently in that queue. */
+  sessionIds: z.array(z.string().min(1)).max(500).optional(),
+})
+
+/** Finalise accept or decline queue: status → ACCEPTED/DECLINED, task
+ *  auto-assign on accept, enqueue DECISION_* EmailMessage rows (QUEUED).
+ *  notifiedAt stays null until Task 7 marks the outbox SENT. */
+export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = notifyQueueSchema.parse(input)
+  const { db, event } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const fromStatus: SessionStatus =
+    parsed.queue === 'accept' ? 'ACCEPT_QUEUE' : 'DECLINE_QUEUE'
+  const rows = await db.query.eventSession.findMany({
+    where: {
+      eventId: parsed.eventId,
+      status: fromStatus,
+      ...(parsed.sessionIds?.length ? { id: { in: parsed.sessionIds } } : {}),
+    },
+    with: {
+      participants: {
+        with: { speaker: true },
+      },
+    },
+  })
+  const now = Date.now()
+  const planned = planNotifyQueue(
+    rows.map((row) => ({
+      id: row.id,
+      status: row.status,
+      title: row.title,
+      submittedAt: row.submittedAt,
+      decidedAt: row.decidedAt,
+      withdrawnAt: row.withdrawnAt,
+    })),
+    parsed.queue,
+    now,
+  )
+  if (planned.length === 0) return { updated: 0, emailsQueued: 0 }
+
+  const updates = planned.map((patch) =>
+    db
+      .update(schema.eventSession)
+      .set({
+        status: patch.status,
+        submittedAt: patch.submittedAt,
+        decidedAt: patch.decidedAt,
+        withdrawnAt: patch.withdrawnAt,
+        updatedAt: patch.updatedAt,
+      })
+      .where(
+        orm.and(
+          orm.eq(schema.eventSession.id, patch.id),
+          orm.eq(schema.eventSession.eventId, parsed.eventId),
+        ),
+      )
+      .limit(1),
+  )
+  await db.batch(updates as [any, ...any[]])
+
+  let emailsQueued = 0
+  const taskDefs =
+    parsed.queue === 'accept'
+      ? await db.query.taskDefinition.findMany({ where: { eventId: parsed.eventId } })
+      : []
+
+  for (const patch of planned) {
+    const row = rows.find((item) => item.id === patch.id)
+    if (!row) continue
+    if (patch.status === 'ACCEPTED' && taskDefs.length > 0) {
+      await insertAssignmentsIdempotent({
+        db,
+        rows: buildAssignmentsForAcceptance({
+          taskDefs: taskDefs.map((def) => ({
+            id: def.id,
+            eventId: def.eventId,
+            target: def.target,
+            dueAt: def.dueAt,
+          })),
+          participants: row.participants.map((p) => ({ speakerId: p.speakerId })),
+          sessionId: row.id,
+          now,
+        }),
+      })
+    }
+    const kind = patch.status === 'ACCEPTED' ? 'DECISION_ACCEPTED' : 'DECISION_DECLINED'
+    const title = row.title?.trim() || 'your submission'
+    for (const part of row.participants) {
+      const speaker = part.speaker
+      if (!speaker?.email) continue
+      const dedupeKey = `decision:${row.id}:${speaker.id}`
+      const subject =
+        kind === 'DECISION_ACCEPTED'
+          ? `Accepted: ${title} — ${event.name}`
+          : `Update on ${title} — ${event.name}`
+      const bodyHtml =
+        kind === 'DECISION_ACCEPTED'
+          ? `<p>Your submission <strong>${escapeHtml(title)}</strong> was accepted for ${escapeHtml(event.name)}.</p>`
+          : `<p>Your submission <strong>${escapeHtml(title)}</strong> was not selected for ${escapeHtml(event.name)}.</p>`
+      try {
+        await db
+          .insert(schema.emailMessage)
+          .values({
+            eventId: parsed.eventId,
+            kind,
+            dedupeKey,
+            toEmail: speaker.email,
+            speakerId: speaker.id,
+            sessionId: row.id,
+            subject,
+            bodyHtml,
+            status: 'QUEUED',
+          })
+          .onConflictDoNothing({ target: schema.emailMessage.dedupeKey })
+        emailsQueued += 1
+      } catch {
+        // Dedupe races or missing email constraints — skip, status still updated.
+      }
+    }
+  }
+  return { updated: planned.length, emailsQueued }
+}
+
+async function assignTasksForAcceptedSession({
+  db,
+  eventId,
+  sessionId,
+  participants,
+  now,
+}: {
+  db: ReturnType<typeof getDb>
+  eventId: string
+  sessionId: string
+  participants: Array<{ speakerId: string }>
+  now: number
+}) {
+  const taskDefs = await db.query.taskDefinition.findMany({ where: { eventId } })
+  if (taskDefs.length === 0 || participants.length === 0) return
+  await insertAssignmentsIdempotent({
+    db,
+    rows: buildAssignmentsForAcceptance({
+      taskDefs: taskDefs.map((def) => ({
+        id: def.id,
+        eventId: def.eventId,
+        target: def.target,
+        dueAt: def.dueAt,
+      })),
+      participants,
+      sessionId,
+      now,
+    }),
+  })
+}
+
+async function insertAssignmentsIdempotent({
+  db,
+  rows,
+}: {
+  db: ReturnType<typeof getDb>
+  rows: PlannedTaskAssignment[]
+}) {
+  if (rows.length === 0) return
+  // Partial unique indexes (speaker-only vs session×speaker) make plain
+  // target arrays awkward — bare onConflictDoNothing lets SQLite match
+  // whichever partial unique fires.
+  const statements = rows.map((row) =>
+    db.insert(schema.taskAssignment).values(row).onConflictDoNothing(),
+  )
+  // Cap batch size to avoid huge transactions on multi-speaker events.
+  const CHUNK = 40
+  for (let i = 0; i < statements.length; i += CHUNK) {
+    const chunk = statements.slice(i, i + CHUNK)
+    if (chunk.length === 0) continue
+    await db.batch(chunk as [any, ...any[]])
+  }
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+}
+
+const upsertReviewSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+  vote: z.enum(['YES', 'MAYBE', 'NO']),
+  rating: z.number().int().min(1).max(5).nullable().optional(),
+  comment: z.string().max(5000).nullable().optional(),
+})
+
+/** Upsert the caller's review for a session (unique sessionId+reviewerId). */
+export async function upsertReview(input: z.input<typeof upsertReviewSchema>) {
+  const actionRequest = getActionRequest()
+  const { session } = await requireOrgAccess(actionRequest, input.orgId)
+  const parsed = upsertReviewSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const row = await db.query.eventSession.findFirst({
+    where: { id: parsed.sessionId, eventId: parsed.eventId },
+    columns: { id: true, kind: true },
+  })
+  if (!row || row.kind !== 'CONTENT') throw new Error('Session not found')
+
+  const normalized = normalizeReviewInput({
+    vote: parsed.vote,
+    rating: parsed.rating ?? null,
+    comment: parsed.comment ?? null,
+  })
+  const now = Date.now()
+  const reviewId = ulid()
+  await db
+    .insert(schema.review)
+    .values({
+      id: reviewId,
+      eventId: parsed.eventId,
+      sessionId: parsed.sessionId,
+      reviewerId: session.userId,
+      vote: normalized.vote,
+      rating: normalized.rating,
+      comment: normalized.comment,
+      createdAt: now,
+      updatedAt: now,
+    })
+    .onConflictDoUpdate({
+      target: [schema.review.sessionId, schema.review.reviewerId],
+      set: {
+        vote: normalized.vote,
+        rating: normalized.rating,
+        comment: normalized.comment,
+        updatedAt: now,
+      },
+    })
+  return { sessionId: parsed.sessionId, vote: normalized.vote }
+}
+
+const createTaskDefinitionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  title: z.string().trim().min(1).max(200),
+  instructionsHtml: z.string().trim().max(20_000).optional(),
+  target: z.enum(['SPEAKER', 'SUBMISSION']),
+  source: z.enum(['MANUAL', 'FORM']),
+  formId: z.string().min(1).nullable().optional(),
+  dueAt: z.number().int().positive().nullable().optional(),
+})
+
+export async function createTaskDefinition(input: z.input<typeof createTaskDefinitionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = createTaskDefinitionSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const formId = parsed.source === 'FORM' ? (parsed.formId ?? null) : null
+  const form = formId
+    ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId } })
+    : null
+  assertTaskDefinitionShape({
+    source: parsed.source,
+    target: parsed.target,
+    formId,
+    form: form ? { purpose: form.purpose, target: form.target } : null,
+  })
+  const existing = await db.query.taskDefinition.findMany({
+    where: { eventId: parsed.eventId },
+    columns: { sortOrder: true },
+  })
+  const sortOrder = existing.reduce((max, row) => Math.max(max, row.sortOrder), -1) + 1
+  const [created] = await db
+    .insert(schema.taskDefinition)
+    .values({
+      eventId: parsed.eventId,
+      title: parsed.title,
+      instructionsHtml: parsed.instructionsHtml?.trim() || null,
+      target: parsed.target,
+      source: parsed.source,
+      formId,
+      dueAt: parsed.dueAt ?? null,
+      sortOrder,
+    })
+    .returning({ id: schema.taskDefinition.id })
+  return { taskDefinitionId: created!.id }
+}
+
+const updateTaskDefinitionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  taskDefinitionId: z.string().min(1),
+  title: z.string().trim().min(1).max(200),
+  instructionsHtml: z.string().trim().max(20_000).nullable().optional(),
+  target: z.enum(['SPEAKER', 'SUBMISSION']),
+  source: z.enum(['MANUAL', 'FORM']),
+  formId: z.string().min(1).nullable().optional(),
+  dueAt: z.number().int().positive().nullable().optional(),
+})
+
+export async function updateTaskDefinition(input: z.input<typeof updateTaskDefinitionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = updateTaskDefinitionSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const existing = await db.query.taskDefinition.findFirst({
+    where: { id: parsed.taskDefinitionId, eventId: parsed.eventId },
+  })
+  if (!existing) throw new Error('Task not found')
+  const formId = parsed.source === 'FORM' ? (parsed.formId ?? null) : null
+  const form = formId
+    ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId } })
+    : null
+  assertTaskDefinitionShape({
+    source: parsed.source,
+    target: parsed.target,
+    formId,
+    form: form ? { purpose: form.purpose, target: form.target } : null,
+  })
+  await db
+    .update(schema.taskDefinition)
+    .set({
+      title: parsed.title,
+      instructionsHtml:
+        parsed.instructionsHtml === undefined
+          ? existing.instructionsHtml
+          : parsed.instructionsHtml?.trim() || null,
+      target: parsed.target,
+      source: parsed.source,
+      formId,
+      dueAt: parsed.dueAt === undefined ? existing.dueAt : parsed.dueAt,
+    })
+    .where(
+      orm.and(
+        orm.eq(schema.taskDefinition.id, parsed.taskDefinitionId),
+        orm.eq(schema.taskDefinition.eventId, parsed.eventId),
+      ),
+    )
+    .limit(1)
+  return { taskDefinitionId: parsed.taskDefinitionId }
+}
+
+const deleteTaskDefinitionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  taskDefinitionId: z.string().min(1),
+})
+
+export async function deleteTaskDefinition(input: z.input<typeof deleteTaskDefinitionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = deleteTaskDefinitionSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const existing = await db.query.taskDefinition.findFirst({
+    where: { id: parsed.taskDefinitionId, eventId: parsed.eventId },
+    columns: { id: true },
+  })
+  if (!existing) throw new Error('Task not found')
+  // Assignments cascade via FK.
+  await db
+    .delete(schema.taskDefinition)
+    .where(
+      orm.and(
+        orm.eq(schema.taskDefinition.id, parsed.taskDefinitionId),
+        orm.eq(schema.taskDefinition.eventId, parsed.eventId),
+      ),
+    )
+    .limit(1)
+  return { taskDefinitionId: parsed.taskDefinitionId }
 }

@@ -24,7 +24,21 @@ import {
 import { libraryOptions } from './forms/collect-fields.ts'
 import { canAccessFile } from './lib/cfp-submission.ts'
 import { getOrCreateCfpDraft, getPublicCfp, type PublicCfpForm } from './lib/cfp-server.ts'
+import {
+  coverageBySession,
+  progressByReviewer,
+  sessionsToReview,
+} from './lib/reviews.ts'
 import { linkSpeakerIdentity } from './lib/speaker-link.ts'
+import {
+  abstractsToCsv,
+  aggregateReviewStats,
+  countSessionsByTab,
+  filterSessionsByTab,
+  parseAbstractsStatusTab,
+  sessionMatchesQuery,
+} from './lib/submissions.ts'
+import { summarizeAssignmentProgress } from './lib/tasks.ts'
 import { cn, formatDateRangeUTC } from './lib/utils.ts'
 import { Badge } from './components/ui/primitives.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
@@ -551,12 +565,264 @@ export const app = new Spiceflow()
   // ── Event sections (placeholders until their tasks land) ──────────
   // Every sidebar item is a registered page so navigation never 404s.
 
-  .page('/org/:orgId/e/:eventId/abstracts', async () => (
-    <ComingSoonPage
-      title="Abstracts"
-      description="Review submissions, move them through accept and decline queues, and notify speakers."
-    />
-  ))
+  // ── Abstracts list + detail + CSV ─────────────────────────────────
+
+  .loader('/org/:orgId/e/:eventId/abstracts', async ({ params, request }) => {
+    const db = getDb()
+    const url = new URL(request.url)
+    const statusTab = parseAbstractsStatusTab(url.searchParams.get('status'))
+    const q = url.searchParams.get('q') ?? ''
+
+    const rows = await db.query.eventSession.findMany({
+      where: { eventId: params.eventId, kind: 'CONTENT' },
+      with: {
+        track: true,
+        format: true,
+        participants: {
+          with: { speaker: true },
+          orderBy: { sortOrder: 'asc' },
+        },
+        reviews: true,
+        formResponses: {
+          with: { form: true },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+      orderBy: { submittedAt: 'desc', createdAt: 'desc' },
+    })
+
+    const abstracts = rows.map((row) => {
+      const stats = aggregateReviewStats(row.reviews)
+      const speakerNames = row.participants.map((p) => {
+        const name = [p.speaker?.firstName, p.speaker?.lastName].filter(Boolean).join(' ').trim()
+        return name || p.speaker?.email || 'Speaker'
+      })
+      const submittedResponse = row.formResponses.find((r) => r.status === 'SUBMITTED')
+        ?? row.formResponses[0]
+      return {
+        id: row.id,
+        status: row.status,
+        title: row.title,
+        trackName: row.track?.name ?? null,
+        formatName: row.format?.name ?? null,
+        speakerNames,
+        formName: submittedResponse?.form?.name ?? null,
+        avgRating: stats.avgRating,
+        yes: stats.yes,
+        maybe: stats.maybe,
+        no: stats.no,
+        notifiedAt: row.notifiedAt,
+        submittedAt: row.submittedAt,
+      }
+    })
+
+    const counts = countSessionsByTab(abstracts)
+    const filtered = filterSessionsByTab(abstracts, statusTab).filter((row) =>
+      sessionMatchesQuery(row, q),
+    )
+    return { abstracts: filtered, counts, status: statusTab, q }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/abstracts',
+    query: z.object({
+      status: z
+        .enum([
+          'all',
+          'pending',
+          'accept-queue',
+          'accepted',
+          'decline-queue',
+          'declined',
+          'withdrawn',
+          'drafts',
+        ])
+        .optional(),
+      q: z.string().optional(),
+    }),
+    handler: async ({ query }) => {
+      const { AbstractsPage } = await import('./components/abstracts-page.tsx')
+      return (
+        <AbstractsPage
+          status={query.status ?? 'all'}
+          q={query.q ?? ''}
+        />
+      )
+    },
+  })
+
+  .loader('/org/:orgId/e/:eventId/abstracts/:sessionId', async ({ params, request }) => {
+    const sessionUser = await getSession(request)
+    const db = getDb()
+    const found = await db.query.eventSession.findFirst({
+      where: { id: params.sessionId, eventId: params.eventId, kind: 'CONTENT' },
+      with: {
+        track: true,
+        format: true,
+        participants: {
+          with: { speaker: true },
+          orderBy: { sortOrder: 'asc' },
+        },
+        reviews: {
+          with: { reviewer: true },
+          orderBy: { updatedAt: 'desc' },
+        },
+        formResponses: {
+          where: { status: 'SUBMITTED' },
+          with: {
+            form: true,
+            fieldValues: true,
+          },
+          orderBy: { submittedAt: 'desc', createdAt: 'desc' },
+        },
+      },
+    })
+    if (!found) throw redirect(`/org/${params.orgId}/e/${params.eventId}/abstracts`)
+
+    const latestResponse = found.formResponses[0] ?? null
+    const speakerById = new Map(
+      found.participants
+        .filter((p) => p.speaker)
+        .map((p) => [p.speakerId, p.speaker!] as const),
+    )
+    const fieldValues = (latestResponse?.fieldValues ?? [])
+      .filter((fv) => {
+        // Skip well-known fields already shown as typed session/speaker columns.
+        if (['title', 'description', 'track', 'format', 'coverImage'].includes(fv.name)) {
+          return false
+        }
+        if (fv.name.startsWith('speaker.')) return false
+        return true
+      })
+      .map((fv) => {
+        const subject = fv.subjectSpeakerId ? speakerById.get(fv.subjectSpeakerId) : null
+        const subjectLabel = subject
+          ? [subject.firstName, subject.lastName].filter(Boolean).join(' ').trim() || subject.email
+          : null
+        return {
+          name: fv.name,
+          value: fv.value,
+          subjectSpeakerId: fv.subjectSpeakerId,
+          subjectLabel,
+        }
+      })
+
+    const reviews = found.reviews.map((review) => ({
+      id: review.id,
+      vote: review.vote,
+      rating: review.rating,
+      comment: review.comment,
+      reviewerId: review.reviewerId,
+      reviewerName: review.reviewer?.name?.trim() || review.reviewer?.email || 'Reviewer',
+      reviewerEmail: review.reviewer?.email ?? '',
+      updatedAt: review.updatedAt,
+    }))
+    const myReviewRow = sessionUser
+      ? found.reviews.find((r) => r.reviewerId === sessionUser.userId)
+      : null
+
+    return {
+      session: {
+        id: found.id,
+        status: found.status,
+        title: found.title,
+        description: found.description,
+        submittedAt: found.submittedAt,
+        decidedAt: found.decidedAt,
+        notifiedAt: found.notifiedAt,
+        withdrawnAt: found.withdrawnAt,
+      },
+      trackName: found.track?.name ?? null,
+      formatName: found.format?.name ?? null,
+      formName: latestResponse?.form?.name ?? null,
+      participants: found.participants.map((p) => ({
+        id: p.id,
+        role: p.role,
+        firstName: p.speaker?.firstName ?? '',
+        lastName: p.speaker?.lastName ?? '',
+        email: p.speaker?.email ?? '',
+        companyName: p.speaker?.companyName ?? null,
+        jobTitle: p.speaker?.jobTitle ?? null,
+      })),
+      reviews,
+      myReview: myReviewRow
+        ? {
+            vote: myReviewRow.vote,
+            rating: myReviewRow.rating,
+            comment: myReviewRow.comment,
+          }
+        : null,
+      fieldValues,
+    }
+  })
+
+  .page('/org/:orgId/e/:eventId/abstracts/:sessionId', async () => {
+    const { AbstractDetailPage } = await import('./components/abstract-detail.tsx')
+    return <AbstractDetailPage />
+  })
+
+  .get('/org/:orgId/e/:eventId/abstracts.csv', async ({ params, request }) => {
+    const sessionUser = await getSession(request)
+    if (!sessionUser) throw redirect('/login')
+    const member = await lookupOrgMember(sessionUser.userId, params.orgId)
+    if (!member) throw redirect('/login')
+    const db = getDb()
+    const event = await db.query.event.findFirst({
+      where: { id: params.eventId, orgId: params.orgId },
+      columns: { id: true },
+    })
+    if (!event) throw redirect(`/org/${params.orgId}`)
+
+    const url = new URL(request.url)
+    const statusTab = parseAbstractsStatusTab(url.searchParams.get('status'))
+    const q = url.searchParams.get('q') ?? ''
+
+    const rows = await db.query.eventSession.findMany({
+      where: { eventId: params.eventId, kind: 'CONTENT' },
+      with: {
+        track: true,
+        format: true,
+        participants: { with: { speaker: true }, orderBy: { sortOrder: 'asc' } },
+        reviews: true,
+        formResponses: { with: { form: true }, orderBy: { createdAt: 'desc' } },
+      },
+      orderBy: { submittedAt: 'desc', createdAt: 'desc' },
+    })
+    const abstracts = rows.map((row) => {
+      const stats = aggregateReviewStats(row.reviews)
+      const speakerNames = row.participants.map((p) => {
+        const name = [p.speaker?.firstName, p.speaker?.lastName].filter(Boolean).join(' ').trim()
+        return name || p.speaker?.email || 'Speaker'
+      })
+      const submittedResponse = row.formResponses.find((r) => r.status === 'SUBMITTED')
+        ?? row.formResponses[0]
+      return {
+        status: row.status,
+        title: row.title,
+        trackName: row.track?.name ?? null,
+        formatName: row.format?.name ?? null,
+        speakerNames,
+        formName: submittedResponse?.form?.name ?? null,
+        avgRating: stats.avgRating,
+        yes: stats.yes,
+        maybe: stats.maybe,
+        no: stats.no,
+        notifiedAt: row.notifiedAt,
+        submittedAt: row.submittedAt,
+      }
+    })
+    const filtered = filterSessionsByTab(abstracts, statusTab).filter((row) =>
+      sessionMatchesQuery(row, q),
+    )
+    const csv = abstractsToCsv(filtered)
+    return new Response(csv, {
+      headers: {
+        'content-type': 'text/csv; charset=utf-8',
+        'content-disposition': `attachment; filename="abstracts-${params.eventId}.csv"`,
+      },
+    })
+  })
+
   .page('/org/:orgId/e/:eventId/sessions', async () => (
     <ComingSoonPage
       title="Sessions"
@@ -621,24 +887,137 @@ export const app = new Spiceflow()
     const { FormEditorPage } = await import('./components/form-editor.tsx')
     return <FormEditorPage />
   })
-  .page('/org/:orgId/e/:eventId/evaluation', async () => (
-    <ComingSoonPage
-      title="Evaluation"
-      description="Vote, rate, and comment on pending submissions; track review coverage."
-    />
-  ))
+  // ── Evaluation ────────────────────────────────────────────────────
+
+  .loader('/org/:orgId/e/:eventId/evaluation', async ({ params, request }) => {
+    const sessionUser = await getSession(request)
+    if (!sessionUser) throw redirect('/login')
+    const db = getDb()
+    const [sessions, allReviews, myReviews] = await db.batch([
+      db.query.eventSession.findMany({
+        where: { eventId: params.eventId, kind: 'CONTENT' },
+        with: {
+          track: true,
+          format: true,
+          participants: {
+            with: { speaker: true },
+            orderBy: { sortOrder: 'asc' },
+          },
+        },
+        orderBy: { submittedAt: 'desc', createdAt: 'desc' },
+      }),
+      db.query.review.findMany({
+        where: { eventId: params.eventId },
+        with: { reviewer: true },
+      }),
+      db.query.review.findMany({
+        where: { eventId: params.eventId, reviewerId: sessionUser.userId },
+      }),
+    ] as const)
+
+    const sessionRows = sessions.map((row) => {
+      const speakerNames = row.participants.map((p) => {
+        const name = [p.speaker?.firstName, p.speaker?.lastName].filter(Boolean).join(' ').trim()
+        return name || p.speaker?.email || 'Speaker'
+      })
+      return {
+        id: row.id,
+        title: row.title,
+        status: row.status,
+        speakerNames,
+        trackName: row.track?.name ?? null,
+        formatName: row.format?.name ?? null,
+      }
+    })
+
+    const myReviewedIds = new Set(myReviews.map((r) => r.sessionId))
+    const toReview = sessionsToReview(sessionRows, myReviewedIds)
+    const myReviewRows = []
+    for (const review of myReviews) {
+      const session = sessionRows.find((s) => s.id === review.sessionId)
+      if (!session) continue
+      myReviewRows.push({
+        ...session,
+        vote: review.vote,
+        rating: review.rating,
+        comment: review.comment,
+      })
+    }
+
+    return {
+      toReview,
+      myReviews: myReviewRows,
+      reviewerProgress: progressByReviewer(allReviews),
+      sessionCoverage: coverageBySession(sessionRows, allReviews),
+    }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/evaluation',
+    query: z.object({
+      tab: z.enum(['to-review', 'my-reviews', 'progress']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { EvaluationPage } = await import('./components/evaluation-page.tsx')
+      return <EvaluationPage tab={query.tab ?? 'to-review'} />
+    },
+  })
+
   .page('/org/:orgId/e/:eventId/agenda', async () => (
     <ComingSoonPage
       title="Agenda"
       description="Schedule sessions across days and rooms, and spot room or speaker conflicts."
     />
   ))
-  .page('/org/:orgId/e/:eventId/tasks', async () => (
-    <ComingSoonPage
-      title="Tasks"
-      description="Speaker and submission tasks with per-assignment progress and due dates."
-    />
-  ))
+
+  // ── Tasks ─────────────────────────────────────────────────────────
+
+  .loader('/org/:orgId/e/:eventId/tasks', async ({ params }) => {
+    const db = getDb()
+    const [defs, portalForms] = await db.batch([
+      db.query.taskDefinition.findMany({
+        where: { eventId: params.eventId },
+        with: {
+          form: true,
+          assignments: { columns: { id: true, status: true } },
+        },
+        orderBy: { sortOrder: 'asc', createdAt: 'asc' },
+      }),
+      db.query.form.findMany({
+        where: { eventId: params.eventId, purpose: 'PORTAL' },
+        columns: { id: true, name: true, target: true },
+        orderBy: { name: 'asc' },
+      }),
+    ] as const)
+
+    const tasks = defs.map((def) => {
+      const progress = summarizeAssignmentProgress(def.assignments)
+      return {
+        id: def.id,
+        title: def.title,
+        instructionsHtml: def.instructionsHtml,
+        target: def.target,
+        source: def.source,
+        formId: def.formId,
+        formName: def.form?.name ?? null,
+        dueAt: def.dueAt,
+        sortOrder: def.sortOrder,
+        ...progress,
+      }
+    })
+    return { tasks, portalForms }
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/tasks',
+    query: z.object({
+      tab: z.enum(['all', 'speaker', 'submission']).optional(),
+    }),
+    handler: async ({ query }) => {
+      const { TasksPage } = await import('./components/tasks-page.tsx')
+      return <TasksPage tab={query.tab ?? 'all'} />
+    },
+  })
   // ── Portal forms (?tab=speaker|submission) — same editor route ────
 
   .loader('/org/:orgId/e/:eventId/portal-forms', async ({ params }) => {
