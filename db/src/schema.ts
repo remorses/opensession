@@ -1,4 +1,4 @@
-// Schema for the OpenSessions D1 database — an open-source SessionBoard clone
+// Schema for the OpenSession D1 database — an open-source SessionBoard clone
 // (CFP forms, speaker portal, review, agenda, embeds).
 //
 // Design source of truth: /schema.prisma (23 models). This file is the 1:1

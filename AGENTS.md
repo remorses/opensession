@@ -1,9 +1,27 @@
 # OpenSession — agent instructions
 
-OpenSession (repo `opensessions`) is an open-source SessionBoard clone: CFP submission
-forms, abstract review, agenda builder, speaker portal, reminder emails, embeds. One
-Cloudflare Worker (`website/`), D1 + drizzle (`db/`), Spiceflow RSC, BetterAuth Google
-login, holocron landing page, sigillo for secrets.
+OpenSession is an open-source SessionBoard clone: CFP submission forms, abstract
+review, agenda builder, speaker portal, reminder emails, embeds. One Cloudflare Worker
+(`website/`), D1 + drizzle (`db/`), Spiceflow RSC, BetterAuth Google login, holocron
+landing page, sigillo for secrets.
+
+## Name and domain — always use these exact strings
+
+The product is **OpenSession** (singular) and the domain is **opensession.dev**.
+
+| Thing | Value |
+| --- | --- |
+| Product name | `OpenSession` |
+| Slug / package prefix | `opensession` |
+| Production domain | `opensession.dev` |
+| Worker (prod) | `opensession-website` → `opensession.dev` custom domain |
+| Worker (preview) | `opensession-website-preview` → workers.dev, `routes: []` |
+| D1 (prod / preview) | `opensession-db` / `opensession-preview-db` |
+| GitHub repo | `remorses/opensession` |
+
+Never write `opensessions`, `OpenSessions`, `opensession.com`, or any other domain.
+The only legacy exceptions are the local checkout folder (`opensessions/`) and the
+sigillo org name, which cannot be renamed from the CLI.
 
 ## MANDATORY: read these before writing any code
 
@@ -47,9 +65,9 @@ Reference implementations (the products we clone; consult when unsure about beha
 2. `pnpm exec vitest run --config vitest.config.ts` in `website/`.
 3. `bunx lintcn lint` in the package you edited.
 4. **Playwriter browser validation**: the dev server runs in tuistory session
-   `opensessions-dev` at http://localhost:8788 (`bunx tuistory read -s opensessions-dev`
+   `opensession-dev` at http://localhost:8788 (`bunx tuistory read -s opensession-dev`
    for logs; restart with `bunx tuistory launch "sigillo run -c dev -- pnpm exec vite dev"
-   -s opensessions-dev --cwd <repo>/website`). Load the pages you built, click through
+   -s opensession-dev --cwd <repo>/website`). Load the pages you built, click through
    the flows (observe → act → observe, check `getLatestLogs` after every action), and
    screenshot the result. A feature is NOT done until it works in the real browser.
    The user's Chrome is signed into Google; login flows work end to end.

@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "opensessions-website",
+  "name": "opensession-website",
   "main": "spiceflow/cloudflare-entrypoint",
   "workers_dev": true,
   "compatibility_date": "2026-06-02",
@@ -11,14 +11,16 @@
   "d1_databases": [
     {
       "binding": "DB",
-      "database_name": "opensessions-db",
-      "database_id": "eeb4bbf9-ea59-449f-b543-28b21c301641",
+      "database_name": "opensession-db",
+      "database_id": "b6282777-9a6f-4f6b-af76-8e57d1cb1749",
       "migrations_dir": "../db/drizzle",
       "migrations_pattern": "../db/drizzle/*/migration.sql"
     }
   ],
+  // Production serves the real domain. custom_domain creates the DNS record.
+  "routes": [{ "pattern": "opensession.dev", "custom_domain": true }],
   "vars": {
-    "APP_URL": "https://opensessions-website.remorses.workers.dev"
+    "APP_URL": "https://opensession.dev"
   },
   "secrets": {
     "required": [
@@ -33,19 +35,22 @@
   // Bindings are NOT inherited — must duplicate everything here
   "env": {
     "preview": {
-      "name": "opensessions-website-preview",
+      "name": "opensession-website-preview",
       "workers_dev": true,
       "d1_databases": [
         {
           "binding": "DB",
-          "database_name": "opensessions-preview-db",
-          "database_id": "56259181-384e-41cd-9d50-6d9cc59b8a02",
+          "database_name": "opensession-preview-db",
+          "database_id": "ef841c1a-2ce6-4a18-957b-072d2258c448",
           "migrations_dir": "../db/drizzle",
           "migrations_pattern": "../db/drizzle/*/migration.sql"
         }
       ],
+      // Routes ARE inherited — preview must clear them or it would steal
+      // opensession.dev from production. Preview lives on workers.dev.
+      "routes": [],
       "vars": {
-        "APP_URL": "https://opensessions-website-preview.remorses.workers.dev"
+        "APP_URL": "https://opensession-website-preview.remorses.workers.dev"
       },
       "secrets": {
         "required": [

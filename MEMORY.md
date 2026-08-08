@@ -27,3 +27,10 @@ migration.
 ## Dev server runs on port 8788, not 8787
 
 Port 8787 is taken by another local process, so website/vite.config.ts uses 8788 and the Google OAuth origins + dev BETTER_AUTH_URL use http://localhost:8788. Sigillo project is org `opensessions` / project `website` (01KZGPCGNE9SJ5PS6F2GSHDY9N).
+
+## Legacy `opensessions` names that cannot be renamed
+
+The product is OpenSession on opensession.dev. Two leftovers keep the old plural
+spelling: the local checkout folder `~/Documents/GitHub/opensessions` (renaming breaks
+the kimaki project mapping) and the sigillo org `opensessions` (the CLI has no
+`orgs update` command). Everything else must say `opensession`.

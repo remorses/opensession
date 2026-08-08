@@ -3,7 +3,7 @@
   "version": "0.0.1",
   "private": true,
   "type": "module",
-  "description": "Drizzle schema and migrations for the OpenSessions D1 database",
+  "description": "Drizzle schema and migrations for the OpenSession D1 database",
   "exports": {
     ".": {
       "workerd": "./src/workerd.ts",

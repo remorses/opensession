@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────────────────────────────────────
-// OpenSessions — SessionBoard clone. Database schema (design source of truth).
+// OpenSession — SessionBoard clone. Database schema (design source of truth).
 //
 // Target: SQLite. NOTE: Prisma does not support native enums on SQLite; this
 // file is the design artifact. The implementation translates 1:1 to drizzle

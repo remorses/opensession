@@ -1,13 +1,13 @@
 ---
-title: OpenSessions — implementation plan
+title: OpenSession — implementation plan
 description: >
-  Concrete build plan for the opensessions pnpm workspace and website: an open-source
+  Concrete build plan for the opensession pnpm workspace and website: an open-source
   SessionBoard clone (CFP forms, speaker portal, review, agenda, embeds) on Cloudflare,
   built on the akarso codebase patterns. Companion to database-schema-plan.md and
   schema.prisma (the final 23-model design artifact).
 ---
 
-# OpenSessions — implementation plan
+# OpenSession — implementation plan
 
 One Cloudflare Worker (`website`), Spiceflow RSC for pages + API, D1 (SQLite) via drizzle
 beta from a `db` workspace package, R2 for files, `send_email` binding for mail, a cron
@@ -39,7 +39,7 @@ Copy akarso's shape: root `pnpm-workspace.yaml` with `packages: [./*]`, no `pack
 folder, root package.json private with the spiceflow pnpm override.
 
 ```
-opensessions/
+opensession/
 ├── pnpm-workspace.yaml            # packages: ./*
 ├── package.json                   # private; pnpm.overrides spiceflow
 ├── AGENTS.md                      # project rules: sigillo, email sender, schema notes
@@ -187,22 +187,23 @@ matches it too — it was switched off the buggy `drizzle-orm/d1` driver):
 
 ```jsonc
 {
-  "name": "opensessions-website",
+  "name": "opensession-website",
   "main": "./src/app.tsx",
   "compatibility_date": "<today - 30d>",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "placement": { "mode": "smart" },
-  "d1_databases": [{ "binding": "DB", "database_name": "opensessions-db",
+  "d1_databases": [{ "binding": "DB", "database_name": "opensession-db",
     "database_id": "…", "migrations_dir": "../db/drizzle",
     "migrations_pattern": "../db/drizzle/*/migration.sql" }],
-  "r2_buckets": [{ "binding": "FILES", "bucket_name": "opensessions-files" }],
+  "r2_buckets": [{ "binding": "FILES", "bucket_name": "opensession-files" }],
   "send_email": [{ "name": "EMAIL", "remote": true }],
   "triggers": { "crons": ["*/15 * * * *"] },
-  "vars": { "APP_URL": "https://…" },
+  "vars": { "APP_URL": "https://opensession.dev" },
   "secrets": { "required": ["BETTER_AUTH_SECRET", "BETTER_AUTH_URL",
     "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"] },
-  "routes": [],           // workers.dev first; custom_domain added at the end (§12)
+  // prod owns opensession.dev; preview must override with "routes": []
+  "routes": [{ "pattern": "opensession.dev", "custom_domain": true }],
   "env": { "preview": { /* full duplicate with -preview resources, routes: [] */ } }
 }
 ```
@@ -387,9 +388,9 @@ The landing page is a holocron MDX page, exactly like akarso:
   event → publish CFP), pricing section removed. `hero-section.tsx` copied from akarso
   and re-worded.
 - **Logo**: holocron's AI-generated logo endpoint, same trick as akarso's `AkarsoLogo` —
-  `<img src="/holocron-api/ai-logo/opensessions.jpeg">` twice, light mode
+  `<img src="/holocron-api/ai-logo/opensession.jpeg">` twice, light mode
   `mix-blend-multiply`, dark mode `invert mix-blend-screen`. Rename the component to
-  `OpenSessionsLogo` inside the copied `auth-page.tsx` and use it in the sidebar header,
+  `OpenSessionLogo` inside the copied `auth-page.tsx` and use it in the sidebar header,
   auth pages, and portal shell.
 - `src/pages/docs/` can hold user docs later (self-host guide); not an MVP requirement.
 
@@ -484,7 +485,7 @@ Strategy: **copy akarso files verbatim first, then edit in place** — cheaper i
 and time than rewriting, and keeps proven patterns (loaders, auth, switcher menus)
 intact. First implementation step of milestone 1 is literally `cp` of this list:
 
-| Copy from akarso | To opensessions | Edit |
+| Copy from akarso | To opensession | Edit |
 |---|---|---|
 | root `pnpm-workspace.yaml`, root `package.json`, `.gitignore` | same paths | rename, keep spiceflow override |
 | `db/package.json`, `tsconfig.json`, `drizzle.config.ts` | `db/` | as-is |
@@ -493,11 +494,11 @@ intact. First implementation step of milestone 1 is literally `cp` of this list:
 | `website/wrangler.jsonc` | same | rename, add R2/send_email/crons, drop stripe secrets |
 | `website/src/db.ts` | same | keep getDb/getAuth/ensurePersonalOrg/session helpers; drop apikey/mcp/device plugins, add magic-link |
 | `website/src/app.tsx` | same | keep layout/auth-middleware/login/invite/dashboard-resolver chain; replace org tab routes with §4 routes incrementally |
-| `components/auth-page.tsx` | same | `AkarsoLogo` → `OpenSessionsLogo`, holocron ai-logo URL |
+| `components/auth-page.tsx` | same | `AkarsoLogo` → `OpenSessionLogo`, holocron ai-logo URL |
 | `components/login-button.tsx`, `dashboard-shell.tsx` | `login-button.tsx`, `event-shell.tsx` | shell rewritten around shadcn Sidebar, menus/UserMenu kept |
 | `components/access-tab.tsx` | `settings` Team tab | org members + invites, near-verbatim |
 | `components/ui/*` (button, dialog, dropdown-menu, table, scroll-area, frame, primitives) | `components/ui/` | verbatim; add shadcn `sidebar`, `tabs`, `badge`, `select`, `input`, `textarea`, `field` |
-| `components/hero-section.tsx`, `src/pages/index.mdx` | same | re-worded for opensessions |
+| `components/hero-section.tsx`, `src/pages/index.mdx` | same | re-worded for opensession |
 | `src/lib/auth-client.ts`, `src/lib/utils.ts`, `globals.css` | same | drop apikey client plugin |
 | `src/auth-redirect.test.ts`, `src/db-migrations.test.ts` | same | adapt paths/tables |
 
@@ -698,11 +699,11 @@ throughout.
 
 ## 12. Deployment steps
 
-1. **Resources**: `wrangler d1 create opensessions-db` + `opensessions-preview-db`;
-   `wrangler r2 bucket create opensessions-files` + `-preview`; paste ids into
+1. **Resources**: `wrangler d1 create opensession-db` + `opensession-preview-db`;
+   `wrangler r2 bucket create opensession-files` + `-preview`; paste ids into
    wrangler.jsonc; `wrangler types`.
 2. **Sigillo** (this project uses sigillo, NOT doppler): `sigillo me` → create project
-   `opensessions` (envs dev/preview/prod auto-created) → `sigillo setup --project …
+   `opensession` (envs dev/preview/prod auto-created) → `sigillo setup --project …
    --env dev` in `website/` → set secrets per env: `BETTER_AUTH_SECRET` (openssl rand
    per env), `BETTER_AUTH_URL` (http://localhost:8787 / preview URL / prod URL),
    `GOOGLE_CLIENT_ID/SECRET` placeholders (`""`) for the user to fill, plus
@@ -732,8 +733,9 @@ throughout.
    `--secrets-file` solves the first-deploy chicken-and-egg with `secrets.required`;
    after first deploy the same scripts keep secrets in sync. Preview always deploys
    before prod; migrations always run before deploy.
-6. **Custom domain** (end): add `routes: [{ pattern, custom_domain: true }]` to prod,
-   keep preview on `routes: []` (workers.dev) or a dedicated preview hostname; update
+6. **Custom domain**: the production domain is **opensession.dev** (zone already in the
+   Cloudflare account). Prod uses `routes: [{ pattern: "opensession.dev",
+   custom_domain: true }]`, preview stays on `routes: []` (workers.dev); update
    `BETTER_AUTH_URL`/`APP_URL`; redeploy preview then prod. Custom domain also unlocks
    the Cache API if we later memoize hot embed reads.
 
