@@ -21,16 +21,15 @@
 //   speaker(event_id, user_id)                          WHERE user_id IS NOT NULL
 //   org(owner_user_id)                                  WHERE kind = 'personal'
 // CHECK constraints:
-//   session:          status = 'DRAFT' OR length(trim(title)) > 0
-//   session:          (starts_at IS NULL AND ends_at IS NULL) OR ends_at > starts_at
-//   draft_placement:  (starts_at IS NULL AND ends_at IS NULL) OR ends_at > starts_at
-//   embed_filter:     exactly one of track_id/tag_id/format_id
-//   lifecycle enums:  CHECK(col IN (...)) on all status/stage columns (drizzle
-//                     text enums are TypeScript-only; SQLite needs the CHECK)
+//   session:      status = 'DRAFT' OR length(trim(title)) > 0
+//   session:      (starts_at IS NULL AND ends_at IS NULL) OR ends_at > starts_at
+//   review:       rating IS NULL OR rating BETWEEN 1 AND 5
+//   lifecycle enums: CHECK(col IN (...)) on all status columns (drizzle
+//                    text enums are TypeScript-only; SQLite needs the CHECK)
 // Composite FKs on NULLABLE columns (Prisma forbids mixed required/optional
 // relation fields; drizzle adds these directly — enforced only when non-null):
-//   session(track_id, event_id)   → track(id, event_id)     (same for format,
-//   level, language, room, form, submitter_speaker, evaluation_plan, slot)
+//   session(track_id, event_id) → track(id, event_id)  (same for format, room,
+//   form, submitter_speaker)
 //   task_assignment(session_id, event_id) → session(id, event_id)
 // Every event-scoped parent exposes UNIQUE(id, event_id) to support these.
 // ─────────────────────────────────────────────────────────────────────────────
@@ -87,9 +86,7 @@ model User {
   invitationsCreated OrgInvitation[]
   eventMemberships  EventMember[]
   speakerIdentities Speaker[] // linked speaker rows across events
-  reviewAssignments ReviewAssignment[]
-  reviewerPools     EvaluationRoundReviewer[]
-  formNotifications FormNotificationRecipient[]
+  reviews           Review[]
 
   @@map("user")
 }
@@ -228,22 +225,6 @@ enum EventStatus {
   ARCHIVED
 }
 
-enum EventType {
-  CONFERENCE
-  SUMMIT
-  MEETUP
-  HACKATHON
-  WORKSHOP
-  OTHER
-}
-
-// Shared ENABLED/DISABLED switch for rule-like rows (scheduling rules,
-// reminder rules) — enum instead of a boolean so states stay extensible.
-enum RuleStatus {
-  ENABLED
-  DISABLED
-}
-
 model Event {
   id    String @id @default(cuid())
   orgId String
@@ -252,53 +233,35 @@ model Event {
   name        String
   slug        String      @unique // public CFP/portal/embed URLs
   status      EventStatus @default(DRAFT)
-  eventType   EventType   @default(CONFERENCE)
   websiteUrl  String?
   location    String?
   timezone    String // IANA, e.g. "America/Los_Angeles" — agenda renders in this tz
   startsAt    DateTime
   endsAt      DateTime
   description String?
-  logoFileId       String? @unique
-  logoFile         File?   @relation("EventLogo", fields: [logoFileId], references: [id])
-  backgroundFileId String? @unique
-  backgroundFile   File?   @relation("EventBackground", fields: [backgroundFileId], references: [id])
+  logoFileId  String? @unique
+  logoFile    File?   @relation("EventLogo", fields: [logoFileId], references: [id])
 
-  // Event-level default; Form.submissionLimit overrides per form. Counts drafts too.
+  // Per-user submission cap (counts drafts too).
   submissionLimitPerUser Int @default(3)
 
   // Race-safe friendlyId allocation: UPDATE ... SET next_session_number =
   // next_session_number + 1 RETURNING; never SELECT max()+1.
   nextSessionNumber Int @default(1)
-  // Optimistic concurrency for agenda commits: bumped on every commit;
-  // a draft may only commit when its baseScheduleRevision still matches.
-  scheduleRevision  Int @default(0)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  members          EventMember[]
-  tracks           Track[]
-  formats          Format[]
-  levels           Level[]
-  languages        Language[]
-  tags             Tag[]
-  rooms            Room[]
-  participantRoles ParticipantRole[]
-  forms            Form[]
-  speakers         Speaker[]
-  sessions         Session[]
-  evaluationPlans  EvaluationPlan[]
-  agendaDrafts     AgendaDraft[]
-  schedulingRules  SchedulingRule[]
-  scheduleSlots    ScheduleSlot[]
-  taskDefinitions  TaskDefinition[]
-  fileRequests     FileRequest[]
-  files            File[]
-  emailTemplates   EmailTemplate[]
-  reminderRules    ReminderRule[]
-  emailMessages    EmailMessage[]
-  embeds           Embed[]
+  members         EventMember[]
+  tracks          Track[]
+  formats         Format[]
+  rooms           Room[]
+  forms           Form[]
+  speakers        Speaker[]
+  sessions        Session[]
+  taskDefinitions TaskDefinition[]
+  files           File[]
+  emailMessages   EmailMessage[]
 
   @@index([orgId])
 }
@@ -333,15 +296,10 @@ model Track {
   event     Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
   name      String
   color     String // hex, used by agenda + embeds
-  // Category routing: submissions choosing this track land in this evaluation
-  // plan (overrides Form.defaultEvaluationPlanId).
-  evaluationPlanId String?
-  evaluationPlan   EvaluationPlan? @relation(fields: [evaluationPlanId], references: [id], onDelete: SetNull)
   sortOrder Int      @default(0)
   createdAt DateTime @default(now())
 
-  sessions     Session[]
-  embedFilters EmbedFilter[]
+  sessions Session[]
 
   @@unique([eventId, name])
   @@unique([id, eventId]) // target for composite tenant-boundary FKs
@@ -357,51 +315,7 @@ model Format {
   defaultDurationMinutes Int?
   sortOrder Int    @default(0)
 
-  sessions     Session[]
-  embedFilters EmbedFilter[]
-
-  @@unique([eventId, name])
-  @@unique([id, eventId])
-  @@index([eventId])
-}
-
-model Level {
-  id        String @id @default(cuid())
-  eventId   String
-  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name      String // "Beginner", "Intermediate", "Advanced"
-  sortOrder Int    @default(0)
-
   sessions Session[]
-
-  @@unique([eventId, name])
-  @@unique([id, eventId])
-  @@index([eventId])
-}
-
-model Language {
-  id        String @id @default(cuid())
-  eventId   String
-  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name      String
-  sortOrder Int    @default(0)
-
-  sessions Session[]
-
-  @@unique([eventId, name])
-  @@unique([id, eventId])
-  @@index([eventId])
-}
-
-model Tag {
-  id        String @id @default(cuid())
-  eventId   String
-  event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name      String
-  sortOrder Int    @default(0)
-
-  sessionTags  SessionTag[]
-  embedFilters EmbedFilter[]
 
   @@unique([eventId, name])
   @@unique([id, eventId])
@@ -413,59 +327,19 @@ model Room {
   eventId   String
   event     Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
   name      String // "Main Stage", "Hall A"
-  capacity  Int?
   sortOrder Int    @default(0)
 
-  sessions        Session[]
-  draftPlacements DraftPlacement[]
-  schedulingRules SchedulingRule[]
+  sessions Session[]
 
   @@unique([eventId, name])
   @@unique([id, eventId])
   @@index([eventId])
 }
 
-// Sessionize-style reusable time slots ("Day 1, 09:00–09:30"). The agenda
-// builder snaps CONTENT sessions to slots; workshops can override with free
-// timestamps. Slots are an assist, not a constraint.
-model ScheduleSlot {
-  id       String   @id @default(cuid())
-  eventId  String
-  event    Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name     String? // "Morning keynote block"
-  startsAt DateTime
-  endsAt   DateTime
-  sortOrder Int     @default(0)
-
-  sessions        Session[]
-  draftPlacements DraftPlacement[]
-
-  @@unique([id, eventId])
-  @@index([eventId, startsAt])
-}
-
+// Fixed participant roles (was a configurable per-event table — MVP cut).
 enum CoreRole {
   SPEAKER
-  CHAIRPERSON
   MODERATOR
-}
-
-// Per-event configurable participant roles ("Speakers", "Unconfirmed Speakers"...)
-// each mapped to a core behavior.
-model ParticipantRole {
-  id         String   @id @default(cuid())
-  eventId    String
-  event      Event    @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name       String // singular label
-  namePlural String
-  coreRole   CoreRole @default(SPEAKER)
-  sortOrder  Int      @default(0)
-
-  participants SessionParticipant[]
-
-  @@unique([eventId, name])
-  @@unique([id, eventId])
-  @@index([eventId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -504,7 +378,7 @@ model ParticipantRole {
 // ═════════════════════════════════════════════════════════════════════════════
 
 enum FormPurpose {
-  CFP    // public call-for-speakers form; creates a Session (stage ABSTRACT)
+  CFP    // public call-for-speakers form; creates a Session (status DRAFT/PENDING)
   PORTAL // assigned to speakers via tasks; fills speaker or submission data
 }
 
@@ -520,17 +394,6 @@ enum FormStatus {
   ARCHIVED // retired; kept for response history (delete only while DRAFT)
 }
 
-// What a saved draft policy allows and what happens after submit.
-enum DraftPolicy {
-  SINGLE_DRAFT
-  MULTIPLE_DRAFTS
-}
-
-enum AfterSubmitAction {
-  SHOW_MESSAGE       // success content is part of the MDX
-  REDIRECT_TO_PORTAL
-}
-
 model Form {
   id      String      @id @default(cuid())
   eventId String
@@ -538,40 +401,28 @@ model Form {
   purpose FormPurpose
   target  FormTarget  @default(SUBMISSION)
 
-  internalName String // admin-facing
-  publicTitle  String // submitter-facing
-  slug         String // public URL: /submit/{event.slug}/{form.slug}
-  status       FormStatus @default(DRAFT)
+  name   String // admin-facing; the public title lives in the MDX
+  slug   String // public URL: /submit/{event.slug}/{form.slug}
+  status FormStatus @default(DRAFT)
 
   // The live MDX (denormalized pointer to the latest FormVersion; new
   // responses snapshot this version).
   currentVersionId String?      @unique
   currentVersion   FormVersion? @relation("CurrentVersion", fields: [currentVersionId], references: [id], onDelete: SetNull)
 
-  closesAt        DateTime? // enables draft reminder emails
-  submissionLimit Int? // per-user; null → Event.submissionLimitPerUser
-  draftPolicy     DraftPolicy       @default(SINGLE_DRAFT)
-  afterSubmit     AfterSubmitAction @default(SHOW_MESSAGE)
-
-  // CFP routing default: submissions land in this evaluation plan unless the
-  // chosen track overrides it via Track.evaluationPlanId.
-  defaultEvaluationPlanId String?
-  defaultEvaluationPlan   EvaluationPlan? @relation(fields: [defaultEvaluationPlanId], references: [id], onDelete: SetNull)
+  closesAt DateTime? // hard-coded draft reminders fire 3 days and 1 day before
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  versions               FormVersion[]
-  notificationRecipients FormNotificationRecipient[]
-  responses              FormResponse[]
-  sessions               Session[] // submissions created through this form
-  taskDefinitions        TaskDefinition[]
-  reminderRules          ReminderRule[]
+  versions        FormVersion[]
+  responses       FormResponse[]
+  sessions        Session[] // submissions created through this form
+  taskDefinitions TaskDefinition[]
 
   @@unique([eventId, slug]) // slug is per-event ("cfp" can exist in every event)
   @@unique([id, eventId])
   @@index([eventId])
-  @@index([defaultEvaluationPlanId])
 }
 
 // Immutable MDX snapshot, created on every save/publish from the editor.
@@ -589,24 +440,6 @@ model FormVersion {
   responses FormResponse[]
 
   @@index([formId, createdAt])
-}
-
-// Admin alert recipients per form.
-enum NotificationTrigger {
-  NEW_SUBMISSION
-  UPDATED_SUBMISSION
-}
-
-model FormNotificationRecipient {
-  id      String              @id @default(cuid())
-  formId  String
-  form    Form                @relation(fields: [formId], references: [id], onDelete: Cascade)
-  userId  String
-  user    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
-  trigger NotificationTrigger
-
-  @@unique([formId, userId, trigger])
-  @@index([formId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -633,19 +466,15 @@ model Speaker {
   email     String
   firstName String
   lastName  String
-  // System profile fields (portal "Profile" page)
+  // System profile fields (portal "Profile" page). Anything else (dietary
+  // preferences, t-shirt size, ...) is a custom MDX field → FormFieldValue.
   bio           String? // rich text, <=5000 chars app-enforced
   jobTitle      String?
   companyName   String?
-  phone         String?
-  salutation    String?
-  honorific     String?
   pronouns      String?
-  gender        String?
   websiteUrl    String?
   linkedinUrl   String?
   twitterUrl    String?
-  facebookUrl   String?
   headshotFileId String? @unique
   headshotFile   File?   @relation("SpeakerHeadshot", fields: [headshotFileId], references: [id], onDelete: SetNull)
 
@@ -654,7 +483,6 @@ model Speaker {
 
   participations     SessionParticipant[]
   submittedSessions  Session[]
-  availability       SpeakerAvailability[]
   taskAssignments    TaskAssignment[]
   formResponses      FormResponse[]
   subjectFieldValues FormFieldValue[] // per-participant values about this speaker
@@ -670,34 +498,12 @@ model Speaker {
   @@index([eventId])
 }
 
-// Availability windows feeding agenda conflict detection ("flies out Friday").
-enum AvailabilityKind {
-  AVAILABLE   // only these windows are OK (whitelist mode)
-  UNAVAILABLE // these windows are blocked (blacklist mode)
-}
-
-model SpeakerAvailability {
-  id        String           @id @default(cuid())
-  speakerId String
-  speaker   Speaker          @relation(fields: [speakerId], references: [id], onDelete: Cascade)
-  kind      AvailabilityKind @default(UNAVAILABLE)
-  startsAt  DateTime
-  endsAt    DateTime
-  note      String?
-
-  @@index([speakerId])
-}
-
 // ═════════════════════════════════════════════════════════════════════════════
 // SUBMISSIONS / SESSIONS — one table for the whole lifecycle (mirrors the real
-// SessionBoard API where a Session has is_abstract). stage=ABSTRACT while under
-// review; promotion to stage=SESSION happens on acceptance.
+// SessionBoard API where a Session has is_abstract). status is the single
+// lifecycle dimension: ACCEPTED sessions are schedulable agenda items (the
+// old ABSTRACT/SESSION stage column was derivable and got cut).
 // ═════════════════════════════════════════════════════════════════════════════
-
-enum SessionStage {
-  ABSTRACT // a proposal under review
-  SESSION  // a finalized agenda item
-}
 
 enum SessionStatus {
   DRAFT         // submitter saved but not submitted
@@ -740,44 +546,28 @@ model Session {
   submitterSpeaker   Speaker? @relation(fields: [submitterSpeakerId], references: [id], onDelete: SetNull)
 
   kind   SessionKind   @default(CONTENT)
-  stage  SessionStage  @default(ABSTRACT)
   status SessionStatus @default(DRAFT)
 
   // Nullable so autosaved drafts can exist before the Title question is
   // answered. CHECK: non-DRAFT rows must have a non-empty title.
-  title           String?
-  description     String? // rich text
-  clientSessionId String? // external system id
-  capacity        Int?
-  ceuCredits      Float?
-  visibility      SessionVisibility @default(PRIVATE)
+  title       String?
+  description String? // rich text
+  visibility  SessionVisibility @default(PRIVATE)
   // Public cover image the speaker can set from the portal.
   coverImageFileId String? @unique
   coverImageFile   File?   @relation("SessionCoverImage", fields: [coverImageFileId], references: [id], onDelete: SetNull)
 
-  // Which evaluation plan reviews this submission (set by routing or admin).
-  // Membership in individual rounds lives in RoundSession.
-  evaluationPlanId String?
-  evaluationPlan   EvaluationPlan? @relation(fields: [evaluationPlanId], references: [id], onDelete: SetNull)
+  trackId  String?
+  track    Track?  @relation(fields: [trackId], references: [id], onDelete: SetNull)
+  formatId String?
+  format   Format? @relation(fields: [formatId], references: [id], onDelete: SetNull)
 
-  trackId    String?
-  track      Track?    @relation(fields: [trackId], references: [id], onDelete: SetNull)
-  formatId   String?
-  format     Format?   @relation(fields: [formatId], references: [id], onDelete: SetNull)
-  levelId    String?
-  level      Level?    @relation(fields: [levelId], references: [id], onDelete: SetNull)
-  languageId String?
-  language   Language? @relation(fields: [languageId], references: [id], onDelete: SetNull)
-
-  // Live schedule (null until placed via agenda). Draft placements live in
-  // DraftPlacement and are copied here on commit. scheduleSlot is the optional
-  // snap-to-slot reference; startsAt/endsAt stay the source of truth.
-  roomId         String?
-  room           Room?         @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  scheduleSlotId String?
-  scheduleSlot   ScheduleSlot? @relation(fields: [scheduleSlotId], references: [id], onDelete: SetNull)
-  startsAt       DateTime?
-  endsAt         DateTime?
+  // Live schedule, edited directly in the agenda (null until placed).
+  // Conflicts (speaker/room overlap) are computed live and shown as warnings.
+  roomId   String?
+  room     Room?     @relation(fields: [roomId], references: [id], onDelete: SetNull)
+  startsAt DateTime?
+  endsAt   DateTime?
 
   // Lifecycle timestamps
   submittedAt DateTime? // DRAFT → PENDING
@@ -791,27 +581,22 @@ model Session {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  tags              SessionTag[]
-  participants      SessionParticipant[]
-  formResponses     FormResponse[]
-  transitions       SessionTransition[]
-  roundEntries      RoundSession[]
-  reviewAssignments ReviewAssignment[]
-  draftPlacements   DraftPlacement[]
-  taskAssignments   TaskAssignment[]
-  files             File[]               @relation("SessionFiles")
-  emailMessages     EmailMessage[]
+  participants    SessionParticipant[]
+  formResponses   FormResponse[]
+  transitions     SessionTransition[]
+  reviews         Review[]
+  taskAssignments TaskAssignment[]
+  files           File[]               @relation("SessionFiles")
+  emailMessages   EmailMessage[]
 
   @@unique([eventId, friendlyId])
   @@unique([id, eventId]) // target for composite tenant-boundary FKs
   @@index([eventId, status])
-  @@index([eventId, stage])
   @@index([eventId, startsAt])
   @@index([eventId, roomId, startsAt])
   @@index([formId])
   @@index([submitterSpeakerId])
   @@index([trackId])
-  @@index([evaluationPlanId])
   // BetterAuth owns the physical `session` table (akarso parity), so the
   // domain session entity lives in `event_session`.
   @@map("event_session")
@@ -824,8 +609,6 @@ model SessionTransition {
   id         String        @id @default(cuid())
   sessionId  String
   session    Session       @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  fromStage  SessionStage
-  toStage    SessionStage
   fromStatus SessionStatus
   toStatus   SessionStatus
   actorUserId String? // null = system (e.g. auto-close, submitter portal action noted in reason)
@@ -835,28 +618,16 @@ model SessionTransition {
   @@index([sessionId, occurredAt])
 }
 
-model SessionTag {
-  id        String  @id @default(cuid())
-  sessionId String
-  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  tagId     String
-  tag       Tag     @relation(fields: [tagId], references: [id], onDelete: Cascade)
-
-  @@unique([sessionId, tagId])
-  @@index([tagId])
-}
-
-// Speakers/chairs/moderators on a session, with role, display order, and
+// Speakers/moderators on a session, with role, display order, and
 // per-participation confirmation (a speaker can confirm talk A, decline B).
 model SessionParticipant {
   id      String @id @default(cuid())
-  eventId String // denormalized: session, speaker, and role must share the event
-  sessionId         String
-  session           Session         @relation(fields: [sessionId, eventId], references: [id, eventId], onDelete: Cascade)
-  speakerId         String
-  speaker           Speaker         @relation(fields: [speakerId, eventId], references: [id, eventId], onDelete: Cascade)
-  participantRoleId String
-  participantRole   ParticipantRole @relation(fields: [participantRoleId, eventId], references: [id, eventId], onDelete: Restrict)
+  eventId String // denormalized: session and speaker must share the event
+  sessionId String
+  session   Session  @relation(fields: [sessionId, eventId], references: [id, eventId], onDelete: Cascade)
+  speakerId String
+  speaker   Speaker  @relation(fields: [speakerId, eventId], references: [id, eventId], onDelete: Cascade)
+  role      CoreRole @default(SPEAKER)
 
   confirmationStatus SpeakerConfirmation @default(PENDING)
   confirmedAt        DateTime?
@@ -864,9 +635,8 @@ model SessionParticipant {
   sortOrder          Int                 @default(0)
   createdAt          DateTime            @default(now())
 
-  @@unique([sessionId, speakerId, participantRoleId])
+  @@unique([sessionId, speakerId])
   @@index([speakerId])
-  @@index([participantRoleId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -949,309 +719,61 @@ model FormFieldValue {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// EVALUATION — round-based plans with scorecards, reviewer assignments, scores.
+// EVALUATION — single-round, Sessionize-style quick reviews (MVP). Every
+// EventMember (ORGANIZER or REVIEWER) can review every submission: a
+// Yes/Maybe/No vote, an optional 1–5 rating, and a comment. No plans, no
+// rounds, no scorecards, no assignments — the admin abstracts table sorts by
+// vote counts and average rating, then the organizer moves submissions to the
+// accept/decline queues.
+//
+// AGENDA (also MVP-simplified): the live schedule is edited directly on
+// Session.roomId/startsAt/endsAt — no draft workspaces. Conflicts are
+// COMPUTED, never stored, with two hard-coded always-on checks:
+// speaker double-booked and room overlap (time intersection). The UI shows
+// warnings and asks for confirmation; nothing blocks at the DB level.
 // ═════════════════════════════════════════════════════════════════════════════
 
-enum PlanStatus {
-  DRAFT
-  ACTIVE
-  COMPLETED
+enum ReviewVote {
+  YES
+  MAYBE
+  NO
 }
 
-model EvaluationPlan {
-  id      String     @id @default(cuid())
-  eventId String
-  event   Event      @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name    String // "My Evaluation Plan"
-  status  PlanStatus @default(DRAFT)
-
-  createdAt DateTime @default(now())
-
-  rounds        EvaluationRound[]
-  sessions      Session[] // submissions routed into this plan
-  tracks        Track[]   // tracks that route into this plan
-  defaultForForms Form[]  // forms using this plan as routing default
-
-  @@unique([id, eventId])
-  @@index([eventId])
-}
-
-enum RoundStatus {
-  PENDING
-  OPEN
-  CLOSED
-}
-
-enum Anonymization {
-  NONE         // reviewers see speaker identities
-  SINGLE_BLIND // reviewers don't see speakers
-}
-
-model EvaluationRound {
-  id     String         @id @default(cuid())
-  planId String
-  plan   EvaluationPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
-  name   String // "Initial Review", "Committee Decision"
-  sortOrder Int         @default(0)
-
-  status        RoundStatus   @default(PENDING)
-  anonymization Anonymization @default(NONE)
-  opensAt       DateTime?
-  closesAt      DateTime?
-  // Assignment caps used by the auto-assignment tool.
-  maxReviewsPerSubmission Int?
-  maxReviewsPerReviewer   Int?
-
-  scorecardFields ScorecardField[]
-  roundSessions   RoundSession[]
-  assignments     ReviewAssignment[]
-  reviewerPool    EvaluationRoundReviewer[]
-
-  @@unique([id, planId])
-  @@index([planId])
-}
-
-// Per-round reviewer pool — auto-assignment only picks from this list.
-// (SessionBoard: "each round has its own reviewer pool".)
-model EvaluationRoundReviewer {
-  id         String          @id @default(cuid())
-  roundId    String
-  round      EvaluationRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  reviewerId String
-  reviewer   User            @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
-  createdAt  DateTime        @default(now())
-
-  @@unique([roundId, reviewerId])
-  @@index([reviewerId])
-}
-
-// Which submissions are in a round and whether they advanced.
-enum RoundOutcome {
-  PENDING
-  ADVANCED // moved to the next round (next RoundSession inserted atomically)
-  REJECTED // dropped from the plan (admin then sets DECLINE_QUEUE)
-}
-
-model RoundSession {
+model Review {
   id      String @id @default(cuid())
-  roundId String
-  round   EvaluationRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  sessionId String
-  session   Session @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  outcome   RoundOutcome @default(PENDING)
-  // Outcome audit (actor id is a snapshot, no FK — survives user deletion).
-  outcomeDecidedAt   DateTime?
-  outcomeDecidedById String?
-  outcomeComment     String?
-
-  @@unique([roundId, sessionId])
-  @@index([sessionId])
-  @@index([roundId, outcome])
-}
-
-// Presets built on these primitives (product-level, not schema-level):
-//   "Quick vote"      → one DROPDOWN: Yes / Maybe / No
-//   "Stars"           → one RATING 1..10 rendered as half-stars
-//   "Weighted rubric" → several RATING fields with weights
-enum ScoreFieldType {
-  RATING   // numeric scale minScore..maxScore
-  TEXT     // free-text feedback
-  DROPDOWN
-  YES_NO
-  FILE     // reviewer uploads a marked-up document
-}
-
-model ScorecardField {
-  id      String          @id @default(cuid())
-  roundId String
-  round   EvaluationRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  label   String // "Relevance", "Speaker experience"
-  fieldType ScoreFieldType
-  required  Boolean       @default(true)
-  minScore  Int? // RATING
-  maxScore  Int? // RATING
-  weight    Float @default(1) // weighted average across fields
-  sortOrder Int   @default(0)
-
-  options ScorecardFieldOption[]
-  scores  ReviewScore[]
-
-  @@unique([id, roundId]) // target for same-round composite FKs
-  @@index([roundId])
-}
-
-model ScorecardFieldOption {
-  id               String         @id @default(cuid())
-  scorecardFieldId String
-  scorecardField   ScorecardField @relation(fields: [scorecardFieldId], references: [id], onDelete: Cascade)
-  label            String
-  // Numeric contribution of this option to the weighted score, if any.
-  scoreValue       Float?
-  sortOrder        Int            @default(0)
-
-  scores ReviewScore[]
-
-  @@unique([id, scorecardFieldId]) // target for option-belongs-to-field FKs
-  @@index([scorecardFieldId])
-}
-
-enum AssignmentStatus {
-  PENDING              // assigned, not started
-  IN_PROGRESS
-  COMPLETED
-  DECLINED             // reviewer opted out
-  CONFLICT_OF_INTEREST // reviewer declared COI; excluded from averages
-}
-
-// One reviewer reviewing one submission in one round. The review itself is
-// folded into the assignment (status, comment, scores).
-model ReviewAssignment {
-  id         String          @id @default(cuid())
-  roundId    String
-  round      EvaluationRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
-  sessionId  String
-  session    Session         @relation(fields: [sessionId], references: [id], onDelete: Cascade)
-  reviewerId String
-  reviewer   User            @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
-
-  status         AssignmentStatus @default(PENDING)
-  overallComment String?
-  // COI audit — set when status becomes CONFLICT_OF_INTEREST.
-  coiReason      String?
-  coiDeclaredAt  DateTime?
-  completedAt    DateTime?
-  createdAt      DateTime         @default(now())
-
-  scores ReviewScore[]
-
-  @@unique([roundId, sessionId, reviewerId])
-  @@unique([id, roundId]) // target for same-round composite FKs
-  @@index([reviewerId, status])
-  @@index([sessionId])
-  @@index([roundId, status])
-}
-
-model ReviewScore {
-  id           String @id @default(cuid())
-  roundId      String // denormalized: assignment and scorecard field must share the round
-  assignmentId String
-  assignment   ReviewAssignment @relation(fields: [assignmentId, roundId], references: [id, roundId], onDelete: Cascade)
-  scorecardFieldId String
-  // Restrict: used scorecard fields are archived, never deleted.
-  scorecardField ScorecardField @relation(fields: [scorecardFieldId, roundId], references: [id, roundId], onDelete: Restrict)
-
-  valueNumber      Float? // RATING / YES_NO (1|0)
-  valueText        String? // TEXT
-  selectedOptionId String? // DROPDOWN — composite: option must belong to the field
-  selectedOption   ScorecardFieldOption? @relation(fields: [selectedOptionId, scorecardFieldId], references: [id, scorecardFieldId], onDelete: Restrict)
-  valueFileId      String? // FILE
-  valueFile        File?   @relation("ReviewScoreFile", fields: [valueFileId], references: [id], onDelete: SetNull)
-
-  @@unique([assignmentId, scorecardFieldId])
-  @@index([scorecardFieldId])
-  @@index([selectedOptionId])
-}
-
-// ═════════════════════════════════════════════════════════════════════════════
-// AGENDA — draft workspaces over the live schedule + typed scheduling rules.
-// Conflicts are COMPUTED, never stored: time-overlap ∧ (same room ∨ shared
-// participant ∨ speaker unavailable ∨ rule violation). There is NO waiver
-// table — conflicts are always shown, and committing a draft with open
-// conflicts requires an explicit confirmation in the UI.
-// ═════════════════════════════════════════════════════════════════════════════
-
-enum AgendaDraftStatus {
-  OPEN
-  COMMITTED
-  DISCARDED
-}
-
-model AgendaDraft {
-  id          String            @id @default(cuid())
-  eventId     String
-  event       Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name        String
-  description String?
-  status      AgendaDraftStatus @default(OPEN)
-  // Optimistic concurrency: snapshot of Event.scheduleRevision when the draft
-  // was created (or last rebased). Commit succeeds only if it still matches;
-  // otherwise the draft must be rebased. Prevents two drafts silently
-  // overwriting each other.
-  baseScheduleRevision Int
-  committedRevision    Int? // Event.scheduleRevision written by this commit
-  committedByUserId    String? // snapshot, no FK
-  committedAt DateTime?
-  createdAt   DateTime          @default(now())
-  updatedAt   DateTime          @updatedAt
-
-  placements DraftPlacement[]
-
-  @@index([eventId])
-}
-
-// A staged placement: on commit, copied to Session.roomId/scheduleSlotId/
-// startsAt/endsAt (and icsSequence bumped + updated calendar invites queued).
-model DraftPlacement {
-  id      String @id @default(cuid())
-  draftId String
-  draft   AgendaDraft @relation(fields: [draftId], references: [id], onDelete: Cascade)
-  eventId String // denormalized: session and room must share the event
+  eventId String // denormalized: session and reviewer scope share the event
   sessionId String
   session   Session @relation(fields: [sessionId, eventId], references: [id, eventId], onDelete: Cascade)
-  roomId    String?
-  room      Room?   @relation(fields: [roomId], references: [id], onDelete: SetNull)
-  scheduleSlotId String?
-  scheduleSlot   ScheduleSlot? @relation(fields: [scheduleSlotId], references: [id], onDelete: SetNull)
-  startsAt  DateTime?
-  endsAt    DateTime? // CHECK: both null or endsAt > startsAt (header appendix)
-  // A placement with all-null room/slot/times means "unschedule this session".
+  reviewerId String
+  reviewer   User   @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
 
-  @@unique([draftId, sessionId])
-  @@index([sessionId])
-  @@index([roomId])
-}
+  vote    ReviewVote
+  rating  Int? // optional 1–5 stars (CHECK 1..5 in migration)
+  comment String?
 
-// Reduced to the checks that serve the use case; more types can come later.
-enum SchedulingRuleType {
-  SPEAKER_NO_OVERLAP   // same speaker in two overlapping sessions
-  ROOM_NO_OVERLAP      // two sessions overlap in one room
-  ROOM_CAPACITY_LIMIT  // session.capacity must not exceed room.capacity
-  SPEAKER_AVAILABILITY // respect SpeakerAvailability windows
-  MIN_BUFFER_MINUTES   // intValue = required gap between sessions (scoped)
-}
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-model SchedulingRule {
-  id      String             @id @default(cuid())
-  eventId String
-  event   Event              @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name    String
-  type    SchedulingRuleType
-  status  RuleStatus         @default(ENABLED)
-  intValue Int? // meaning depends on type (see enum comments)
-  // Optional scoping — rule applies only to this room if set.
-  roomId  String?
-  room    Room?              @relation(fields: [roomId], references: [id], onDelete: Cascade)
-
+  @@unique([sessionId, reviewerId]) // one review per reviewer per submission
+  @@index([reviewerId])
   @@index([eventId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// SPEAKER PORTAL — onboarding tasks, file requests, files.
+// SPEAKER PORTAL — onboarding tasks + files. File-request tasks are just FORM
+// tasks whose MDX contains a <FileUpload> field (no separate FileRequest).
 // ═════════════════════════════════════════════════════════════════════════════
 
 enum TaskTarget {
-  SPEAKER    // one assignment per speaker ("book your hotel")
+  SPEAKER    // one assignment per speaker ("confirm participation")
   SUBMISSION // one assignment per accepted session ("upload slides")
 }
 
 // Source ↔ link consistency (CHECK in migration + app validation):
-//   MANUAL       → formId NULL,     fileRequestId NULL
-//   FORM         → formId NOT NULL, fileRequestId NULL (form.target must match task target)
-//   FILE_REQUEST → formId NULL,     fileRequestId NOT NULL (same target rule)
+//   MANUAL → formId NULL; FORM → formId NOT NULL (form.target matches task target)
 enum TaskSource {
-  MANUAL       // checkbox task, speaker marks complete
-  FORM         // completing the linked portal Form completes the task
-  FILE_REQUEST // uploading to the linked FileRequest completes the task
+  MANUAL // checkbox task, speaker marks complete
+  FORM   // completing the linked portal Form completes the task
 }
 
 // AUTO_ON_ACCEPT tasks are assigned to every accepted speaker/session when
@@ -1270,23 +792,19 @@ model TaskDefinition {
   target  TaskTarget
   source  TaskSource @default(MANUAL)
 
-  formId        String?
-  form          Form?        @relation(fields: [formId], references: [id], onDelete: SetNull)
-  fileRequestId String?
-  fileRequest   FileRequest? @relation(fields: [fileRequestId], references: [id], onDelete: SetNull)
+  formId String?
+  form   Form?   @relation(fields: [formId], references: [id], onDelete: SetNull)
 
   dueAt     DateTime? // default for NEW assignments (snapshotted per assignment)
   assignmentMode TaskAssignmentMode @default(AUTO_ON_ACCEPT)
   sortOrder Int       @default(0)
   createdAt DateTime  @default(now())
 
-  assignments   TaskAssignment[]
-  reminderRules ReminderRule[]
+  assignments TaskAssignment[]
 
   @@unique([id, eventId])
   @@index([eventId])
   @@index([formId])
-  @@index([fileRequestId])
 }
 
 enum TaskStatus {
@@ -1331,27 +849,6 @@ model TaskAssignment {
   @@index([sessionId])
 }
 
-enum FileRequestTarget {
-  SPEAKER
-  SUBMISSION
-}
-
-model FileRequest {
-  id               String            @id @default(cuid())
-  eventId          String
-  event            Event             @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  title            String // "Upload Presentation Slides"
-  instructionsHtml String?
-  target           FileRequestTarget
-  createdAt        DateTime          @default(now())
-
-  taskDefinitions TaskDefinition[]
-  files           File[]
-
-  @@unique([id, eventId])
-  @@index([eventId])
-}
-
 enum FileKind {
   HEADSHOT
   SLIDES
@@ -1382,8 +879,6 @@ model File {
   // What the file is attached to (any may be null).
   sessionId        String?
   session          Session?        @relation("SessionFiles", fields: [sessionId], references: [id], onDelete: SetNull)
-  fileRequestId    String?
-  fileRequest      FileRequest?    @relation(fields: [fileRequestId], references: [id], onDelete: SetNull)
   taskAssignmentId String?
   taskAssignment   TaskAssignment? @relation("TaskFiles", fields: [taskAssignmentId], references: [id], onDelete: SetNull)
 
@@ -1391,27 +886,28 @@ model File {
 
   // Reverse links for typed usages
   eventLogoOf       Event?           @relation("EventLogo")
-  eventBackgroundOf Event?           @relation("EventBackground")
   speakerHeadshotOf Speaker?         @relation("SpeakerHeadshot")
   sessionCoverOf    Session?         @relation("SessionCoverImage")
   formFieldValues   FormFieldValue[]
-  reviewScores      ReviewScore[]    @relation("ReviewScoreFile")
 
   @@index([eventId])
   @@index([sessionId])
-  @@index([fileRequestId])
   @@index([taskAssignmentId])
   @@index([uploadedBySpeakerId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// EMAILS — templates, reminder rules, send log. Calendar invites are ICS
-// attachments on SCHEDULE_INVITE emails; Session.icsSequence handles updates.
+// EMAILS — templates and reminder schedules are HARD-CODED IN THE APP, not in
+// the database (no EmailTemplate / ReminderRule tables). Each EmailKind maps
+// to a React-email/template function; reminders run on fixed offsets (task
+// due: 3 days + 1 day before, then overdue; CFP draft: 3 days + 1 day before
+// Form.closesAt). Only the transactional outbox below is persisted.
+// Calendar invites are ICS attachments; Session.icsSequence handles updates.
 // ═════════════════════════════════════════════════════════════════════════════
 
-enum EmailTemplateKey {
+// Which hard-coded template rendered this message.
+enum EmailKind {
   SUBMISSION_CONFIRMATION // sent to submitter after CFP submit
-  SUBMISSION_UPDATED      // sent when submitter edits a submission
   DECISION_ACCEPTED       // acceptance email (stamps Session.notifiedAt)
   DECISION_DECLINED
   TASK_ASSIGNED
@@ -1420,70 +916,6 @@ enum EmailTemplateKey {
   SCHEDULE_INVITE         // calendar invite (ICS REQUEST) when session is scheduled
   SCHEDULE_UPDATE         // ICS REQUEST with bumped SEQUENCE when a session moves
   SCHEDULE_CANCEL         // ICS CANCEL when a session is unscheduled/withdrawn
-  CUSTOM
-}
-
-enum TemplateStatus {
-  ENABLED
-  DISABLED
-}
-
-model EmailTemplate {
-  id      String           @id @default(cuid())
-  eventId String
-  event   Event            @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  key     EmailTemplateKey
-  name    String
-  status  TemplateStatus   @default(ENABLED)
-  subject String
-  // Handlebars-style body: {{speaker.firstName}}, {{session.title}},
-  // {{event.name}}, {{task.dueAt}}, {{portalUrl}}...
-  bodyHtml String
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  reminderRules ReminderRule[]
-  messages      EmailMessage[]
-
-  @@unique([eventId, key, name])
-  @@index([eventId])
-}
-
-enum ReminderTrigger {
-  TASK_DUE         // daysOffset before TaskAssignment.dueAt
-  TASK_OVERDUE     // daysOffset after TaskAssignment.dueAt
-  DRAFT_INCOMPLETE // daysOffset before Form.closesAt, to holders of DRAFT responses
-}
-
-// Scheduled automation: a cron scans rules and enqueues EmailMessages.
-// Idempotency comes from EmailMessage.dedupeKey (unique insert wins), e.g.
-//   "reminder:{ruleId}:{taskAssignmentId}:{yyyy-mm-dd}"
-//   "reminder:{ruleId}:{formResponseId}:{yyyy-mm-dd}"
-// Two concurrent cron workers cannot double-send.
-model ReminderRule {
-  id         String          @id @default(cuid())
-  eventId    String
-  event      Event           @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  templateId String
-  template   EmailTemplate   @relation(fields: [templateId], references: [id], onDelete: Cascade)
-  trigger    ReminderTrigger
-  daysOffset Int             @default(1)
-  status     RuleStatus      @default(ENABLED)
-  // TASK_* triggers: scope to one task definition (null = all with due dates).
-  taskDefinitionId String?
-  taskDefinition   TaskDefinition? @relation(fields: [taskDefinitionId], references: [id], onDelete: Cascade)
-  // DRAFT_INCOMPLETE trigger: which form's drafts (required for that trigger —
-  // an event can run several CFP forms at once).
-  formId String?
-  form   Form?   @relation(fields: [formId], references: [id], onDelete: Cascade)
-
-  messages EmailMessage[]
-
-  @@index([eventId])
-  @@index([templateId])
-  @@index([taskDefinitionId])
-  @@index([formId])
 }
 
 enum EmailStatus {
@@ -1503,15 +935,16 @@ enum IcsMethod {
 // Transactional outbox + send log — one row per outbound email. A failed
 // message is retried on the SAME row (attemptCount), never re-inserted.
 model EmailMessage {
-  id         String         @id @default(cuid())
-  eventId    String
-  event      Event          @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  templateId String?
-  template   EmailTemplate? @relation(fields: [templateId], references: [id], onDelete: SetNull)
+  id      String    @id @default(cuid())
+  eventId String
+  event   Event     @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  kind    EmailKind
 
-  // Idempotency: unique insert is the dedupe mechanism (see ReminderRule).
-  // Non-reminder sends use keys like "decision:{sessionId}:{speakerId}" or
-  // "ics:{sessionId}:{speakerId}:{icsSequence}".
+  // Idempotency: unique insert is the dedupe mechanism. Examples:
+  //   "reminder:{kind}:{taskAssignmentId}:{yyyy-mm-dd}"
+  //   "decision:{sessionId}:{speakerId}"
+  //   "ics:{sessionId}:{speakerId}:{icsSequence}"
+  // Two concurrent cron workers cannot double-send.
   dedupeKey String @unique
 
   toEmail   String
@@ -1520,8 +953,6 @@ model EmailMessage {
   sessionId String?
   session   Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   // Provenance links for reminder/task/draft emails.
-  reminderRuleId   String?
-  reminderRule     ReminderRule?   @relation(fields: [reminderRuleId], references: [id], onDelete: SetNull)
   taskAssignmentId String?
   taskAssignment   TaskAssignment? @relation(fields: [taskAssignmentId], references: [id], onDelete: SetNull)
   formResponseId   String?
@@ -1544,74 +975,14 @@ model EmailMessage {
   @@index([eventId, status])
   @@index([speakerId])
   @@index([sessionId])
-  @@index([reminderRuleId])
   @@index([taskAssignmentId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// EMBEDS — auto-updating agenda / speaker widgets for the event website.
-// Served by a public token; only ACCEPTED sessions with visibility PUBLIC are
-// exposed (same data source as the public JSON/ICS feeds).
+// EMBEDS — no tables. Public routes render directly from event data (only
+// ACCEPTED sessions with visibility PUBLIC):
+//   /embed/{event.slug}/agenda?groupBy=day|track|room&track=...
+//   /embed/{event.slug}/speakers
+//   /public/{event.slug}/schedule.json | schedule.ics | speakers.json
+// Configuration lives in query params; the event slug is already public.
 // ═════════════════════════════════════════════════════════════════════════════
-
-enum EmbedWidget {
-  AGENDA
-  SESSION_LIST
-  SCHEDULE_ITINERARY
-  SPEAKER_LIST
-  SPEAKER_GALLERY
-}
-
-enum EmbedStatus {
-  ENABLED
-  DISABLED
-}
-
-enum EmbedGroupBy {
-  DAY
-  TRACK
-  ROOM
-}
-
-model Embed {
-  id          String      @id @default(cuid())
-  eventId     String
-  event       Event       @relation(fields: [eventId], references: [id], onDelete: Cascade)
-  name        String
-  widget      EmbedWidget
-  status      EmbedStatus @default(ENABLED)
-  publicToken String      @unique // used in the <script>/iframe embed code
-
-  // Display options (typed, not JSON)
-  showSpeakerPhotos Boolean      @default(true)
-  showTrackColors   Boolean      @default(true)
-  groupBy           EmbedGroupBy @default(DAY)
-
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
-
-  filters EmbedFilter[]
-
-  @@index([eventId])
-}
-
-// Normalized content filters — one row per included track/tag/format, with
-// EXACTLY ONE dimension set per row (CHECK in migration). No rows of a given
-// dimension = no filtering on that dimension. Duplicate rows are prevented by
-// per-dimension partial unique indexes in the migration.
-model EmbedFilter {
-  id       String  @id @default(cuid())
-  embedId  String
-  embed    Embed   @relation(fields: [embedId], references: [id], onDelete: Cascade)
-  trackId  String?
-  track    Track?  @relation(fields: [trackId], references: [id], onDelete: Cascade)
-  tagId    String?
-  tag      Tag?    @relation(fields: [tagId], references: [id], onDelete: Cascade)
-  formatId String?
-  format   Format? @relation(fields: [formatId], references: [id], onDelete: Cascade)
-
-  @@index([embedId])
-  @@index([trackId])
-  @@index([tagId])
-  @@index([formatId])
-}

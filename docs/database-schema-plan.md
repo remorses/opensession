@@ -169,36 +169,30 @@ transcriptions/recordings, sponsors/exhibitors.
      entity field-value tables; the latest submitted response is the source of truth
      for custom fields, and admin tables derive custom columns from distinct names.
 
-5. **Evaluation is round-based** (matches "Evaluation 2.0"): `EvaluationPlan` →
-   `EvaluationRound` (open/close dates, anonymization) → `ScorecardField` (rating with
-   min/max/weight, text, dropdown, yes/no) → `ReviewAssignment` (reviewer × submission ×
-   round, with COI status) → `ReviewScore` per scorecard field. `RoundSession` tracks
-   which submissions advance between rounds.
+5. **Evaluation is one `Review` table** (MVP, Sessionize-style): every `EventMember`
+   (ORGANIZER or REVIEWER) can review every submission — a Yes/Maybe/No `vote`, an
+   optional 1–5 `rating`, and a `comment`, unique per (session, reviewer). The admin
+   table sorts by vote counts and average rating; the organizer then moves submissions
+   to the accept/decline queues. No plans, rounds, scorecards, pools, or assignments.
 
-6. **Agenda = live schedule on `Session` + draft workspaces.** `Session.roomId/
-   scheduleSlotId/startsAt/endsAt` is the live schedule. `AgendaDraft` + `DraftPlacement`
-   stage changes; commit copies placements onto sessions (exactly the public API model).
-   Commits are guarded by **optimistic concurrency**: `Event.scheduleRevision` vs
-   `AgendaDraft.baseScheduleRevision` — a stale draft must rebase, so two drafts can
-   never silently overwrite each other. Conflicts (speaker double-booked, room overlap,
-   speaker unavailable, rule violations) are **computed, never stored**; committing with
-   open conflicts requires explicit confirmation (no waiver table — it cannot represent
-   unary or multi-session conflicts correctly). `SchedulingRule` is a typed enum + scoped
-   int value instead of SessionBoard's opaque JSON config.
+6. **Agenda = the live schedule on `Session`** (`roomId/startsAt/endsAt`), edited
+   directly — no draft workspaces. Conflicts (speaker double-booked, room time overlap)
+   are **computed, never stored**, by two hard-coded always-on checks; the UI warns and
+   asks confirmation. `Format.defaultDurationMinutes` pre-fills `endsAt`.
 
-7. **Portal work items**: `TaskDefinition` targets `SPEAKER` or `SUBMISSION` and can wrap
-   a portal `Form` or a `FileRequest` (source enum `MANUAL | FORM | FILE_REQUEST`).
-   `TaskAssignment` is the per-speaker/per-session instance with status + due date —
-   this feeds the "outstanding onboarding tasks" dashboard directly.
+7. **Portal work items**: `TaskDefinition` targets `SPEAKER` or `SUBMISSION`, source
+   `MANUAL | FORM` (a file request is just a FORM task whose MDX has `<FileUpload>`).
+   `TaskAssignment` is the per-speaker/per-session instance with status + snapshotted
+   due date — this feeds the "outstanding onboarding tasks" dashboard directly.
 
-8. **Emails**: `EmailTemplate` keyed by purpose enum (confirmation, decision accepted/
-   declined, task reminder, draft reminder, schedule/ICS invite), `ReminderRule`
-   (trigger + days offset), `EmailMessage` send log with status and entity links.
-   `Session.icsSequence` supports ICS `SEQUENCE` bumps when a scheduled session moves.
+8. **Emails**: templates and reminder schedules are **hard-coded in the app** (an
+   `EmailKind` enum maps to React-email template functions; task reminders fire 3 days
+   + 1 day before `dueAt`, draft reminders before `Form.closesAt`). Only `EmailMessage`
+   persists — a transactional outbox with `dedupeKey @unique`, retry-on-same-row, and
+   ICS method/sequence snapshots. `Session.icsSequence` supports `SEQUENCE` bumps.
 
-9. **Enums over booleans everywhere** (statuses: form, submission, round, assignment,
-   task, email, embed...). The few remaining booleans are true binary configuration
-   toggles (e.g. `collectParticipants`).
+9. **Enums over booleans and free strings everywhere** (statuses: form, submission,
+   review vote, task, email; visibility; assignment mode; participant role).
 
 ## State machines
 
@@ -207,24 +201,20 @@ Submission (Session.status):
 
                   submitter          admin/routing            admin decision
   ┌───────┐ submit ┌─────────┐   ┌──────────────┐  accept  ┌──────────┐
-  │ DRAFT │ ─────► │ PENDING │ ─►│ ACCEPT_QUEUE │ ───────► │ ACCEPTED │─► stage=SESSION
-  └───────┘        └─────────┘   └──────────────┘  (email, └──────────┘   → schedulable
+  │ DRAFT │ ─────► │ PENDING │ ─►│ ACCEPT_QUEUE │ ───────► │ ACCEPTED │─► schedulable
+  └───────┘        └─────────┘   └──────────────┘  (email, └──────────┘   in agenda
       │                 │  │                        notifiedAt)
       │                 │  └─────►┌───────────────┐ decline ┌──────────┐
       │                 │         │ DECLINE_QUEUE │ ──────► │ DECLINED │
       │                 │         └───────────────┘ (email) └──────────┘
       └────────────── speaker withdraws ──────────────────► WITHDRAWN
 
-Form:        DRAFT → OPEN → CLOSED (auto at closesAt) → ARCHIVED; every save creates an
-             immutable FormVersion, responses pin the version they were filled against
-AgendaDraft: OPEN → COMMITTED (placements copied to sessions, scheduleRevision bumped)
-             | DISCARDED; stale baseScheduleRevision blocks commit until rebase
-Round:       PENDING → OPEN → CLOSED; RoundSession outcome PENDING → ADVANCED | REJECTED
-Assignment:  PENDING → IN_PROGRESS → COMPLETED (or DECLINED / CONFLICT_OF_INTEREST)
-Task:        NOT_STARTED → IN_PROGRESS → SUBMITTED → COMPLETED (OVERDUE derived from dueAt)
-Email:       QUEUED → SENT | FAILED (retried on the same row, deduped by dedupeKey)
+Form:  DRAFT → OPEN → CLOSED (auto at closesAt) → ARCHIVED; every save creates an
+       immutable FormVersion, responses pin the version they were filled against
+Task:  NOT_STARTED → IN_PROGRESS → SUBMITTED → COMPLETED (OVERDUE derived from dueAt)
+Email: QUEUED → SENT | FAILED (retried on the same row, deduped by dedupeKey)
 
-Every Session stage/status change also appends a SessionTransition row (who/when/why)
+Every Session status change also appends a SessionTransition row (who/when/why)
 in the same atomic batch — the full audit trail from submission to agenda.
 ```
 
@@ -235,10 +225,10 @@ in the same atomic batch — the full audit trail from submission to agenda.
   meaning of past submissions. Used forms get `ARCHIVED`, never deleted; historical
   references use `Restrict` so `FormResponse`/`FormFieldValue` rows stay immutable
   evidence. The MDX editor warns when a `name` prop disappears between versions.
-- Conflict detection algorithm: overlap when two placements intersect in time AND share a
-  room, or share a participant, or hit a `SpeakerAvailability` block, or violate an
-  enabled `SchedulingRule`. Personas (attendee-type schedule scoring) are skipped — the
-  brief crossed out AI review and doesn't need schedule scoring.
+- Conflict detection algorithm: two sessions conflict when they intersect in time AND
+  share a room or share a participant. Hard-coded, always on, warnings only. Personas
+  (attendee-type schedule scoring) are skipped — the brief crossed out AI review and
+  doesn't need schedule scoring.
 - File storage is object storage; the `File` row stores `storageKey`, never bytes. The
   event owns files; detaching (session delete, answer delete) is `SetNull` and a
   background job garbage-collects unreferenced rows + bytes.
@@ -363,3 +353,29 @@ Session/SpeakerFieldValue(+Options)) was replaced by **MDX forms** rendered with
 
 Net: schema went from ~55 to ~40 models; the riskiest relational machinery (logic
 rules, option references, question bindings) no longer exists.
+
+# MVP cut (round 4)
+
+Aggressive simplification for the MVP: **48 → 25 models**. Everything cut can come back
+later; nothing cut loses data that the MVP workflows need.
+
+| Cut | Replaced by |
+|---|---|
+| `Level`, `Language`, `Tag` + `SessionTag` | custom MDX fields (`FormFieldValue` KV) if an event wants them; `Track` + `Format` remain the agenda dimensions |
+| `ParticipantRole` table | fixed `CoreRole` enum (`SPEAKER \| MODERATOR`) on `SessionParticipant` |
+| `ScheduleSlot` | free `startsAt/endsAt` + `Format.defaultDurationMinutes` pre-fill |
+| `SpeakerAvailability` | cut; conflict checks cover speaker/room overlap |
+| `EvaluationPlan/Round/RoundReviewer/RoundSession/ScorecardField(+Option)/ReviewAssignment/ReviewScore` (8 models) | one `Review` table: Yes/Maybe/No vote + optional 1–5 rating + comment, unique per (session, reviewer); every EventMember reviews |
+| `AgendaDraft`, `DraftPlacement`, `Event.scheduleRevision` | direct editing of the live schedule with computed conflict warnings |
+| `SchedulingRule` | two hard-coded always-on checks (speaker overlap, room overlap) |
+| `FileRequest` | FORM tasks whose MDX contains `<FileUpload>` |
+| `EmailTemplate`, `ReminderRule` | hard-coded React-email templates keyed by `EmailKind` + fixed reminder offsets (3d + 1d before dueAt/closesAt); `EmailMessage` outbox stays |
+| `Embed`, `EmbedFilter` | public routes `/embed/{slug}/agenda`, `/embed/{slug}/speakers`, `/public/{slug}/schedule.json\|.ics` with query-param config |
+| `FormNotificationRecipient` | hard-coded: notify all event ORGANIZERs on new submission |
+| `Session.stage` (ABSTRACT/SESSION) | derivable from status: ACCEPTED = agenda item |
+| Field trims | Event: eventType, background image. Session: clientSessionId, capacity, ceuCredits. Speaker: salutation, honorific, gender, phone, facebookUrl. Form: per-form submissionLimit, draftPolicy, afterSubmit (hard-coded behavior) |
+
+What deliberately STAYS despite MVP pressure: `FormVersion` (immutable response
+evidence), `SessionTransition` (audit), `EmailMessage.dedupeKey` outbox (no double
+sends), composite tenant-boundary FKs, partial unique indexes, ICS sequence handling —
+these prevent corruption, not features.
