@@ -3,7 +3,7 @@
   "name": "OpenSession",
   "description": "Open-source speaker and session management: CFP forms, abstract review, agenda builder, and a speaker portal.",
   "colors": {
-    "primary": "#38cbdd"
+    "primary": "#5edceb"
   },
   "appearance": {
     "default": "dark"

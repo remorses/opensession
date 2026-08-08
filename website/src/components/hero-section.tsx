@@ -26,7 +26,7 @@ export function HeroSection() {
         className='absolute inset-0 w-full h-full'
         canvasClassName='dark:opacity-60 opacity-40'
         dotStyle='ascii'
-        dotColor='#38cbdd'
+        dotColor='#5edceb'
         dotSize={10}
         chars=' .:-~=session'
       />
