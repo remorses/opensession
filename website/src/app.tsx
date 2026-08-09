@@ -21,9 +21,9 @@ import {
   getDb,
   requireSession,
 } from './db.ts'
-import { libraryOptions, type FieldOption } from './forms/collect-fields.ts'
+import { collectFields, libraryOptions, type FieldOption } from './forms/collect-fields.ts'
 import { loadAgendaSessions, speakerDisplayName } from './lib/agenda-server.ts'
-import { canAccessFile } from './lib/cfp-submission.ts'
+import { canAccessFile, restoreSubmissionValues } from './lib/cfp-submission.ts'
 import {
   eventDayKeys,
   findConflicts,
@@ -35,8 +35,12 @@ import {
 import { getOrCreateCfpDraft, getPublicCfp, type PublicCfpForm } from './lib/cfp-server.ts'
 import {
   coverageBySession,
+  aggregateEvaluationResults,
+  evaluationResultsToCsv,
   progressByReviewer,
-  sessionsToReview,
+  projectAssignedSession,
+  reviewState,
+  sortEvaluationResults,
 } from './lib/reviews.ts'
 import {
   draftValuesFromSpeaker,
@@ -52,7 +56,6 @@ import { parsePortalTasksTab } from './lib/portal.ts'
 import { runCron } from './lib/emails/cron.ts'
 import {
   abstractsToCsv,
-  aggregateReviewStats,
   countSessionsByTab,
   filterSessionsByTab,
   parseAbstractsStatusTab,
@@ -230,26 +233,56 @@ export const app = new Spiceflow()
       )
     }
 
+    const reviewerInvite = invitation.purpose === 'EVALUATION_REVIEWER'
     const orgName = invitation.org?.name ?? 'this organization'
-    const existing = await lookupOrgMember(session.userId, invitation.orgId)
+    const existing = reviewerInvite
+      ? await getDb().query.evaluationReviewer.findFirst({ where: { formId: invitation.formId ?? '', userId: session.userId } })
+      : await lookupOrgMember(session.userId, invitation.orgId)
     const { AcceptInviteButton } = await import('./components/access-tab.tsx')
     return (
       <AuthPage
-        title={`Join ${orgName}`}
+        title={reviewerInvite ? `Review for ${invitation.form?.name ?? orgName}` : `Join ${orgName}`}
         description={
           existing
-            ? 'You are already a member of this organization.'
-            : `${invitation.creator?.name ?? 'An admin'} invited you to join this organization.`
+            ? reviewerInvite ? 'You already accepted this reviewer invitation.' : 'You are already a member of this organization.'
+            : reviewerInvite
+              ? `${invitation.creator?.name ?? 'An organizer'} invited you to review submissions. Sign in with ${invitation.invitedEmail}.`
+              : `${invitation.creator?.name ?? 'An admin'} invited you to join this organization.`
         }
         footer={
           <AcceptInviteButton
             invitationId={invitation.invitationId}
             orgId={invitation.orgId}
+            reviewFormId={reviewerInvite ? invitation.formId : null}
             alreadyMember={Boolean(existing)}
           />
         }
       />
     )
+  })
+
+  // ── Restricted reviewer portal ────────────────────────────────────
+  // These routes are outside /org, so the organizer shell and its loader
+  // data are never rendered or serialized to reviewers.
+
+  .loader('/review/:formId', async ({ params, request }) => loadReviewerRound(request, params.formId))
+  .page({
+    path: '/review/:formId',
+    query: z.object({ tab: z.enum(['to-review', 'my-reviews', 'progress']).optional() }),
+    handler: async ({ query }) => {
+      const { ReviewerDashboard } = await import('./components/reviewer-dashboard.tsx')
+      return <ReviewerDashboard tab={query.tab ?? 'to-review'} />
+    },
+  })
+  .loader('/review/:formId/:reviewId', async ({ params, request }) => {
+    const data = await loadReviewerRound(request, params.formId)
+    const assignment = data.assignments.find((row) => row.id === params.reviewId)
+    if (!assignment) throw json({ error: 'not_found' }, { status: 404 })
+    return { ...data, assignment }
+  })
+  .page('/review/:formId/:reviewId', async () => {
+    const { ReviewerAssignmentPage } = await import('./components/reviewer-dashboard.tsx')
+    return <ReviewerAssignmentPage />
   })
 
   // ── Dashboard resolver ────────────────────────────────────────────
@@ -833,7 +866,6 @@ export const app = new Spiceflow()
     })
 
     const abstracts = rows.map((row) => {
-      const stats = aggregateReviewStats(row.reviews)
       const speakerNames = row.participants.map((p) => {
         const name = [p.speaker?.firstName, p.speaker?.lastName].filter(Boolean).join(' ').trim()
         return name || p.speaker?.email || 'Speaker'
@@ -848,10 +880,6 @@ export const app = new Spiceflow()
         formatName: row.format?.name ?? null,
         speakerNames,
         formName: submittedResponse?.form?.name ?? null,
-        avgRating: stats.avgRating,
-        yes: stats.yes,
-        maybe: stats.maybe,
-        no: stats.no,
         notifiedAt: row.notifiedAt,
         submittedAt: row.submittedAt,
       }
@@ -892,8 +920,7 @@ export const app = new Spiceflow()
     },
   })
 
-  .loader('/org/:orgId/e/:eventId/abstracts/:sessionId', async ({ params, request }) => {
-    const sessionUser = await getSession(request)
+  .loader('/org/:orgId/e/:eventId/abstracts/:sessionId', async ({ params }) => {
     const db = getDb()
     const found = await db.query.eventSession.findFirst({
       where: { id: params.sessionId, eventId: params.eventId, kind: 'CONTENT' },
@@ -905,7 +932,7 @@ export const app = new Spiceflow()
           orderBy: { sortOrder: 'asc' },
         },
         reviews: {
-          with: { reviewer: true },
+          with: { reviewer: true, form: true, response: { with: { fieldValues: true } } },
           orderBy: { updatedAt: 'desc' },
         },
         formResponses: {
@@ -950,17 +977,15 @@ export const app = new Spiceflow()
 
     const reviews = found.reviews.map((review) => ({
       id: review.id,
-      vote: review.vote,
-      rating: review.rating,
-      comment: review.comment,
       reviewerId: review.reviewerId,
       reviewerName: review.reviewer?.name?.trim() || review.reviewer?.email || 'Reviewer',
       reviewerEmail: review.reviewer?.email ?? '',
+      roundName: review.form?.name ?? 'Evaluation',
+      state: reviewState({ recusedAt: review.recusedAt, responseStatus: review.response?.status ?? null }),
+      recusalReason: review.recusalReason,
+      values: review.response?.fieldValues.map((value) => ({ name: value.name, value: value.value })) ?? [],
       updatedAt: review.updatedAt,
     }))
-    const myReviewRow = sessionUser
-      ? found.reviews.find((r) => r.reviewerId === sessionUser.userId)
-      : null
 
     return {
       session: {
@@ -986,13 +1011,6 @@ export const app = new Spiceflow()
         jobTitle: p.speaker?.jobTitle ?? null,
       })),
       reviews,
-      myReview: myReviewRow
-        ? {
-            vote: myReviewRow.vote,
-            rating: myReviewRow.rating,
-            comment: myReviewRow.comment,
-          }
-        : null,
       fieldValues,
     }
   })
@@ -1030,7 +1048,6 @@ export const app = new Spiceflow()
       orderBy: { submittedAt: 'desc', createdAt: 'desc' },
     })
     const abstracts = rows.map((row) => {
-      const stats = aggregateReviewStats(row.reviews)
       const speakerNames = row.participants.map((p) => {
         const name = [p.speaker?.firstName, p.speaker?.lastName].filter(Boolean).join(' ').trim()
         return name || p.speaker?.email || 'Speaker'
@@ -1044,10 +1061,6 @@ export const app = new Spiceflow()
         formatName: row.format?.name ?? null,
         speakerNames,
         formName: submittedResponse?.form?.name ?? null,
-        avgRating: stats.avgRating,
-        yes: stats.yes,
-        maybe: stats.maybe,
-        no: stats.no,
         notifiedAt: row.notifiedAt,
         submittedAt: row.submittedAt,
       }
@@ -1161,9 +1174,21 @@ export const app = new Spiceflow()
     const sessionUser = await getSession(request)
     if (!sessionUser) throw redirect('/login')
     const db = getDb()
-    const [sessions, allReviews, myReviews] = await db.batch([
+    const [rounds, sessions, assignments, invitations] = await db.batch([
+      db.query.form.findMany({
+        where: { eventId: params.eventId, purpose: 'EVALUATION' },
+        with: {
+          versions: { orderBy: { createdAt: 'desc', id: 'desc' } },
+          evaluationReviewers: { with: { user: true } },
+        },
+        orderBy: { createdAt: 'asc' },
+      }),
       db.query.eventSession.findMany({
-        where: { eventId: params.eventId, kind: 'CONTENT' },
+        where: {
+          eventId: params.eventId,
+          kind: 'CONTENT',
+          status: { in: ['PENDING', 'ACCEPT_QUEUE', 'ACCEPTED', 'DECLINE_QUEUE', 'DECLINED'] },
+        },
         with: {
           track: true,
           format: true,
@@ -1176,10 +1201,11 @@ export const app = new Spiceflow()
       }),
       db.query.review.findMany({
         where: { eventId: params.eventId },
-        with: { reviewer: true },
+        with: { reviewer: true, response: { with: { fieldValues: true } } },
       }),
-      db.query.review.findMany({
-        where: { eventId: params.eventId, reviewerId: sessionUser.userId },
+      db.query.orgInvitation.findMany({
+        where: { eventId: params.eventId, purpose: 'EVALUATION_REVIEWER' },
+        orderBy: { createdAt: 'desc' },
       }),
     ] as const)
 
@@ -1197,38 +1223,90 @@ export const app = new Spiceflow()
         formatName: row.format?.name ?? null,
       }
     })
-
-    const myReviewedIds = new Set(myReviews.map((r) => r.sessionId))
-    const toReview = sessionsToReview(sessionRows, myReviewedIds)
-    const myReviewRows = []
-    for (const review of myReviews) {
-      const session = sessionRows.find((s) => s.id === review.sessionId)
-      if (!session) continue
-      myReviewRows.push({
-        ...session,
-        vote: review.vote,
-        rating: review.rating,
-        comment: review.comment,
-      })
-    }
-
     return {
-      toReview,
-      myReviews: myReviewRows,
-      reviewerProgress: progressByReviewer(allReviews),
-      sessionCoverage: coverageBySession(sessionRows, allReviews),
+      sessions: sessionRows,
+      rounds: rounds.map((round) => {
+        const version = round.versions[0] ?? null
+        const fields = version
+          ? collectFields({ mdxSource: version.mdxSource, scope: { values: {} } }).fields
+          : []
+        const roundAssignments = assignments
+          .filter((assignment) => assignment.formId === round.id)
+          .map((assignment) => ({
+            ...assignment,
+            response: assignment.response
+              ? {
+                  status: assignment.response.status,
+                  values: restoreSubmissionValues({ rows: assignment.response.fieldValues, participantSpeakerIds: [] }).values,
+                }
+              : null,
+          }))
+        return {
+          id: round.id,
+          name: round.name,
+          status: round.status,
+          opensAt: round.opensAt,
+          closesAt: round.closesAt,
+          blind: round.blind,
+          mdxSource: version?.mdxSource ?? '',
+          fields,
+          reviewers: round.evaluationReviewers.flatMap((membership) => membership.user ? [{
+            id: membership.userId,
+            name: membership.user.name,
+            email: membership.user.email,
+          }] : []),
+          invitations: invitations.filter((invitation) => invitation.formId === round.id).map((invitation) => ({
+            id: invitation.invitationId,
+            email: invitation.invitedEmail ?? '',
+            expiresAt: invitation.expiresAt,
+          })),
+          assignments: roundAssignments.map((assignment) => ({
+            id: assignment.id,
+            sessionId: assignment.sessionId,
+            reviewerId: assignment.reviewerId,
+            state: reviewState({ recusedAt: assignment.recusedAt, responseStatus: assignment.response?.status ?? null }),
+          })),
+          progress: progressByReviewer(roundAssignments),
+          coverage: coverageBySession(sessionRows, roundAssignments),
+          results: aggregateEvaluationResults({ sessions: sessionRows, fields, assignments: roundAssignments }),
+        }
+      }),
     }
   })
 
   .page({
     path: '/org/:orgId/e/:eventId/evaluation',
     query: z.object({
-      tab: z.enum(['to-review', 'my-reviews', 'progress']).optional(),
+      tab: z.enum(['rounds', 'reviewers', 'assignments', 'progress', 'results']).optional(),
     }),
     handler: async ({ query }) => {
       const { EvaluationPage } = await import('./components/evaluation-page.tsx')
-      return <EvaluationPage tab={query.tab ?? 'to-review'} />
+      return <EvaluationPage tab={query.tab ?? 'rounds'} />
     },
+  })
+
+  .get('/org/:orgId/e/:eventId/evaluation/:formId/results.csv', async ({ params, request }) => {
+    const sessionUser = await requireSession(request)
+    const member = await lookupOrgMember(sessionUser.userId, params.orgId)
+    if (!member) return new Response('Forbidden', { status: 403 })
+    const db = getDb()
+    const [event, form, sessions, assignments] = await db.batch([
+      db.query.event.findFirst({ where: { id: params.eventId, orgId: params.orgId } }),
+      db.query.form.findFirst({ where: { id: params.formId, eventId: params.eventId, purpose: 'EVALUATION' }, with: { versions: { orderBy: { createdAt: 'desc', id: 'desc' } } } }),
+      db.query.eventSession.findMany({ where: { eventId: params.eventId, kind: 'CONTENT' } }),
+      db.query.review.findMany({ where: { eventId: params.eventId, formId: params.formId }, with: { reviewer: true, response: { with: { fieldValues: true } } } }),
+    ] as const)
+    if (!event || !form?.versions[0]) return new Response('Not found', { status: 404 })
+    const fields = collectFields({ mdxSource: form.versions[0].mdxSource, scope: { values: {} } }).fields
+    const normalized = assignments.map((assignment) => ({
+      ...assignment,
+      response: assignment.response ? {
+        status: assignment.response.status,
+        values: restoreSubmissionValues({ rows: assignment.response.fieldValues, participantSpeakerIds: [] }).values,
+      } : null,
+    }))
+    const csv = evaluationResultsToCsv(aggregateEvaluationResults({ sessions, fields, assignments: normalized }), fields)
+    return new Response(csv, { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="evaluation-${params.formId}.csv"` } })
   })
 
   // ── Agenda (?view=list|day|week|rooms|conflicts&day=YYYY-MM-DD) ───
@@ -1467,6 +1545,97 @@ export const app = new Spiceflow()
   .use(holocronApp)
 
 // ── Event page helpers ──────────────────────────────────────────────
+
+async function loadReviewerRound(request: Request, formId: string) {
+  const sessionUser = await requireSession(request)
+  const db = getDb()
+  const membership = await db.query.evaluationReviewer.findFirst({
+    where: { formId, userId: sessionUser.userId },
+  })
+  if (!membership) throw json({ error: 'not_found' }, { status: 404 })
+  const [form, rows] = await db.batch([
+    db.query.form.findFirst({
+      where: { id: formId, eventId: membership.eventId, purpose: 'EVALUATION' },
+      with: { event: true, versions: { orderBy: { createdAt: 'desc', id: 'desc' } } },
+    }),
+    db.query.review.findMany({
+      where: { eventId: membership.eventId, formId, reviewerId: sessionUser.userId },
+      with: {
+        response: { with: { fieldValues: true, formVersion: true } },
+        session: {
+          with: {
+            track: true,
+            format: true,
+            participants: { with: { speaker: true }, orderBy: { sortOrder: 'asc' } },
+            formResponses: {
+              where: { status: 'SUBMITTED' },
+              with: { fieldValues: true, form: true },
+              orderBy: { submittedAt: 'desc', createdAt: 'desc' },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    }),
+  ] as const)
+  if (!form?.event || !form.versions[0]) throw json({ error: 'not_found' }, { status: 404 })
+  const currentVersion = form.versions[0]
+  const assignments = rows.flatMap((row) => {
+    if (!row.session) return []
+    const responseValues = row.response
+      ? restoreSubmissionValues({ rows: row.response.fieldValues, participantSpeakerIds: [] }).values
+      : {}
+    const submission = row.session.formResponses.find((response) => response.form?.purpose === 'CFP')
+      ?? row.session.formResponses[0]
+    const projected = projectAssignedSession({
+      id: row.session.id,
+      title: row.session.title,
+      description: row.session.description,
+      trackName: row.session.track?.name ?? null,
+      formatName: row.session.format?.name ?? null,
+      participants: row.session.participants.flatMap((participant) => participant.speaker ? [{
+        role: participant.role,
+        firstName: participant.speaker.firstName,
+        lastName: participant.speaker.lastName,
+        email: participant.speaker.email,
+        companyName: participant.speaker.companyName,
+        jobTitle: participant.speaker.jobTitle,
+        headshotFileId: participant.speaker.headshotFileId,
+      }] : []),
+      fieldValues: submission?.fieldValues.map((value) => ({
+        name: value.name,
+        value: value.value,
+        subjectSpeakerId: value.subjectSpeakerId,
+      })) ?? [],
+    }, form.blind)
+    return [{
+      id: row.id,
+      session: projected,
+      state: reviewState({ recusedAt: row.recusedAt, responseStatus: row.response?.status ?? null }),
+      recusalReason: row.recusalReason,
+      responseStatus: row.response?.status ?? null,
+      values: responseValues,
+      mdxSource: row.response?.formVersion?.mdxSource ?? currentVersion.mdxSource,
+    }]
+  })
+  return {
+    event: { name: form.event.name, slug: form.event.slug },
+    round: {
+      id: form.id,
+      name: form.name,
+      status: form.status,
+      opensAt: form.opensAt,
+      closesAt: form.closesAt,
+      blind: form.blind,
+    },
+    assignments,
+    progress: {
+      assigned: assignments.length,
+      completed: assignments.filter((row) => row.state === 'COMPLETED').length,
+      recused: assignments.filter((row) => row.state === 'RECUSED').length,
+    },
+  }
+}
 
 /** Map a form row (with its responses relation) to the list-row shape the
  *  forms/portal-forms tables render: response rows collapse to counts. */

@@ -1,4 +1,4 @@
-// Transactional email templates for all 9 EmailKinds (pure — no DB, no env).
+// Transactional email templates for every EmailKind (pure — no DB, no env).
 //
 // Plain HTML template strings on purpose. React/JSX rendering is impossible
 // here: react-dom/server is unavailable under the react-server condition, and
@@ -26,6 +26,8 @@ export type EmailKind =
   | 'SCHEDULE_INVITE'
   | 'SCHEDULE_UPDATE'
   | 'SCHEDULE_CANCEL'
+  | 'REVIEWER_INVITE'
+  | 'REVIEW_REMINDER'
 
 export type BuiltEmail = { subject: string; html: string; text: string }
 
@@ -225,6 +227,9 @@ export type ScheduleData = {
   roomName?: string | null
 }
 
+export type ReviewerInviteData = { roundName: string; inviteUrl: string }
+export type ReviewReminderData = { roundName: string; reviewUrl: string; pendingCount: number; closesAt: number | null }
+
 export type EmailPayload =
   | { kind: 'SUBMISSION_CONFIRMATION'; context: EmailContext; data: SubmissionConfirmationData }
   | { kind: 'DECISION_ACCEPTED'; context: EmailContext; data: DecisionData }
@@ -235,6 +240,8 @@ export type EmailPayload =
   | { kind: 'SCHEDULE_INVITE'; context: EmailContext; data: ScheduleData }
   | { kind: 'SCHEDULE_UPDATE'; context: EmailContext; data: ScheduleData }
   | { kind: 'SCHEDULE_CANCEL'; context: EmailContext; data: ScheduleData }
+  | { kind: 'REVIEWER_INVITE'; context: EmailContext; data: ReviewerInviteData }
+  | { kind: 'REVIEW_REMINDER'; context: EmailContext; data: ReviewReminderData }
 
 /** Single entry point: send.ts never picks a builder by hand. */
 export function buildEmail(payload: EmailPayload): BuiltEmail {
@@ -257,6 +264,10 @@ export function buildEmail(payload: EmailPayload): BuiltEmail {
       return buildScheduleUpdate(payload.context, payload.data)
     case 'SCHEDULE_CANCEL':
       return buildScheduleCancel(payload.context, payload.data)
+    case 'REVIEWER_INVITE':
+      return buildReviewerInvite(payload.context, payload.data)
+    case 'REVIEW_REMINDER':
+      return buildReviewReminder(payload.context, payload.data)
   }
 }
 
@@ -484,6 +495,34 @@ export function buildScheduleCancel(
     text: [
       `"${data.sessionTitle}" was taken off the ${context.eventName} schedule and the calendar entry is cancelled.`,
       `If this is a surprise, reply here and we will sort it out.`,
+    ],
+  })
+}
+
+export function buildReviewerInvite(context: EmailContext, data: ReviewerInviteData): BuiltEmail {
+  return compose(context, `Review submissions for ${context.eventName}`, {
+    html: [
+      paragraph(`you were invited to join the <strong>${escapeHtml(data.roundName)}</strong> reviewer pool for ${escapeHtml(context.eventName)}.`),
+      paragraph(`Accept the invitation with the Google account that received this email: ${link(data.inviteUrl, data.inviteUrl)}`),
+    ],
+    text: [
+      `you were invited to join the "${data.roundName}" reviewer pool for ${context.eventName}.`,
+      `Accept the invitation with the Google account that received this email:\n${data.inviteUrl}`,
+    ],
+  })
+}
+
+export function buildReviewReminder(context: EmailContext, data: ReviewReminderData): BuiltEmail {
+  const deadline = data.closesAt == null ? '' : ` The round closes ${formatEventDate(data.closesAt, context.timezone)}.`
+  const count = `${data.pendingCount} review${data.pendingCount === 1 ? '' : 's'}`
+  return compose(context, `Reminder: ${count} left for ${data.roundName}`, {
+    html: [
+      paragraph(`you still have <strong>${count}</strong> to finish in ${escapeHtml(data.roundName)}.${escapeHtml(deadline)}`),
+      paragraph(link(data.reviewUrl, data.reviewUrl)),
+    ],
+    text: [
+      `you still have ${count} to finish in ${data.roundName}.${deadline}`,
+      data.reviewUrl,
     ],
   })
 }

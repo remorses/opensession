@@ -446,6 +446,7 @@ export async function savePortalProfile({
   const queries: [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]] = [
     db.insert(schema.formResponse).values({
       id: responseId,
+      eventId,
       formId: form.id,
       formVersionId: version.id,
       speakerId: ctx.speaker.id,
@@ -574,6 +575,7 @@ export async function submitPortalFormTask({
   const queries: [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]] = [
     db.insert(schema.formResponse).values({
       id: responseId,
+      eventId,
       formId: form.id,
       formVersionId: loaded.formVersion.id,
       speakerId: ctx.speaker.id,

@@ -1,5 +1,5 @@
 // Pure session status transitions, queue helpers, status-tab filters, and
-// review aggregation for the Abstracts / Evaluation admin flows.
+// CSV export for the Abstracts admin flow.
 // notifiedAt is stamped by notifyQueue only after the decision email reaches
 // SENT, never at enqueue time — see actions.tsx.
 
@@ -186,43 +186,6 @@ export function countSessionsByTab(
   return counts
 }
 
-export type ReviewVote = 'YES' | 'MAYBE' | 'NO'
-
-export type ReviewStats = {
-  total: number
-  yes: number
-  maybe: number
-  no: number
-  /** Average of non-null ratings, or null when none rated. */
-  avgRating: number | null
-}
-
-export function aggregateReviewStats(
-  reviews: Array<{ vote: ReviewVote; rating: number | null }>,
-): ReviewStats {
-  let yes = 0
-  let maybe = 0
-  let no = 0
-  let ratingSum = 0
-  let ratingCount = 0
-  for (const review of reviews) {
-    if (review.vote === 'YES') yes += 1
-    else if (review.vote === 'MAYBE') maybe += 1
-    else no += 1
-    if (review.rating != null) {
-      ratingSum += review.rating
-      ratingCount += 1
-    }
-  }
-  return {
-    total: reviews.length,
-    yes,
-    maybe,
-    no,
-    avgRating: ratingCount === 0 ? null : ratingSum / ratingCount,
-  }
-}
-
 /** Case-insensitive substring match across title + speaker names + track/format. */
 export function sessionMatchesQuery(
   session: {
@@ -260,10 +223,6 @@ export function abstractsToCsv(
     formatName: string | null
     speakerNames: string[]
     formName: string | null
-    avgRating: number | null
-    yes: number
-    maybe: number
-    no: number
     notifiedAt: number | null
     submittedAt: number | null
   }>,
@@ -275,10 +234,6 @@ export function abstractsToCsv(
     'format',
     'speakers',
     'form',
-    'avg_rating',
-    'yes',
-    'maybe',
-    'no',
     'notified_at',
     'submitted_at',
   ].join(',')
@@ -290,10 +245,6 @@ export function abstractsToCsv(
       csvEscape(row.formatName),
       csvEscape(row.speakerNames.join('; ')),
       csvEscape(row.formName),
-      csvEscape(row.avgRating == null ? '' : row.avgRating.toFixed(2)),
-      csvEscape(row.yes),
-      csvEscape(row.maybe),
-      csvEscape(row.no),
       csvEscape(row.notifiedAt),
       csvEscape(row.submittedAt),
     ].join(','),

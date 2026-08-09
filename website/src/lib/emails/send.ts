@@ -52,6 +52,9 @@ export const dedupeKeys = {
     `reminder:draft:${formResponseId}:${day}`,
   ics: (sessionId: string, speakerId: string, sequence: number) =>
     `ics:${sessionId}:${speakerId}:${sequence}`,
+  reviewerInvite: (invitationId: string) => `reviewer-invite:${invitationId}`,
+  reviewReminder: (formId: string, reviewerId: string, day: string) =>
+    `reminder:review:${formId}:${reviewerId}:${day}`,
 } as const
 
 /** `YYYY-MM-DD` in the event's timezone, so "one reminder per day" means the

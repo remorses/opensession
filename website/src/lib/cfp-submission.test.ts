@@ -167,10 +167,7 @@ describe('validatePinnedSubmission', () => {
       {
         "fields": [
           {
-            "maxLength": undefined,
-            "multiple": undefined,
             "name": "title",
-            "options": undefined,
             "participantScope": false,
             "required": true,
             "type": "text",

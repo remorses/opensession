@@ -30,7 +30,7 @@ export type FormListRow = {
   name: string
   slug: string
   status: FormStatus
-  purpose: 'CFP' | 'PORTAL'
+  purpose: 'CFP' | 'PORTAL' | 'EVALUATION'
   target: 'SUBMISSION' | 'SPEAKER'
   closesAt: number | null
   createdAt: number

@@ -40,13 +40,17 @@ export type FormSubmission = { values: ValuesRecord; participants: ValuesRecord[
 
 export type FieldOption = { value: string; label: string }
 
-export type FieldType = 'text' | 'richtext' | 'select' | 'checkbox' | 'radio' | 'file'
+export type FieldType = 'text' | 'richtext' | 'number' | 'select' | 'checkbox' | 'radio' | 'file'
 
 export type CollectedField = {
   name: string
   type: FieldType
   required: boolean
   maxLength?: number
+  /** Number only: accepted range and weighted aggregate metadata. */
+  min?: number
+  max?: number
+  weight?: number
   /** Select only: multiple values allowed (submitted as string[]). */
   multiple?: boolean
   /** Select/Radio: allowed option values (normalized). */
@@ -119,9 +123,12 @@ function fieldCollector(type: FieldType) {
       name: typeof props.name === 'string' ? props.name : '',
       type,
       required: Boolean(props.required),
-      maxLength: typeof props.maxLength === 'number' && props.maxLength > 0 ? props.maxLength : undefined,
-      multiple: type === 'select' ? Boolean(props.multiple) || undefined : undefined,
-      options: type === 'select' || type === 'radio' ? normalizeOptions(props.options) : undefined,
+      ...(typeof props.maxLength === 'number' && props.maxLength > 0 ? { maxLength: props.maxLength } : {}),
+      ...(type === 'number' && typeof props.min === 'number' ? { min: props.min } : {}),
+      ...(type === 'number' && typeof props.max === 'number' ? { max: props.max } : {}),
+      ...(type === 'number' && typeof props.weight === 'number' && props.weight > 0 ? { weight: props.weight } : {}),
+      ...(type === 'select' ? { multiple: Boolean(props.multiple) || undefined } : {}),
+      ...(type === 'select' || type === 'radio' ? { options: normalizeOptions(props.options) } : {}),
     },
   })
 }
@@ -136,6 +143,7 @@ function toPositiveInt(value: unknown, fallback: number): number {
 const collectorComponents: Record<string, (props: any) => Marker | null> = {
   TextField: fieldCollector('text'),
   RichText: fieldCollector('richtext'),
+  Number: fieldCollector('number'),
   Select: fieldCollector('select'),
   Checkbox: fieldCollector('checkbox'),
   Radio: fieldCollector('radio'),

@@ -173,7 +173,7 @@ export function FormEditorPage() {
   return (
     <div className="flex flex-col gap-4">
       <Link
-        href={`/org/${currentOrgId}/e/${event.id}/${form.purpose === 'PORTAL' ? 'portal-forms' : 'forms'}`}
+        href={`/org/${currentOrgId}/e/${event.id}/${form.purpose === 'PORTAL' ? 'portal-forms' : form.purpose === 'EVALUATION' ? 'evaluation' : 'forms'}`}
         className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground no-underline transition-colors hover:text-foreground"
       >
         <ArrowLeftIcon className="size-3.5" />
@@ -187,7 +187,11 @@ export function FormEditorPage() {
             <FormStatusBadge status={form.status} />
           </div>
           <p className="text-sm text-muted-foreground">
-            {form.purpose === 'CFP' ? 'CFP form' : `Portal form · ${form.target.toLowerCase()} target`}
+            {form.purpose === 'CFP'
+              ? 'CFP form'
+              : form.purpose === 'EVALUATION'
+                ? 'Evaluation form'
+                : `Portal form · ${form.target.toLowerCase()} target`}
             {' · '}
             {submitted} submission{submitted === 1 ? '' : 's'} · {drafts} draft{drafts === 1 ? '' : 's'}
             {form.closesAt ? ` · closes ${formatDateTimeUTC(form.closesAt)}` : ''}
@@ -394,9 +398,11 @@ type FormRow = {
   name: string
   slug: string
   status: 'DRAFT' | 'OPEN' | 'CLOSED' | 'ARCHIVED'
-  purpose: 'CFP' | 'PORTAL'
+  purpose: 'CFP' | 'PORTAL' | 'EVALUATION'
   target: 'SUBMISSION' | 'SPEAKER'
+  opensAt: number | null
   closesAt: number | null
+  blind: boolean
 }
 
 function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
@@ -426,11 +432,14 @@ function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
               className="flex flex-col gap-3"
               action={async (formData: FormData) => {
                 const closesAtRaw = String(formData.get('closesAt') ?? '').trim()
+                const opensAtRaw = String(formData.get('opensAt') ?? '').trim()
                 const statusValue = formData.get('status')
                 // datetime-local values parse as LOCAL time — the admin's
                 // wall clock, stored as epoch ms.
                 const closesAt = closesAtRaw ? Date.parse(closesAtRaw) : null
+                const opensAt = opensAtRaw ? Date.parse(opensAtRaw) : null
                 if (closesAtRaw && Number.isNaN(closesAt)) throw new Error('Invalid deadline')
+                if (opensAtRaw && Number.isNaN(opensAt)) throw new Error('Invalid open date')
                 await updateFormSettings({
                   orgId,
                   eventId,
@@ -442,6 +451,8 @@ function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
                       ? statusValue
                       : 'DRAFT',
                   closesAt,
+                  opensAt,
+                  blind: form.purpose === 'EVALUATION' ? formData.get('blind') === 'on' : false,
                 })
                 setSaved(true)
                 setTimeout(() => setSaved(false), 1500)
@@ -473,6 +484,14 @@ function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
                 </NativeSelect>
               </label>
               <label className="flex flex-col gap-1.5 text-sm font-medium">
+                Opens at
+                <Input
+                  name="opensAt"
+                  type="datetime-local"
+                  defaultValue={form.opensAt ? epochToDateTimeLocalInput(form.opensAt) : ''}
+                />
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium">
                 Closes at
                 <Input
                   name="closesAt"
@@ -480,6 +499,12 @@ function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
                   defaultValue={form.closesAt ? epochToDateTimeLocalInput(form.closesAt) : ''}
                 />
               </label>
+              {form.purpose === 'EVALUATION' ? (
+                <label className="flex items-center gap-2 text-sm font-medium">
+                  <input name="blind" type="checkbox" defaultChecked={form.blind} />
+                  Hide speaker identity from reviewers
+                </label>
+              ) : null}
               <div className="flex gap-6 text-sm">
                 <span className="flex flex-col gap-0.5">
                   <span className="font-medium">Purpose</span>

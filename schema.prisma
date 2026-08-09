@@ -23,7 +23,8 @@
 // CHECK constraints:
 //   session:      status = 'DRAFT' OR length(trim(title)) > 0
 //   session:      (starts_at IS NULL AND ends_at IS NULL) OR ends_at > starts_at
-//   review:       rating IS NULL OR rating BETWEEN 1 AND 5
+//   form_response: exactly one of speaker_id / review_id is set
+//   review:       recusal timestamp and non-empty reason are both set or both null
 //   lifecycle enums: CHECK(col IN (...)) on all status columns (drizzle
 //                    text enums are TypeScript-only; SQLite needs the CHECK)
 // Composite FKs on NULLABLE columns (Prisma forbids mixed required/optional
@@ -87,6 +88,7 @@ model User {
   invitationsCreated OrgInvitation[]
   speakerIdentities Speaker[] // linked speaker rows across events
   reviews           Review[]
+  evaluationMemberships EvaluationReviewer[]
 
   @@map("user")
 }
@@ -197,21 +199,31 @@ model OrgMember {
   @@map("org_member")
 }
 
-// Secret invite links (akarso/sigillo-style): anyone with the link can join
-// the org after signing in. No email column — not tied to a specific user.
-// No status column — the row stays valid until expiresAt so a page re-render
-// after accept doesn't show "invalid invitation".
+enum InvitationPurpose {
+  ORG_MEMBER
+  EVALUATION_REVIEWER
+}
+
+// One invitation owner with two outcomes. Org-member links remain shareable;
+// reviewer invitations are email-bound to one evaluation form.
 model OrgInvitation {
   invitationId String        @id @default(cuid())
   orgId        String
   org          Org           @relation(fields: [orgId], references: [orgId], onDelete: Cascade)
+  purpose      InvitationPurpose @default(ORG_MEMBER)
   role         OrgMemberRole @default(member)
+  invitedEmail String?
+  eventId      String?
+  event        Event?        @relation(fields: [eventId, orgId], references: [id, orgId], onDelete: Cascade)
+  formId       String?
+  form         Form?         @relation(fields: [formId, eventId], references: [id, eventId], onDelete: Cascade)
   createdBy    String
   creator      User          @relation(fields: [createdBy], references: [id], onDelete: Cascade)
   expiresAt    DateTime
   createdAt    DateTime      @default(now())
 
   @@index([orgId])
+  @@index([formId])
   @@map("org_invitation")
 }
 
@@ -239,6 +251,7 @@ model Event {
   startsAt    DateTime
   endsAt      DateTime
   description String?
+  contactEmail String? // Reply-To for all event mail
   logoFileId  String? @unique
   logoFile    File?   @relation("EventLogo", fields: [logoFileId], references: [id])
 
@@ -254,13 +267,15 @@ model Event {
   taskDefinitions TaskDefinition[]
   files           File[]
   emailMessages   EmailMessage[]
+  evaluationReviewers EvaluationReviewer[]
+  invitations     OrgInvitation[]
 
+  @@unique([id, orgId])
   @@index([orgId])
 }
 
-// NOTE: there is NO per-event membership table. Authorization is org-level
-// (OrgMember): every member of the owning org can manage and review every
-// event of that org. Per-event roles/external reviewers can come back later.
+// Organizer authorization is org-level. Restricted external reviewers use
+// EvaluationReviewer and never receive an OrgMember row.
 
 // ═════════════════════════════════════════════════════════════════════════════
 // EVENT LIBRARY — option sources for dropdowns, agenda dimensions, roles,
@@ -357,6 +372,7 @@ enum CoreRole {
 enum FormPurpose {
   CFP    // public call-for-speakers form; creates a Session (status DRAFT/PENDING)
   PORTAL // assigned to speakers via tasks; fills speaker or submission data
+  EVALUATION // one evaluation round; FormVersion is its scorecard
 }
 
 enum FormTarget {
@@ -385,7 +401,9 @@ model Form {
   // The live MDX is DERIVED: the newest FormVersion (ORDER BY createdAt DESC
   // LIMIT 1). No stored pointer to keep in sync.
 
+  opensAt  DateTime?
   closesAt DateTime? // hard-coded draft reminders fire 3 days and 1 day before
+  blind    Boolean @default(false)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -393,6 +411,9 @@ model Form {
   versions        FormVersion[]
   responses       FormResponse[]
   taskDefinitions TaskDefinition[]
+  evaluationReviewers EvaluationReviewer[]
+  reviewAssignments Review[]
+  invitations OrgInvitation[]
 
   @@unique([eventId, slug]) // slug is per-event ("cfp" can exist in every event)
   @@unique([id, eventId])
@@ -413,6 +434,28 @@ model FormVersion {
   responses FormResponse[]
 
   @@index([formId, createdAt])
+  @@unique([id, formId])
+}
+
+// Per-round reviewer pool and authorization relation. It grants no organizer
+// membership and can be scoped independently for every evaluation form.
+model EvaluationReviewer {
+  id      String @id @default(cuid())
+  eventId String
+  event   Event  @relation(fields: [eventId], references: [id], onDelete: Cascade)
+  formId  String
+  form    Form   @relation(fields: [formId, eventId], references: [id, eventId], onDelete: Cascade)
+  userId  String
+  user    User   @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  assignments Review[]
+
+  @@unique([formId, userId])
+  @@unique([eventId, formId, userId])
+  @@index([userId])
+  @@index([eventId])
+  @@map("evaluation_reviewer")
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -602,6 +645,7 @@ enum ResponseStatus {
 
 model FormResponse {
   id        String         @id @default(cuid())
+  eventId   String
   formId    String
   // Restrict: forms with responses are archived, never deleted — the response
   // record is the immutable evidence of what was submitted.
@@ -612,8 +656,10 @@ model FormResponse {
   formVersion   FormVersion @relation(fields: [formVersionId], references: [id], onDelete: Restrict)
   // Respondent (the portal speaker filling it in). Restrict: anonymize
   // speakers instead of deleting once history exists.
-  speakerId String
-  speaker   Speaker        @relation(fields: [speakerId], references: [id], onDelete: Restrict)
+  speakerId String?
+  speaker   Speaker?       @relation(fields: [speakerId], references: [id], onDelete: Restrict)
+  reviewId  String?        @unique
+  review    Review?        @relation(fields: [reviewId, formId, eventId], references: [id, formId, eventId], onDelete: Cascade)
   // CFP: the Session created by this response. Portal SUBMISSION forms: the
   // session the response is about. Portal SPEAKER forms: null.
   sessionId String?
@@ -632,7 +678,9 @@ model FormResponse {
   @@index([formId, status])
   @@index([formVersionId])
   @@index([speakerId])
+  @@index([eventId])
   @@index([sessionId])
+  @@unique([reviewId, formId, eventId])
 }
 
 // One row per submitted field value. `name` is the component's name prop —
@@ -665,12 +713,10 @@ model FormFieldValue {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
-// EVALUATION — single-round, Sessionize-style quick reviews (MVP). Every
-// member of the owning org can review every submission: a
-// Yes/Maybe/No vote, an optional 1–5 rating, and a comment. No plans, no
-// rounds, no scorecards, no assignments — the admin abstracts table sorts by
-// vote counts and average rating, then the organizer moves submissions to the
-// accept/decline queues.
+// EVALUATION — Form is the round, FormVersion is the immutable scorecard,
+// EvaluationReviewer is the pool, and Review is one assignment. Answers live
+// in FormResponse/FormFieldValue. State is derived from response status or
+// recusedAt, so no duplicate review lifecycle can drift.
 //
 // AGENDA (also MVP-simplified): the live schedule is edited directly on
 // Session.roomId/startsAt/endsAt — no draft workspaces. Conflicts are
@@ -679,30 +725,28 @@ model FormFieldValue {
 // warnings and asks for confirmation; nothing blocks at the DB level.
 // ═════════════════════════════════════════════════════════════════════════════
 
-enum ReviewVote {
-  YES
-  MAYBE
-  NO
-}
-
 model Review {
   id      String @id @default(cuid())
-  eventId String // denormalized: session and reviewer scope share the event
+  eventId String
+  formId  String
+  form    Form @relation(fields: [formId, eventId], references: [id, eventId], onDelete: Cascade)
   sessionId String
   session   Session @relation(fields: [sessionId, eventId], references: [id, eventId], onDelete: Cascade)
   reviewerId String
   reviewer   User   @relation(fields: [reviewerId], references: [id], onDelete: Cascade)
-
-  vote    ReviewVote
-  rating  Int? // optional 1–5 stars (CHECK 1..5 in migration)
-  comment String?
+  poolMembership EvaluationReviewer @relation(fields: [eventId, formId, reviewerId], references: [eventId, formId, userId], onDelete: Cascade)
+  recusedAt DateTime?
+  recusalReason String?
+  response FormResponse?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  @@unique([sessionId, reviewerId]) // one review per reviewer per submission
+  @@unique([formId, sessionId, reviewerId])
+  @@unique([id, formId, eventId])
   @@index([reviewerId])
-  @@index([eventId])
+  @@index([eventId, formId])
+  @@index([sessionId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════
@@ -846,6 +890,8 @@ enum EmailKind {
   SCHEDULE_INVITE         // calendar invite (ICS REQUEST) when session is scheduled
   SCHEDULE_UPDATE         // ICS REQUEST with bumped SEQUENCE when a session moves
   SCHEDULE_CANCEL         // ICS CANCEL when a session is unscheduled/withdrawn
+  REVIEWER_INVITE
+  REVIEW_REMINDER
 }
 
 enum EmailStatus {
@@ -886,10 +932,12 @@ model EmailMessage {
 
   subject  String
   bodyHtml String // rendered snapshot
+  bodyText String?
   // ICS attachment (null = plain email). Sequence is snapshotted from
   // Session.icsSequence at enqueue time.
   icsMethod   IcsMethod?
   icsSequence Int?
+  icsBody     String?
 
   status        EmailStatus @default(QUEUED)
   attemptCount  Int         @default(0)

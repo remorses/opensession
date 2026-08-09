@@ -25,9 +25,6 @@ export type FormValuesState = {
   setParticipantValue: (index: number, name: string, value: FieldValue) => void
   addParticipant: () => void
   removeParticipant: (index: number) => void
-  /** Pads the participants array up to `count` empty records (used by
-   *  <Participants min> so the submitted array matches the rendered rows). */
-  ensureParticipantCount: (count: number) => void
   /** Uploads the file and returns the File row id stored as the field value. */
   uploadFile?: (file: File, fieldName: string) => Promise<string>
 }
@@ -135,6 +132,39 @@ export function RichText({
           {text.length}/{maxLength}
         </span>
       ) : null}
+    </FieldShell>
+  )
+}
+
+export function Number({
+  name,
+  label,
+  required,
+  min,
+  max,
+  step = 1,
+  weight,
+}: {
+  name: string
+  label?: string
+  required?: boolean
+  min?: number
+  max?: number
+  step?: number
+  /** Used by evaluation result aggregation; shown so reviewers understand it. */
+  weight?: number
+}) {
+  const { value, set } = useFieldBinding(name)
+  return (
+    <FieldShell label={`${label ?? name}${weight && weight !== 1 ? ` (weight ${weight})` : ''}`} required={required}>
+      <Input
+        type="number"
+        value={typeof value === 'string' ? value : ''}
+        min={min}
+        max={max}
+        step={step}
+        onChange={(event) => set(event.target.value)}
+      />
     </FieldShell>
   )
 }
@@ -326,12 +356,6 @@ export function Participants({
 }) {
   const ctx = useFormValues()
   const count = ctx.participants.length
-
-  // Pad up to min once so the rendered rows and the submitted array agree.
-  // A useEffect (not render-time mutation) because it sets renderer state.
-  React.useEffect(() => {
-    if (count < min) ctx.ensureParticipantCount(min)
-  }, [count, min])
 
   return (
     <div className="flex flex-col gap-4">

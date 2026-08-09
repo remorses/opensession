@@ -255,7 +255,7 @@ export async function getInvitation(invitationId: string) {
   const db = getDb()
   return db.query.orgInvitation.findFirst({
     where: { invitationId },
-    with: { org: true, creator: true },
+    with: { org: true, creator: true, form: true },
   })
 }
 

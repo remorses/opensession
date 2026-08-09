@@ -73,6 +73,16 @@ const payloads: EmailPayload[] = [
     context,
     data: { sessionId: '01JSESSION', sessionTitle, startsAt, endsAt },
   },
+  {
+    kind: 'REVIEWER_INVITE',
+    context,
+    data: { roundName: 'Initial Review', inviteUrl: 'https://opensession.dev/invite/01JINVITE' },
+  },
+  {
+    kind: 'REVIEW_REMINDER',
+    context,
+    data: { roundName: 'Initial Review', reviewUrl: 'https://opensession.dev/review/01JROUND', pendingCount: 2, closesAt: dueAt },
+  },
 ]
 
 function fileName(kind: EmailKind): string {

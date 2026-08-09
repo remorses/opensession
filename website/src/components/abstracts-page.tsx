@@ -31,10 +31,6 @@ export type AbstractListRow = {
   formatName: string | null
   speakerNames: string[]
   formName: string | null
-  avgRating: number | null
-  yes: number
-  maybe: number
-  no: number
   notifiedAt: number | null
   submittedAt: number | null
 }
@@ -257,8 +253,6 @@ export function AbstractsPage({
                 <TableHead>Speakers</TableHead>
                 <TableHead>Track</TableHead>
                 <TableHead>Format</TableHead>
-                <TableHead>Rating</TableHead>
-                <TableHead>Votes</TableHead>
                 <TableHead>Form</TableHead>
                 <TableHead>Submitted</TableHead>
               </TableRow>
@@ -297,14 +291,6 @@ export function AbstractsPage({
                   </TableCell>
                   <TableCell className="text-muted-foreground">{row.trackName || '—'}</TableCell>
                   <TableCell className="text-muted-foreground">{row.formatName || '—'}</TableCell>
-                  <TableCell className="tabular-nums text-muted-foreground">
-                    {row.avgRating == null ? '—' : row.avgRating.toFixed(1)}
-                  </TableCell>
-                  <TableCell className="tabular-nums text-muted-foreground">
-                    <span title="Yes / Maybe / No">
-                      {row.yes}/{row.maybe}/{row.no}
-                    </span>
-                  </TableCell>
                   <TableCell className="text-muted-foreground">{row.formName || '—'}</TableCell>
                   <TableCell className="whitespace-nowrap text-muted-foreground">
                     {row.submittedAt ? formatDateTimeUTC(row.submittedAt) : '—'}

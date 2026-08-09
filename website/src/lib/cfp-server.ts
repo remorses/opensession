@@ -136,6 +136,7 @@ export async function getOrCreateCfpDraft({ cfp, session, explicitlyRequested = 
         }),
         db.insert(schema.formResponse).values({
           id: responseId,
+          eventId: cfp.event.id,
           formId: cfp.form.id,
           formVersionId: cfp.version.id,
           speakerId: speaker.id,

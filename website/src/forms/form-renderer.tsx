@@ -44,17 +44,25 @@ export function FormRenderer({
   uploadFile,
 }: FormRendererProps) {
   const [values, setValues] = React.useState<ValuesRecord>(() => initialValues ?? {})
-  const [participants, setParticipants] = React.useState<ValuesRecord[]>(() => initialParticipants ?? [])
+  const [participants, setParticipants] = React.useState<ValuesRecord[]>(() => {
+    const initial = initialParticipants ?? []
+    const collected = collectFields({
+      mdxSource,
+      scope: { ...scope, values: initialValues ?? {} },
+    })
+    return padTo(initial, collected.participants?.min ?? 0)
+  })
   const [submitting, setSubmitting] = React.useState(false)
 
-  // Keep onChange out of state updaters: fire it after commit via ref diff.
-  const lastNotified = React.useRef<FormSubmission | null>(null)
+  // Keep onChange out of state updaters: fire it after commit when renderer
+  // state changes, not when a projected visible submission gets a new identity.
+  const lastNotified = React.useRef<{ values: ValuesRecord; participants: ValuesRecord[] } | null>(null)
   React.useEffect(() => {
-    const submission = visibleSubmission({ mdxSource, scope, values, participants })
-    if (lastNotified.current && (lastNotified.current.values !== values || lastNotified.current.participants !== participants)) {
-      onChange?.(submission)
+    const previous = lastNotified.current
+    if (!previous || previous.values !== values || previous.participants !== participants) {
+      onChange?.(visibleSubmission({ mdxSource, scope, values, participants }))
     }
-    lastNotified.current = submission
+    lastNotified.current = { values, participants }
   }, [values, participants, mdxSource, scope, onChange])
 
   const state = React.useMemo<FormValuesState>(
@@ -71,7 +79,6 @@ export function FormRenderer({
         }),
       addParticipant: () => setParticipants((prev) => [...prev, {}]),
       removeParticipant: (index) => setParticipants((prev) => prev.filter((_, i) => i !== index)),
-      ensureParticipantCount: (count) => setParticipants((prev) => (prev.length >= count ? prev : padTo(prev, count))),
     }),
     [values, participants, uploadFile],
   )

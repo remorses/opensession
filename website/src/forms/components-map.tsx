@@ -9,6 +9,7 @@ import type { ReactNode } from 'react'
 import {
   Checkbox,
   FileUpload,
+  Number,
   Participants,
   Radio,
   RichText,
@@ -78,6 +79,7 @@ function Ul({ children }: { children?: ReactNode }) {
 export const formComponents = {
   TextField,
   RichText,
+  Number,
   Select,
   Checkbox,
   Radio,

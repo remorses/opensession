@@ -312,10 +312,12 @@ function InviteDialogBody() {
 export function AcceptInviteButton({
   invitationId,
   orgId,
+  reviewFormId,
   alreadyMember,
 }: {
   invitationId: string
   orgId: string
+  reviewFormId?: string | null
   alreadyMember: boolean
 }) {
   return (
@@ -336,7 +338,7 @@ export function AcceptInviteButton({
           if (alreadyMember) {
             // Fire-and-forget navigation (awaiting a navigation commit
             // inside a form action can deadlock the transition).
-            router.push(`/org/${orgId}`)
+            router.push(reviewFormId ? `/review/${reviewFormId}` : `/org/${orgId}`)
             return
           }
           await acceptInvite({ invitationId })

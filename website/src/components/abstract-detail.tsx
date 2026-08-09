@@ -3,22 +3,22 @@
 'use client'
 
 import { useState, useTransition } from 'react'
-import { ErrorBoundary, Link, router, useLoaderData } from 'spiceflow/react'
+import { Link, router, useLoaderData } from 'spiceflow/react'
 import { ArrowLeftIcon } from 'lucide-react'
-import { updateSessionStatus, upsertReview } from '../actions.tsx'
+import { updateSessionStatus } from '../actions.tsx'
 import { toastActionError } from './ui/toast.tsx'
 import type { SessionStatus } from '../lib/submissions.ts'
 import { formatDateTimeUTC } from '../lib/utils.ts'
 import { SessionStatusBadge } from './abstracts-page.tsx'
 import { Button } from './ui/button.tsx'
 import { Frame, FramePanel } from './ui/frame.tsx'
-import { NativeSelect, Textarea } from './ui/primitives.tsx'
+import { Badge } from './ui/primitives.tsx'
 
 export function AbstractDetailPage() {
   const { currentOrgId } = useLoaderData('/org/:orgId/*')
   const { event } = useLoaderData('/org/:orgId/e/:eventId/*')
   const data = useLoaderData('/org/:orgId/e/:eventId/abstracts/:sessionId')
-  const { session, participants, reviews, fieldValues, myReview, trackName, formatName, formName } =
+  const { session, participants, reviews, fieldValues, trackName, formatName, formName } =
     data
 
   return (
@@ -114,15 +114,9 @@ export function AbstractDetailPage() {
         </div>
 
         <div className="flex flex-col gap-5">
-          <ReviewPanel
-            orgId={currentOrgId}
-            eventId={event.id}
-            sessionId={session.id}
-            myReview={myReview}
-          />
           <Frame>
             <FramePanel className="flex flex-col gap-3">
-              <h2 className="text-sm font-medium">All reviews ({reviews.length})</h2>
+              <h2 className="text-sm font-medium">Assigned reviews ({reviews.length})</h2>
               {reviews.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No reviews yet.</p>
               ) : (
@@ -130,17 +124,11 @@ export function AbstractDetailPage() {
                   {reviews.map((review) => (
                     <li key={review.id} className="flex flex-col gap-1 border-b border-border pb-3 last:border-0 last:pb-0">
                       <div className="flex items-center justify-between gap-2 text-sm">
-                        <span className="font-medium">{review.reviewerName}</span>
-                        <span className="tabular-nums text-muted-foreground">
-                          {review.vote}
-                          {review.rating != null ? ` · ${review.rating}★` : ''}
-                        </span>
+                        <span className="font-medium">{review.reviewerName} · {review.roundName}</span>
+                        <Badge variant={review.state === 'COMPLETED' ? 'success' : 'secondary'}>{review.state.toLowerCase()}</Badge>
                       </div>
-                      {review.comment ? (
-                        <p className="text-sm text-muted-foreground whitespace-pre-wrap">
-                          {review.comment}
-                        </p>
-                      ) : null}
+                      {review.values.map((value) => <p key={`${value.name}:${value.value}`} className="text-sm text-muted-foreground whitespace-pre-wrap"><span className="font-medium text-foreground">{value.name}:</span> {value.value}</p>)}
+                      {review.recusalReason ? <p className="text-sm text-muted-foreground">Recused: {review.recusalReason}</p> : null}
                     </li>
                   ))}
                 </ul>
@@ -214,96 +202,5 @@ function DecisionActions({
       </div>
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </div>
-  )
-}
-
-function ReviewPanel({
-  orgId,
-  eventId,
-  sessionId,
-  myReview,
-}: {
-  orgId: string
-  eventId: string
-  sessionId: string
-  myReview: {
-    vote: 'YES' | 'MAYBE' | 'NO'
-    rating: number | null
-    comment: string | null
-  } | null
-}) {
-  const [vote, setVote] = useState<'YES' | 'MAYBE' | 'NO'>(myReview?.vote ?? 'YES')
-  const [rating, setRating] = useState<string>(myReview?.rating != null ? String(myReview.rating) : '')
-  const [comment, setComment] = useState(myReview?.comment ?? '')
-  const [pending, startTransition] = useTransition()
-  const [message, setMessage] = useState<string | null>(null)
-
-  return (
-    <Frame>
-      <FramePanel className="flex flex-col gap-3">
-        <h2 className="text-sm font-medium">Your review</h2>
-        <ErrorBoundary
-          below
-          fallback={
-            <div className="text-sm text-destructive">
-              <ErrorBoundary.ErrorMessage />
-            </div>
-          }
-        >
-          <label className="flex flex-col gap-1.5 text-sm">
-            <span className="font-medium">Vote</span>
-            <NativeSelect value={vote} onChange={(e) => setVote(e.target.value as typeof vote)}>
-              <option value="YES">Yes</option>
-              <option value="MAYBE">Maybe</option>
-              <option value="NO">No</option>
-            </NativeSelect>
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm">
-            <span className="font-medium">Rating (optional)</span>
-            <NativeSelect value={rating} onChange={(e) => setRating(e.target.value)}>
-              <option value="">No rating</option>
-              {[1, 2, 3, 4, 5].map((n) => (
-                <option key={n} value={String(n)}>
-                  {n}
-                </option>
-              ))}
-            </NativeSelect>
-          </label>
-          <label className="flex flex-col gap-1.5 text-sm">
-            <span className="font-medium">Comment</span>
-            <Textarea
-              rows={3}
-              value={comment}
-              onChange={(e) => setComment(e.target.value)}
-              placeholder="Optional notes for the team"
-            />
-          </label>
-          <Button
-            disabled={pending}
-            onClick={() => {
-              setMessage(null)
-              startTransition(async () => {
-                try {
-                  await upsertReview({
-                    orgId,
-                    eventId,
-                    sessionId,
-                    vote,
-                    rating: rating ? Number(rating) : null,
-                    comment: comment.trim() || null,
-                  })
-                  setMessage('Saved')
-                } catch (err) {
-                  setMessage(toastActionError(err, 'Could not save review'))
-                }
-              })
-            }}
-          >
-            {pending ? 'Saving…' : myReview ? 'Update review' : 'Submit review'}
-          </Button>
-          {message ? <p className="text-xs text-muted-foreground">{message}</p> : null}
-        </ErrorBoundary>
-      </FramePanel>
-    </Frame>
   )
 }

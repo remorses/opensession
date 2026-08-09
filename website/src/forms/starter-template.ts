@@ -4,6 +4,7 @@
 // starterSpeakerProfileTemplate is the PORTAL SPEAKER profile form.
 // starterPortalTemplate / starterSessionMaterialsTemplate is the PORTAL
 // SUBMISSION materials form (slides upload).
+// starterEvaluationTemplate defines a weighted review scorecard.
 //
 // Conditional syntax: `<Show when={expr}>` — safe-mdx cannot evaluate JSX
 // inside `{cond && <.../>}` expressions, so Show is the supported way to
@@ -11,7 +12,6 @@
 // `formats` option arrays from scope.
 
 import dedent from 'string-dedent'
-
 export const starterCfpTemplate = dedent`
   # Call for speakers
 
@@ -126,3 +126,13 @@ export const starterSessionMaterialsTemplate = dedent`
 
 /** @deprecated alias kept for createForm PORTAL default when target is SUBMISSION */
 export const starterPortalTemplate = starterSessionMaterialsTemplate
+
+export const starterEvaluationTemplate = dedent`
+  # Review scorecard
+
+  Score the assigned submission. You can save a draft before you submit.
+
+  <Number name="rating" label="Rating" min={1} max={5} weight={1} required />
+
+  <RichText name="comments" label="Comments" required maxLength={5000} />
+`

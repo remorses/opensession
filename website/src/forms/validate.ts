@@ -24,10 +24,13 @@ export function validateSubmission({
   collected,
   values,
   participants,
+  allowIncomplete = false,
 }: {
   collected: CollectResult
   values: ValuesRecord
   participants: ValuesRecord[]
+  /** Drafts validate supplied values but do not require missing values. */
+  allowIncomplete?: boolean
 }): ValidateResult {
   const errors: ValidationIssue[] = []
 
@@ -70,11 +73,11 @@ export function validateSubmission({
 
   // Per-field checks: required, shape, maxLength, option membership.
   for (const field of collected.fields) {
-    checkField(field, values[field.name], null, errors)
+    checkField(field, values[field.name], null, errors, allowIncomplete)
   }
   participants.forEach((record, index) => {
     for (const field of collected.participantFields) {
-      checkField(field, record[field.name], index, errors)
+      checkField(field, record[field.name], index, errors, allowIncomplete)
     }
   })
 
@@ -93,13 +96,14 @@ function checkField(
   value: FieldValue | undefined,
   participantIndex: number | null,
   errors: ValidationIssue[],
+  allowIncomplete: boolean,
 ) {
   const where = participantIndex == null ? '' : ` (participant ${participantIndex + 1})`
   const label = `"${field.name}"${where}`
 
   if (value === undefined || isEmpty(value)) {
     // Required checkbox means "must be checked": 'false' and absent both fail.
-    if (field.required) errors.push({ name: field.name, message: `${label} is required` })
+    if (field.required && !allowIncomplete) errors.push({ name: field.name, message: `${label} is required` })
     return
   }
   const present = value
@@ -127,8 +131,20 @@ function checkField(
   if (field.type === 'checkbox') {
     if (present !== 'true' && present !== 'false') {
       errors.push({ name: field.name, message: `${label} must be "true" or "false"` })
-    } else if (field.required && present !== 'true') {
+    } else if (field.required && !allowIncomplete && present !== 'true') {
       errors.push({ name: field.name, message: `${label} must be checked` })
+    }
+    return
+  }
+
+  if (field.type === 'number') {
+    const number = Number(entries[0])
+    if (!Number.isFinite(number)) {
+      errors.push({ name: field.name, message: `${label} must be a number` })
+    } else if (field.min != null && number < field.min) {
+      errors.push({ name: field.name, message: `${label} must be at least ${field.min}` })
+    } else if (field.max != null && number > field.max) {
+      errors.push({ name: field.name, message: `${label} must be at most ${field.max}` })
     }
     return
   }

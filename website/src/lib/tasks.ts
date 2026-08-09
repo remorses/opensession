@@ -96,7 +96,7 @@ export function assertTaskDefinitionShape(input: {
   source: TaskSource
   target: TaskTarget
   formId: string | null
-  form?: { purpose: 'CFP' | 'PORTAL'; target: 'SPEAKER' | 'SUBMISSION' } | null
+  form?: { purpose: 'CFP' | 'PORTAL' | 'EVALUATION'; target: 'SPEAKER' | 'SUBMISSION' } | null
 }): void {
   if (input.source === 'MANUAL') {
     if (input.formId != null) {

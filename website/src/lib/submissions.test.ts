@@ -1,10 +1,9 @@
 // Pure tests for session status transitions, queue helpers, tab filters,
-// review aggregation, search, and CSV export.
+// search and CSV export.
 import { describe, expect, test } from 'vitest'
 import {
   ABSTRACTS_STATUS_TABS,
   abstractsToCsv,
-  aggregateReviewStats,
   applyTransition,
   canTransition,
   countSessionsByTab,
@@ -205,34 +204,6 @@ describe('status tabs', () => {
   })
 })
 
-describe('aggregateReviewStats', () => {
-  test('counts votes and averages non-null ratings', () => {
-    expect(
-      aggregateReviewStats([
-        { vote: 'YES', rating: 5 },
-        { vote: 'YES', rating: 3 },
-        { vote: 'MAYBE', rating: null },
-        { vote: 'NO', rating: 1 },
-      ]),
-    ).toMatchInlineSnapshot(`
-      {
-        "avgRating": 3,
-        "maybe": 1,
-        "no": 1,
-        "total": 4,
-        "yes": 2,
-      }
-    `)
-    expect(aggregateReviewStats([])).toEqual({
-      total: 0,
-      yes: 0,
-      maybe: 0,
-      no: 0,
-      avgRating: null,
-    })
-  })
-})
-
 describe('sessionMatchesQuery / abstractsToCsv', () => {
   test('search is case-insensitive across title speakers track format', () => {
     const row = {
@@ -257,17 +228,13 @@ describe('sessionMatchesQuery / abstractsToCsv', () => {
         formatName: 'Talk',
         speakerNames: ['Ada', 'Grace'],
         formName: 'CFP',
-        avgRating: 4.5,
-        yes: 2,
-        maybe: 0,
-        no: 1,
         notifiedAt: null,
         submittedAt: 1_700_000_000_000,
       },
     ])
     expect(csv).toMatchInlineSnapshot(`
-      "status,title,track,format,speakers,form,avg_rating,yes,maybe,no,notified_at,submitted_at
-      PENDING,"Hello, ""world""",,Talk,Ada; Grace,CFP,4.50,2,0,1,,1700000000000
+      "status,title,track,format,speakers,form,notified_at,submitted_at
+      PENDING,"Hello, ""world""",,Talk,Ada; Grace,CFP,,1700000000000
       "
     `)
   })

@@ -1,108 +1,193 @@
-// Pure review helpers: vote/rating validation and upsert payload shape.
-// Uniqueness is (sessionId, reviewerId) — enforced by the DB unique index;
-// callers upsert with onConflictDoUpdate on that pair.
+// Pure evaluation helpers: reviewer invitation decisions, blind projections,
+// derived assignment state, weighted results, progress, sorting, and CSV.
+import type { CollectedField, ValuesRecord } from '../forms/collect-fields.ts'
 
-export type ReviewVote = 'YES' | 'MAYBE' | 'NO'
+export type ReviewState = 'ASSIGNED' | 'IN_PROGRESS' | 'COMPLETED' | 'RECUSED'
 
-export type ReviewInput = {
-  vote: ReviewVote
-  rating: number | null
-  comment: string | null
-}
-
-export function normalizeReviewInput(input: {
-  vote: ReviewVote
-  rating?: number | null
-  comment?: string | null
-}): ReviewInput {
-  const rating = input.rating == null || Number.isNaN(input.rating) ? null : input.rating
-  if (rating != null && (!Number.isInteger(rating) || rating < 1 || rating > 5)) {
-    throw new Error('Rating must be an integer from 1 to 5')
+export function invitationAcceptanceDecision(input: {
+  now: number
+  expiresAt: number
+  invitedEmail: string
+  userEmail: string
+  emailVerified: boolean
+}): { ok: true } | { ok: false; message: string } {
+  if (input.expiresAt < input.now) return { ok: false, message: 'Invitation not found or expired' }
+  if (!input.emailVerified) return { ok: false, message: 'Verify the invited email address before accepting' }
+  if (input.invitedEmail.trim().toLowerCase() !== input.userEmail.trim().toLowerCase()) {
+    return { ok: false, message: 'Sign in with the invited email address' }
   }
-  const comment = input.comment?.trim() ? input.comment.trim() : null
-  if (comment && comment.length > 5000) {
-    throw new Error('Comment must be at most 5000 characters')
+  return { ok: true }
+}
+
+export function reviewState(input: {
+  recusedAt: number | null
+  responseStatus: 'DRAFT' | 'SUBMITTED' | null
+}): ReviewState {
+  if (input.recusedAt != null) return 'RECUSED'
+  if (input.responseStatus === 'SUBMITTED') return 'COMPLETED'
+  if (input.responseStatus === 'DRAFT') return 'IN_PROGRESS'
+  return 'ASSIGNED'
+}
+
+const IDENTITY_FIELD = /speaker\.|author|presenter|participant|name|email|company|employer|affiliation|organization|bio|job|pronoun|headshot|avatar|photo|linkedin|twitter/i
+
+type AssignedSession = {
+  id: string
+  title: string | null
+  description: string | null
+  trackName: string | null
+  formatName: string | null
+  participants: unknown[]
+  fieldValues: Array<{ name: string; value: string; subjectSpeakerId?: string | null }>
+}
+
+/** This function is the last boundary before reviewer loader serialization. */
+export function projectAssignedSession<T extends AssignedSession>(row: T, blind: boolean) {
+  return {
+    id: row.id,
+    title: row.title,
+    description: row.description,
+    trackName: row.trackName,
+    formatName: row.formatName,
+    participants: blind ? [] : row.participants,
+    fieldValues: blind
+      ? row.fieldValues.filter((field) => field.subjectSpeakerId == null && !IDENTITY_FIELD.test(field.name))
+      : row.fieldValues,
   }
-  return { vote: input.vote, rating, comment }
 }
 
-/** Sessions eligible for the Evaluation "To Review" tab: still in the
- *  decision pipeline and not yet reviewed by the caller. */
-export function isReviewableStatus(status: string): boolean {
-  return status === 'PENDING' || status === 'ACCEPT_QUEUE' || status === 'DECLINE_QUEUE'
-}
-
-export function sessionsToReview<T extends { id: string; status: string }>(
-  sessions: T[],
-  reviewedSessionIds: ReadonlySet<string>,
-): T[] {
-  return sessions.filter(
-    (session) => isReviewableStatus(session.status) && !reviewedSessionIds.has(session.id),
-  )
-}
-
-export type ReviewerProgress = {
-  reviewerId: string
-  name: string
-  email: string
-  total: number
-  yes: number
-  maybe: number
-  no: number
-}
-
-export function progressByReviewer(
-  reviews: Array<{
-    reviewerId: string
-    vote: ReviewVote
-    reviewer?: { name: string | null; email: string | null } | null
-  }>,
-): ReviewerProgress[] {
-  const map = new Map<string, ReviewerProgress>()
-  for (const review of reviews) {
-    let row = map.get(review.reviewerId)
-    if (!row) {
-      row = {
-        reviewerId: review.reviewerId,
-        name: review.reviewer?.name?.trim() || 'Unknown',
-        email: review.reviewer?.email ?? '',
-        total: 0,
-        yes: 0,
-        maybe: 0,
-        no: 0,
-      }
-      map.set(review.reviewerId, row)
-    }
-    row.total += 1
-    if (review.vote === 'YES') row.yes += 1
-    else if (review.vote === 'MAYBE') row.maybe += 1
-    else row.no += 1
-  }
-  return [...map.values()].sort((a, b) => b.total - a.total || a.name.localeCompare(b.name))
-}
-
-export type SessionCoverage = {
+export type Assignment = {
+  id?: string
   sessionId: string
-  title: string
-  status: string
-  reviewCount: number
+  reviewerId: string
+  recusedAt: number | null
+  response: { status: 'DRAFT' | 'SUBMITTED'; values: ValuesRecord } | null
+  reviewer?: { name: string | null; email: string | null } | null
+}
+
+export function progressByReviewer(assignments: Assignment[]) {
+  const rows = new Map<string, {
+    reviewerId: string
+    name: string
+    email: string
+    assigned: number
+    completed: number
+    inProgress: number
+    recused: number
+  }>()
+  for (const assignment of assignments) {
+    const row = rows.get(assignment.reviewerId) ?? {
+      reviewerId: assignment.reviewerId,
+      name: assignment.reviewer?.name?.trim() || 'Reviewer',
+      email: assignment.reviewer?.email ?? '',
+      assigned: 0,
+      completed: 0,
+      inProgress: 0,
+      recused: 0,
+    }
+    row.assigned += 1
+    const state = reviewState({
+      recusedAt: assignment.recusedAt,
+      responseStatus: assignment.response?.status ?? null,
+    })
+    if (state === 'COMPLETED') row.completed += 1
+    if (state === 'IN_PROGRESS') row.inProgress += 1
+    if (state === 'RECUSED') row.recused += 1
+    rows.set(assignment.reviewerId, row)
+  }
+  return [...rows.values()].sort((a, b) => b.assigned - a.assigned || a.name.localeCompare(b.name))
 }
 
 export function coverageBySession(
-  sessions: Array<{ id: string; title: string | null; status: string }>,
-  reviews: Array<{ sessionId: string }>,
-): SessionCoverage[] {
-  const counts = new Map<string, number>()
-  for (const review of reviews) {
-    counts.set(review.sessionId, (counts.get(review.sessionId) ?? 0) + 1)
-  }
-  return sessions
-    .filter((session) => isReviewableStatus(session.status) || session.status === 'ACCEPTED' || session.status === 'DECLINED')
-    .map((session) => ({
+  sessions: Array<{ id: string; title: string | null }>,
+  assignments: Assignment[],
+) {
+  return sessions.map((session) => {
+    const rows = assignments.filter((assignment) => assignment.sessionId === session.id)
+    return {
       sessionId: session.id,
       title: session.title?.trim() || 'Untitled',
-      status: session.status,
-      reviewCount: counts.get(session.id) ?? 0,
-    }))
-    .sort((a, b) => a.reviewCount - b.reviewCount || a.title.localeCompare(b.title))
+      assigned: rows.length,
+      completed: rows.filter((assignment) => reviewState({
+        recusedAt: assignment.recusedAt,
+        responseStatus: assignment.response?.status ?? null,
+      }) === 'COMPLETED').length,
+    }
+  })
+}
+
+export type EvaluationResult = {
+  sessionId: string
+  title: string
+  aggregate: number | null
+  completed: number
+  assigned: number
+  answers: Record<string, string>
+}
+
+export function aggregateEvaluationResults(input: {
+  sessions: Array<{ id: string; title: string | null }>
+  fields: CollectedField[]
+  assignments: Assignment[]
+}): EvaluationResult[] {
+  const numericFields = input.fields.filter((field) => field.type === 'number')
+  return input.sessions.map((session) => {
+    const assigned = input.assignments.filter((assignment) => assignment.sessionId === session.id)
+    const completed = assigned.filter((assignment) => assignment.response?.status === 'SUBMITTED' && assignment.recusedAt == null)
+    let weightedSum = 0
+    let totalWeight = 0
+    for (const assignment of completed) {
+      for (const field of numericFields) {
+        const value = Number(assignment.response!.values[field.name])
+        if (!Number.isFinite(value)) continue
+        const weight = field.weight ?? 1
+        weightedSum += value * weight
+        totalWeight += weight
+      }
+    }
+    const answers: Record<string, string> = {}
+    for (const field of input.fields) {
+      const values = completed.flatMap((assignment) => {
+        const value = assignment.response!.values[field.name]
+        return value == null ? [] : [Array.isArray(value) ? value.join('; ') : value]
+      })
+      if (values.length > 0) answers[field.name] = values.join(' | ')
+    }
+    return {
+      sessionId: session.id,
+      title: session.title?.trim() || 'Untitled',
+      aggregate: totalWeight > 0 ? weightedSum / totalWeight : null,
+      completed: completed.length,
+      assigned: assigned.length,
+      answers,
+    }
+  })
+}
+
+export function sortEvaluationResults(rows: EvaluationResult[], direction: 'asc' | 'desc') {
+  const factor = direction === 'asc' ? 1 : -1
+  return [...rows].sort((a, b) => {
+    if (a.aggregate == null && b.aggregate == null) return a.title.localeCompare(b.title)
+    if (a.aggregate == null) return 1
+    if (b.aggregate == null) return -1
+    return (a.aggregate - b.aggregate) * factor || a.title.localeCompare(b.title)
+  })
+}
+
+function csv(value: unknown): string {
+  const text = value == null ? '' : String(value)
+  return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
+}
+
+export function evaluationResultsToCsv(rows: EvaluationResult[], fields: CollectedField[]): string {
+  const header = ['session_id', 'title', 'aggregate', 'completed', 'assigned', ...fields.map((field) => field.name)]
+  const body = rows.map((row) => [
+    row.sessionId,
+    row.title,
+    row.aggregate == null ? '' : row.aggregate.toFixed(4),
+    row.completed,
+    row.assigned,
+    ...fields.map((field) => row.answers[field.name] ?? ''),
+  ].map(csv).join(','))
+  return [header.join(','), ...body].join('\n') + '\n'
 }

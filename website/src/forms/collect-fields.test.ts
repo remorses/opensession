@@ -35,24 +35,19 @@ describe('collectFields', () => {
       [
         {
           "maxLength": 80,
-          "multiple": undefined,
           "name": "title",
-          "options": undefined,
           "participantScope": false,
           "required": true,
           "type": "text",
         },
         {
           "maxLength": 5000,
-          "multiple": undefined,
           "name": "description",
-          "options": undefined,
           "participantScope": false,
           "required": false,
           "type": "richtext",
         },
         {
-          "maxLength": undefined,
           "multiple": undefined,
           "name": "track",
           "options": [
@@ -70,17 +65,12 @@ describe('collectFields', () => {
           "type": "select",
         },
         {
-          "maxLength": undefined,
-          "multiple": undefined,
           "name": "needsAV",
-          "options": undefined,
           "participantScope": false,
           "required": false,
           "type": "checkbox",
         },
         {
-          "maxLength": undefined,
-          "multiple": undefined,
           "name": "level",
           "options": [
             {
@@ -97,10 +87,7 @@ describe('collectFields', () => {
           "type": "radio",
         },
         {
-          "maxLength": undefined,
-          "multiple": undefined,
           "name": "headshot",
-          "options": undefined,
           "participantScope": false,
           "required": false,
           "type": "file",
@@ -152,19 +139,14 @@ describe('collectFields', () => {
     expect(result.participantFields).toMatchInlineSnapshot(`
       [
         {
-          "maxLength": undefined,
-          "multiple": undefined,
           "name": "speaker.firstName",
-          "options": undefined,
           "participantScope": true,
           "required": true,
           "type": "text",
         },
         {
           "maxLength": 5000,
-          "multiple": undefined,
           "name": "speaker.bio",
-          "options": undefined,
           "participantScope": true,
           "required": false,
           "type": "richtext",

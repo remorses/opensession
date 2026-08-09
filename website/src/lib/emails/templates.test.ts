@@ -95,6 +95,16 @@ const payloads: Record<EmailKind, EmailPayload> = {
     context,
     data: { sessionId: 'S1', sessionTitle: 'Shipping RSC on the edge', startsAt, endsAt },
   },
+  REVIEWER_INVITE: {
+    kind: 'REVIEWER_INVITE',
+    context,
+    data: { roundName: 'Initial Review', inviteUrl: 'https://opensession.dev/invite/I1' },
+  },
+  REVIEW_REMINDER: {
+    kind: 'REVIEW_REMINDER',
+    context,
+    data: { roundName: 'Initial Review', reviewUrl: 'https://opensession.dev/review/F1', pendingCount: 2, closesAt: dueAt },
+  },
 }
 
 describe('formatters', () => {
@@ -124,6 +134,8 @@ describe('subjects', () => {
         "DECISION_ACCEPTED": "Your talk was accepted for AI Engineer World Fair",
         "DECISION_DECLINED": "Update on your AI Engineer World Fair submission",
         "DRAFT_REMINDER": "Your AI Engineer World Fair draft is still unsubmitted",
+        "REVIEWER_INVITE": "Review submissions for AI Engineer World Fair",
+        "REVIEW_REMINDER": "Reminder: 2 reviews left for Initial Review",
         "SCHEDULE_CANCEL": "Shipping RSC on the edge was removed from the schedule",
         "SCHEDULE_INVITE": "Your AI Engineer World Fair session is scheduled",
         "SCHEDULE_UPDATE": "Time change for Shipping RSC on the edge",
@@ -205,7 +217,9 @@ describe('bodies', () => {
         "DRAFT_REMINDER": "Hey Ada,\\n\\nyou started a submission for \\"Call for speakers\\" but never sent it. It closes in 1 day, on Wed, Sep 30, 2026.\\n\\nYour draft is saved, pick it up here:\\nhttps://opensession.dev/submit/aie-world-fair/cfp\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
         "SCHEDULE_INVITE": "Hey Ada,\\n\\n\\"Shipping RSC on the edge\\" now has a slot at AI Engineer World Fair.\\n\\nWhen: Mon, Oct 12, 2026, 10:30 AM PDT to Mon, Oct 12, 2026, 11:00 AM PDT\\nWhere: Main Hall\\n\\nThe calendar invite is attached, so it should land in your calendar automatically. Details:\\nhttps://opensession.dev/portal/aie-world-fair/submissions/S1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
         "SCHEDULE_UPDATE": "Hey Ada,\\n\\nthe slot for \\"Shipping RSC on the edge\\" at AI Engineer World Fair moved.\\n\\nWhen: Mon, Oct 12, 2026, 10:30 AM PDT to Mon, Oct 12, 2026, 11:00 AM PDT\\nWhere: Room B\\n\\nThe attached invite updates the entry already in your calendar. Details:\\nhttps://opensession.dev/portal/aie-world-fair/submissions/S1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
-        "SCHEDULE_CANCEL": "Hey Ada,\\n\\n\\"Shipping RSC on the edge\\" was taken off the AI Engineer World Fair schedule and the calendar entry is cancelled.\\n\\nIf this is a surprise, reply here and we will sort it out.\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair"
+        "SCHEDULE_CANCEL": "Hey Ada,\\n\\n\\"Shipping RSC on the edge\\" was taken off the AI Engineer World Fair schedule and the calendar entry is cancelled.\\n\\nIf this is a surprise, reply here and we will sort it out.\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
+        "REVIEWER_INVITE": "Hey Ada,\\n\\nyou were invited to join the \\"Initial Review\\" reviewer pool for AI Engineer World Fair.\\n\\nAccept the invitation with the Google account that received this email:\\nhttps://opensession.dev/invite/I1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
+        "REVIEW_REMINDER": "Hey Ada,\\n\\nyou still have 2 reviews to finish in Initial Review. The round closes Wed, Sep 30, 2026.\\n\\nhttps://opensession.dev/review/F1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair"
       }"
     `)
   })

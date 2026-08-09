@@ -27,24 +27,19 @@ describe('starterCfpTemplate', () => {
         "fields": [
           {
             "maxLength": 80,
-            "multiple": undefined,
             "name": "title",
-            "options": undefined,
             "participantScope": false,
             "required": true,
             "type": "text",
           },
           {
             "maxLength": 5000,
-            "multiple": undefined,
             "name": "description",
-            "options": undefined,
             "participantScope": false,
             "required": true,
             "type": "richtext",
           },
           {
-            "maxLength": undefined,
             "multiple": undefined,
             "name": "track",
             "options": [
@@ -58,7 +53,6 @@ describe('starterCfpTemplate', () => {
             "type": "select",
           },
           {
-            "maxLength": undefined,
             "multiple": undefined,
             "name": "format",
             "options": [
@@ -72,10 +66,7 @@ describe('starterCfpTemplate', () => {
             "type": "select",
           },
           {
-            "maxLength": undefined,
-            "multiple": undefined,
             "name": "needsAV",
-            "options": undefined,
             "participantScope": false,
             "required": false,
             "type": "checkbox",
@@ -84,45 +75,34 @@ describe('starterCfpTemplate', () => {
         "participantFields": [
           {
             "maxLength": 80,
-            "multiple": undefined,
             "name": "speaker.firstName",
-            "options": undefined,
             "participantScope": true,
             "required": true,
             "type": "text",
           },
           {
             "maxLength": 80,
-            "multiple": undefined,
             "name": "speaker.lastName",
-            "options": undefined,
             "participantScope": true,
             "required": true,
             "type": "text",
           },
           {
             "maxLength": 200,
-            "multiple": undefined,
             "name": "speaker.email",
-            "options": undefined,
             "participantScope": true,
             "required": true,
             "type": "text",
           },
           {
             "maxLength": 5000,
-            "multiple": undefined,
             "name": "speaker.bio",
-            "options": undefined,
             "participantScope": true,
             "required": false,
             "type": "richtext",
           },
           {
-            "maxLength": undefined,
-            "multiple": undefined,
             "name": "speaker.headshot",
-            "options": undefined,
             "participantScope": true,
             "required": false,
             "type": "file",
@@ -157,19 +137,14 @@ describe('starterPortalTemplate', () => {
         "errors": [],
         "fields": [
           {
-            "maxLength": undefined,
-            "multiple": undefined,
             "name": "slides",
-            "options": undefined,
             "participantScope": false,
             "required": true,
             "type": "file",
           },
           {
             "maxLength": 500,
-            "multiple": undefined,
             "name": "slidesNotes",
-            "options": undefined,
             "participantScope": false,
             "required": false,
             "type": "text",

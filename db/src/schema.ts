@@ -98,8 +98,8 @@ export const verification = s.sqliteTable('verification', {
 // and the loser re-reads the winner's row. The owner can never leave or be
 // removed from their personal org, so a deterministic default org always
 // exists. 'team' orgs are created explicitly from the org switcher.
-// Authorization is org-level: every OrgMember manages and reviews every
-// event of the org (no per-event roles in MVP).
+// Authorization is org-level for organizers. Evaluation reviewers use the
+// event/form-scoped evaluationReviewer relation and never become org members.
 
 export const org = s.sqliteTable('org', {
   orgId: s.text('org_id').primaryKey().notNull().$defaultFn(() => ulid()),
@@ -133,21 +133,6 @@ export const orgMember = s.sqliteTable('org_member', {
   s.check('org_member_role_check', orm.sql`role IN ('admin', 'member')`),
 ])
 
-// Secret invite links: anyone with the link can join the org after signing
-// in. No email column — not tied to a specific user. No status column — the
-// row stays valid until expiresAt so a page re-render after accept doesn't
-// show "invalid invitation".
-export const orgInvitation = s.sqliteTable('org_invitation', {
-  invitationId: s.text('invitation_id').primaryKey().notNull().$defaultFn(() => ulid()),
-  orgId: s.text('org_id').notNull().references(() => org.orgId, { onDelete: 'cascade' }),
-  role: s.text('role', { enum: ['admin', 'member'] }).notNull().default('member'),
-  createdBy: s.text('created_by').notNull().references(() => user.id, { onDelete: 'cascade' }),
-  expiresAt: epochMs('expires_at').notNull(),
-  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
-}, (table) => [
-  s.index('org_invitation_org_id_idx').on(table.orgId),
-])
-
 // ── Event ───────────────────────────────────────────────────────────
 
 export const event = s.sqliteTable('event', {
@@ -173,6 +158,7 @@ export const event = s.sqliteTable('event', {
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
   s.index('event_org_id_idx').on(table.orgId),
+  s.uniqueIndex('event_id_org_unique').on(table.id, table.orgId),
   s.check('event_status_check', orm.sql`status IN ('DRAFT', 'ACTIVE', 'ARCHIVED')`),
 ])
 
@@ -234,7 +220,7 @@ export const form = s.sqliteTable('form', {
   eventId: s.text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
   /** CFP = public call-for-speakers form (creates a Session).
    *  PORTAL = assigned to speakers via tasks. */
-  purpose: s.text('purpose', { enum: ['CFP', 'PORTAL'] }).notNull(),
+  purpose: s.text('purpose', { enum: ['CFP', 'PORTAL', 'EVALUATION'] }).notNull(),
   /** SUBMISSION = portal form about a specific session; SPEAKER = about the speaker. */
   target: s.text('target', { enum: ['SUBMISSION', 'SPEAKER'] }).notNull().default('SUBMISSION'),
   /** Admin-facing name; the public title lives in the MDX. */
@@ -245,16 +231,59 @@ export const form = s.sqliteTable('form', {
   // The live MDX is DERIVED: the newest FormVersion (ORDER BY createdAt DESC
   // LIMIT 1). No stored pointer to keep in sync.
   /** Hard-coded draft reminders fire 3 days and 1 day before this. */
+  opensAt: epochMs('opens_at'),
   closesAt: epochMs('closes_at'),
+  /** EVALUATION only: remove participant identity from reviewer loaders. */
+  blind: s.integer('blind', { mode: 'boolean' }).notNull().default(false),
   createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
   s.index('form_event_id_idx').on(table.eventId),
   s.uniqueIndex('form_event_slug_unique').on(table.eventId, table.slug),
   s.uniqueIndex('form_id_event_unique').on(table.id, table.eventId),
-  s.check('form_purpose_check', orm.sql`purpose IN ('CFP', 'PORTAL')`),
+  s.check('form_purpose_check', orm.sql`purpose IN ('CFP', 'PORTAL', 'EVALUATION')`),
   s.check('form_target_check', orm.sql`target IN ('SUBMISSION', 'SPEAKER')`),
   s.check('form_status_check', orm.sql`status IN ('DRAFT', 'OPEN', 'CLOSED', 'ARCHIVED')`),
+])
+
+// One invitation owner with two outcomes. Org-member invitations stay
+// shareable; reviewer invitations are email-bound and point at one evaluation
+// form. eventId + orgId and formId + eventId composite FKs prevent cross-event
+// or cross-organization reviewer invitations.
+export const orgInvitation = s.sqliteTable('org_invitation', {
+  invitationId: s.text('invitation_id').primaryKey().notNull().$defaultFn(() => ulid()),
+  orgId: s.text('org_id').notNull().references(() => org.orgId, { onDelete: 'cascade' }),
+  purpose: s.text('purpose', { enum: ['ORG_MEMBER', 'EVALUATION_REVIEWER'] }).notNull().default('ORG_MEMBER'),
+  role: s.text('role', { enum: ['admin', 'member'] }).notNull().default('member'),
+  invitedEmail: s.text('invited_email'),
+  eventId: s.text('event_id'),
+  formId: s.text('form_id'),
+  createdBy: s.text('created_by').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  expiresAt: epochMs('expires_at').notNull(),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.index('org_invitation_org_id_idx').on(table.orgId),
+  s.index('org_invitation_form_idx').on(table.formId),
+  s.foreignKey({ columns: [table.eventId, table.orgId], foreignColumns: [event.id, event.orgId], name: 'org_invitation_event_org_fk' }).onDelete('cascade'),
+  s.foreignKey({ columns: [table.formId, table.eventId], foreignColumns: [form.id, form.eventId], name: 'org_invitation_form_event_fk' }).onDelete('cascade'),
+  s.check('org_invitation_purpose_check', orm.sql`purpose IN ('ORG_MEMBER', 'EVALUATION_REVIEWER')`),
+  s.check('org_invitation_owner_check', orm.sql`(purpose = 'ORG_MEMBER' AND invited_email IS NULL AND event_id IS NULL AND form_id IS NULL) OR (purpose = 'EVALUATION_REVIEWER' AND invited_email IS NOT NULL AND event_id IS NOT NULL AND form_id IS NOT NULL)`),
+])
+
+// Reviewer pool and authorization relation. A user can review one round
+// without receiving any organizer membership or organizer data.
+export const evaluationReviewer = s.sqliteTable('evaluation_reviewer', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  eventId: s.text('event_id').notNull(),
+  formId: s.text('form_id').notNull(),
+  userId: s.text('user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.uniqueIndex('evaluation_reviewer_form_user_unique').on(table.formId, table.userId),
+  s.uniqueIndex('evaluation_reviewer_event_form_user_unique').on(table.eventId, table.formId, table.userId),
+  s.index('evaluation_reviewer_user_idx').on(table.userId),
+  s.index('evaluation_reviewer_event_idx').on(table.eventId),
+  s.foreignKey({ columns: [table.formId, table.eventId], foreignColumns: [form.id, form.eventId], name: 'evaluation_reviewer_form_event_fk' }).onDelete('cascade'),
 ])
 
 // Immutable MDX snapshot, created on every save from the editor. Each
@@ -268,6 +297,7 @@ export const formVersion = s.sqliteTable('form_version', {
   createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
   s.index('form_version_form_created_idx').on(table.formId, table.createdAt),
+  s.uniqueIndex('form_version_id_form_unique').on(table.id, table.formId),
 ])
 
 // ── Speakers — event-scoped people ──────────────────────────────────
@@ -395,6 +425,32 @@ export const sessionParticipant = s.sqliteTable('session_participant', {
   s.check('session_participant_confirmation_check', orm.sql`confirmation_status IN ('PENDING', 'CONFIRMED', 'DECLINED')`),
 ])
 
+// ── Evaluation assignments ──────────────────────────────────────────
+// A review row is one assignment in one evaluation round. Its state is
+// derived from recusal or its optional FormResponse, never duplicated here.
+
+export const review = s.sqliteTable('review', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  eventId: s.text('event_id').notNull(),
+  formId: s.text('form_id').notNull(),
+  sessionId: s.text('session_id').notNull(),
+  reviewerId: s.text('reviewer_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  recusedAt: epochMs('recused_at'),
+  recusalReason: s.text('recusal_reason'),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+  updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.uniqueIndex('review_form_session_reviewer_unique').on(table.formId, table.sessionId, table.reviewerId),
+  s.uniqueIndex('review_id_form_event_unique').on(table.id, table.formId, table.eventId),
+  s.index('review_reviewer_idx').on(table.reviewerId),
+  s.index('review_event_form_idx').on(table.eventId, table.formId),
+  s.index('review_session_idx').on(table.sessionId),
+  s.foreignKey({ columns: [table.sessionId, table.eventId], foreignColumns: [eventSession.id, eventSession.eventId], name: 'review_session_fk' }).onDelete('cascade'),
+  s.foreignKey({ columns: [table.formId, table.eventId], foreignColumns: [form.id, form.eventId], name: 'review_form_event_fk' }).onDelete('cascade'),
+  s.foreignKey({ columns: [table.eventId, table.formId, table.reviewerId], foreignColumns: [evaluationReviewer.eventId, evaluationReviewer.formId, evaluationReviewer.userId], name: 'review_pool_fk' }).onDelete('cascade'),
+  s.check('review_recusal_check', orm.sql`(recused_at IS NULL AND recusal_reason IS NULL) OR (recused_at IS NOT NULL AND recusal_reason IS NOT NULL AND length(trim(recusal_reason)) > 0)`),
+])
+
 // ── Form responses — the immutable record of a form fill ────────────
 // CFP responses create a Session; portal responses complete a
 // TaskAssignment. On submit, well-known names are copied to typed entity
@@ -403,13 +459,16 @@ export const sessionParticipant = s.sqliteTable('session_participant', {
 
 export const formResponse = s.sqliteTable('form_response', {
   id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  eventId: s.text('event_id').notNull(),
   /** Restrict: forms with responses are archived, never deleted. */
   formId: s.text('form_id').notNull().references(() => form.id, { onDelete: 'restrict' }),
   /** The exact MDX snapshot this response was filled against. Validation and
    *  rendering of past responses always use this version, never the live one. */
   formVersionId: s.text('form_version_id').notNull().references(() => formVersion.id, { onDelete: 'restrict' }),
   /** Respondent. Restrict: anonymize speakers instead of deleting. */
-  speakerId: s.text('speaker_id').notNull().references(() => speaker.id, { onDelete: 'restrict' }),
+  speakerId: s.text('speaker_id').references(() => speaker.id, { onDelete: 'restrict' }),
+  /** Evaluation response owner. Exactly one of speakerId/reviewId is set. */
+  reviewId: s.text('review_id').unique(),
   /** CFP: the Session created by this response. Portal SUBMISSION forms: the
    *  session the response is about. Portal SPEAKER forms: null. */
   sessionId: s.text('session_id').references(() => eventSession.id, { onDelete: 'cascade' }),
@@ -423,12 +482,17 @@ export const formResponse = s.sqliteTable('form_response', {
   s.index('form_response_form_status_idx').on(table.formId, table.status),
   s.index('form_response_version_idx').on(table.formVersionId),
   s.index('form_response_speaker_idx').on(table.speakerId),
+  s.index('form_response_event_idx').on(table.eventId),
   s.index('form_response_session_idx').on(table.sessionId),
   // One editable draft per form and speaker. Once submitted, the row no
   // longer matches this index and the speaker may start another response.
   s.uniqueIndex('form_response_active_draft_unique')
     .on(table.formId, table.speakerId)
-    .where(orm.sql`status = 'DRAFT'`),
+    .where(orm.sql`status = 'DRAFT' AND speaker_id IS NOT NULL`),
+  s.foreignKey({ columns: [table.formId, table.eventId], foreignColumns: [form.id, form.eventId], name: 'form_response_form_event_fk' }).onDelete('restrict'),
+  s.foreignKey({ columns: [table.formVersionId, table.formId], foreignColumns: [formVersion.id, formVersion.formId], name: 'form_response_version_form_fk' }).onDelete('restrict'),
+  s.foreignKey({ columns: [table.reviewId, table.formId, table.eventId], foreignColumns: [review.id, review.formId, review.eventId], name: 'form_response_review_form_event_fk' }).onDelete('cascade'),
+  s.check('form_response_owner_check', orm.sql`(speaker_id IS NOT NULL AND review_id IS NULL) OR (speaker_id IS NULL AND review_id IS NOT NULL)`),
   s.check('form_response_status_check', orm.sql`status IN ('DRAFT', 'SUBMITTED')`),
 ])
 
@@ -457,32 +521,6 @@ export const formFieldValue = s.sqliteTable('form_field_value', {
   // SQLite because NULL subjectSpeakerId rows are always considered distinct.
   s.uniqueIndex('form_field_value_plain_unique').on(table.responseId, table.name, table.value).where(orm.sql`subject_speaker_id IS NULL`),
   s.uniqueIndex('form_field_value_subject_unique').on(table.responseId, table.name, table.value, table.subjectSpeakerId).where(orm.sql`subject_speaker_id IS NOT NULL`),
-])
-
-// ── Evaluation — single-round quick reviews ─────────────────────────
-// Every member of the owning org can review every submission: a Yes/Maybe/No
-// vote, an optional 1–5 rating, and a comment. No plans, rounds, scorecards,
-// or assignments — the abstracts table sorts by vote counts and avg rating.
-
-export const review = s.sqliteTable('review', {
-  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
-  /** Denormalized: session and reviewer scope share the event. */
-  eventId: s.text('event_id').notNull(),
-  sessionId: s.text('session_id').notNull(),
-  reviewerId: s.text('reviewer_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
-  vote: s.text('vote', { enum: ['YES', 'MAYBE', 'NO'] }).notNull(),
-  /** Optional 1–5 stars. */
-  rating: s.integer('rating', { mode: 'number' }),
-  comment: s.text('comment'),
-  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
-  updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
-}, (table) => [
-  s.uniqueIndex('review_session_reviewer_unique').on(table.sessionId, table.reviewerId),
-  s.index('review_reviewer_idx').on(table.reviewerId),
-  s.index('review_event_idx').on(table.eventId),
-  s.foreignKey({ columns: [table.sessionId, table.eventId], foreignColumns: [eventSession.id, eventSession.eventId], name: 'review_session_fk' }).onDelete('cascade'),
-  s.check('review_vote_check', orm.sql`vote IN ('YES', 'MAYBE', 'NO')`),
-  s.check('review_rating_check', orm.sql`rating IS NULL OR rating BETWEEN 1 AND 5`),
 ])
 
 // ── Speaker portal tasks ────────────────────────────────────────────
@@ -598,6 +636,8 @@ export const emailMessage = s.sqliteTable('email_message', {
       'SCHEDULE_INVITE',
       'SCHEDULE_UPDATE',
       'SCHEDULE_CANCEL',
+      'REVIEWER_INVITE',
+      'REVIEW_REMINDER',
     ],
   }).notNull(),
   /** Idempotency: unique insert is the dedupe mechanism. Examples:
@@ -634,7 +674,7 @@ export const emailMessage = s.sqliteTable('email_message', {
   s.index('email_message_event_status_idx').on(table.eventId, table.status),
   s.index('email_message_speaker_idx').on(table.speakerId),
   s.index('email_message_session_idx').on(table.sessionId),
-  s.check('email_message_kind_check', orm.sql`kind IN ('SUBMISSION_CONFIRMATION', 'DECISION_ACCEPTED', 'DECISION_DECLINED', 'TASK_ASSIGNED', 'TASK_REMINDER', 'DRAFT_REMINDER', 'SCHEDULE_INVITE', 'SCHEDULE_UPDATE', 'SCHEDULE_CANCEL')`),
+  s.check('email_message_kind_check', orm.sql`kind IN ('SUBMISSION_CONFIRMATION', 'DECISION_ACCEPTED', 'DECISION_DECLINED', 'TASK_ASSIGNED', 'TASK_REMINDER', 'DRAFT_REMINDER', 'SCHEDULE_INVITE', 'SCHEDULE_UPDATE', 'SCHEDULE_CANCEL', 'REVIEWER_INVITE', 'REVIEW_REMINDER')`),
   s.check('email_message_status_check', orm.sql`status IN ('QUEUED', 'SENT', 'FAILED')`),
   s.check('email_message_ics_method_check', orm.sql`ics_method IS NULL OR ics_method IN ('REQUEST', 'CANCEL')`),
 ])
@@ -644,7 +684,7 @@ export const emailMessage = s.sqliteTable('email_message', {
 export const relations = orm.defineRelations(
   {
     user, session, account, verification, org, orgMember, orgInvitation,
-    event, track, format, room, form, formVersion, speaker, eventSession,
+    event, track, format, room, form, evaluationReviewer, formVersion, speaker, eventSession,
     sessionParticipant, formResponse, formFieldValue, review, taskDefinition,
     taskAssignment, file, emailMessage,
   },
@@ -659,6 +699,7 @@ export const relations = orm.defineRelations(
       }),
       speakerIdentities: r.many.speaker(),
       reviews: r.many.review(),
+      evaluationMemberships: r.many.evaluationReviewer(),
     },
     session: {
       user: r.one.user({ from: r.session.userId, to: r.user.id }),
@@ -684,6 +725,8 @@ export const relations = orm.defineRelations(
     orgInvitation: {
       org: r.one.org({ from: r.orgInvitation.orgId, to: r.org.orgId }),
       creator: r.one.user({ from: r.orgInvitation.createdBy, to: r.user.id }),
+      event: r.one.event({ from: r.orgInvitation.eventId, to: r.event.id }),
+      form: r.one.form({ from: r.orgInvitation.formId, to: r.form.id }),
     },
     event: {
       org: r.one.org({ from: r.event.orgId, to: r.org.orgId }),
@@ -697,6 +740,7 @@ export const relations = orm.defineRelations(
       taskDefinitions: r.many.taskDefinition(),
       files: r.many.file({ from: r.event.id, to: r.file.eventId }),
       emailMessages: r.many.emailMessage(),
+      evaluationReviewers: r.many.evaluationReviewer(),
     },
     track: {
       event: r.one.event({ from: r.track.eventId, to: r.event.id }),
@@ -715,6 +759,15 @@ export const relations = orm.defineRelations(
       versions: r.many.formVersion(),
       responses: r.many.formResponse(),
       taskDefinitions: r.many.taskDefinition({ from: r.form.id, to: r.taskDefinition.formId }),
+      evaluationReviewers: r.many.evaluationReviewer(),
+      reviewAssignments: r.many.review(),
+      invitations: r.many.orgInvitation(),
+    },
+    evaluationReviewer: {
+      event: r.one.event({ from: r.evaluationReviewer.eventId, to: r.event.id }),
+      form: r.one.form({ from: r.evaluationReviewer.formId, to: r.form.id }),
+      user: r.one.user({ from: r.evaluationReviewer.userId, to: r.user.id }),
+      assignments: r.many.review(),
     },
     formVersion: {
       form: r.one.form({ from: r.formVersion.formId, to: r.form.id }),
@@ -755,6 +808,7 @@ export const relations = orm.defineRelations(
       speaker: r.one.speaker({ from: r.formResponse.speakerId, to: r.speaker.id }),
       session: r.one.eventSession({ from: r.formResponse.sessionId, to: r.eventSession.id }),
       taskAssignment: r.one.taskAssignment({ from: r.formResponse.taskAssignmentId, to: r.taskAssignment.id }),
+      review: r.one.review({ from: r.formResponse.reviewId, to: r.review.id }),
       fieldValues: r.many.formFieldValue(),
     },
     formFieldValue: {
@@ -765,6 +819,12 @@ export const relations = orm.defineRelations(
     review: {
       session: r.one.eventSession({ from: r.review.sessionId, to: r.eventSession.id }),
       reviewer: r.one.user({ from: r.review.reviewerId, to: r.user.id }),
+      form: r.one.form({ from: r.review.formId, to: r.form.id }),
+      poolMembership: r.one.evaluationReviewer({
+        from: [r.review.eventId, r.review.formId, r.review.reviewerId],
+        to: [r.evaluationReviewer.eventId, r.evaluationReviewer.formId, r.evaluationReviewer.userId],
+      }),
+      response: r.one.formResponse({ from: r.review.id, to: r.formResponse.reviewId }),
     },
     taskDefinition: {
       event: r.one.event({ from: r.taskDefinition.eventId, to: r.event.id }),

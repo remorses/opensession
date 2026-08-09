@@ -22,10 +22,13 @@ import {
 import { collectFields } from './forms/collect-fields.ts'
 import {
   starterCfpTemplate,
+  starterEvaluationTemplate,
   starterPortalTemplate,
   starterSessionMaterialsTemplate,
   starterSpeakerProfileTemplate,
 } from './forms/starter-template.ts'
+import { validateSubmission } from './forms/validate.ts'
+import { flattenSubmissionValues } from './lib/cfp-submission.ts'
 import {
   clearSessionSlot,
   scheduleSessionSlot,
@@ -47,12 +50,13 @@ import {
 } from './lib/portal-server.ts'
 import {
   dedupeKeys,
+  dayBucket,
   enqueueAndSend,
   replyToFor,
   sendEmailMessage,
 } from './lib/emails/send.ts'
 import { zonedEpoch } from './lib/conflicts.ts'
-import { normalizeReviewInput } from './lib/reviews.ts'
+import { invitationAcceptanceDecision } from './lib/reviews.ts'
 import {
   applyTransition,
   planBulkStatusUpdate,
@@ -147,6 +151,7 @@ export async function createInvite(input: { orgId: string }) {
     .insert(schema.orgInvitation)
     .values({
       orgId: org.orgId,
+      purpose: 'ORG_MEMBER',
       createdBy: session.userId,
       expiresAt: Date.now() + INVITE_EXPIRY_MS,
     })
@@ -168,6 +173,23 @@ export async function acceptInvite(input: { invitationId: string }) {
   if (!invite || invite.expiresAt < Date.now()) {
     throw new Error('Invitation not found or expired')
   }
+  if (invite.purpose === 'EVALUATION_REVIEWER') {
+    const decision = invitationAcceptanceDecision({
+      now: Date.now(),
+      expiresAt: invite.expiresAt,
+      invitedEmail: invite.invitedEmail ?? '',
+      userEmail: session.user.email,
+      emailVerified: session.user.emailVerified,
+    })
+    if (!decision.ok) throw new Error(decision.message)
+    if (!invite.eventId || !invite.formId) throw new Error('Reviewer invitation is invalid')
+    await db.insert(schema.evaluationReviewer).values({
+      eventId: invite.eventId,
+      formId: invite.formId,
+      userId: session.userId,
+    }).onConflictDoNothing({ target: [schema.evaluationReviewer.formId, schema.evaluationReviewer.userId] })
+    throw redirect(`/review/${invite.formId}`)
+  }
   // onConflictDoNothing handles the already-member case (unique index on
   // org_id + user_id prevents duplicates).
   await db
@@ -175,6 +197,56 @@ export async function acceptInvite(input: { invitationId: string }) {
     .values({ orgId: invite.orgId, userId: session.userId, role: invite.role })
     .onConflictDoNothing({ target: [schema.orgMember.orgId, schema.orgMember.userId] })
   throw redirect(`/org/${invite.orgId}`)
+}
+
+const inviteReviewerSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  formId: z.string().min(1),
+  email: z.string().trim().toLowerCase().email(),
+})
+
+export async function inviteEvaluationReviewer(input: z.input<typeof inviteReviewerSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = inviteReviewerSchema.parse(input)
+  const { db, event } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const form = await db.query.form.findFirst({
+    where: { id: parsed.formId, eventId: parsed.eventId, purpose: 'EVALUATION' },
+  })
+  if (!form) throw new Error('Evaluation round not found')
+  const invitationId = ulid()
+  const now = Date.now()
+  await db.insert(schema.orgInvitation).values({
+    invitationId,
+    orgId: parsed.orgId,
+    purpose: 'EVALUATION_REVIEWER',
+    invitedEmail: parsed.email,
+    eventId: parsed.eventId,
+    formId: parsed.formId,
+    createdBy: session.userId,
+    expiresAt: now + INVITE_EXPIRY_MS,
+  })
+  const inviteUrl = new URL(`/invite/${invitationId}`, env.APP_URL).href
+  await enqueueAndSend({
+    db,
+    eventId: event.id,
+    toEmail: parsed.email,
+    dedupeKey: dedupeKeys.reviewerInvite(invitationId),
+    replyTo: replyToFor(event.contactEmail),
+    now,
+    payload: {
+      kind: 'REVIEWER_INVITE',
+      context: {
+        eventName: event.name,
+        eventSlug: event.slug,
+        appUrl: env.APP_URL,
+        timezone: event.timezone,
+      },
+      data: { roundName: form.name, inviteUrl },
+    },
+  })
+  return { invitationId, inviteUrl }
 }
 
 // ── Member management ───────────────────────────────────────────────
@@ -649,17 +721,24 @@ const createFormSchema = z.object({
   eventId: z.string().min(1),
   name: z.string().trim().min(1).max(120),
   slug: z.string().trim().toLowerCase().regex(SLUG_RE).max(60).optional(),
-  purpose: z.enum(['CFP', 'PORTAL']),
+  purpose: z.enum(['CFP', 'PORTAL', 'EVALUATION']),
   /** Portal only; CFP forms are always about the submission. */
   target: z.enum(['SUBMISSION', 'SPEAKER']).optional(),
+  opensAt: z.number().int().positive().nullable().optional(),
+  closesAt: z.number().int().positive().nullable().optional(),
+  blind: z.boolean().optional(),
 })
 
 /** Create a form with its first FormVersion seeded from the matching
  *  starter template, then redirect to the editor. */
 export async function createForm(input: z.input<typeof createFormSchema>) {
   const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
   const parsed = createFormSchema.parse(input)
   const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  if (parsed.opensAt != null && parsed.closesAt != null && parsed.opensAt >= parsed.closesAt) {
+    throw new Error('The open date must be before the close date')
+  }
 
   const slug = parsed.slug || slugify(parsed.name)
   if (!SLUG_RE.test(slug)) throw new Error('Could not derive a valid slug from the form name')
@@ -668,6 +747,8 @@ export async function createForm(input: z.input<typeof createFormSchema>) {
   const template =
     parsed.purpose === 'CFP'
       ? starterCfpTemplate
+      : parsed.purpose === 'EVALUATION'
+        ? starterEvaluationTemplate
       : parsed.target === 'SPEAKER'
         ? starterSpeakerProfileTemplate
         : starterPortalTemplate
@@ -681,6 +762,9 @@ export async function createForm(input: z.input<typeof createFormSchema>) {
         target: parsed.purpose === 'PORTAL' ? (parsed.target ?? 'SUBMISSION') : 'SUBMISSION',
         name: parsed.name,
         slug,
+        opensAt: parsed.opensAt ?? null,
+        closesAt: parsed.closesAt ?? null,
+        blind: parsed.purpose === 'EVALUATION' ? (parsed.blind ?? false) : false,
       }),
       db.insert(schema.formVersion).values({ formId, mdxSource: template }),
     ] as const)
@@ -749,6 +833,8 @@ const updateFormSettingsSchema = z.object({
   status: z.enum(['DRAFT', 'OPEN', 'CLOSED', 'ARCHIVED']),
   /** Epoch ms; null clears the deadline. */
   closesAt: z.number().int().positive().nullable(),
+  opensAt: z.number().int().positive().nullable().optional(),
+  blind: z.boolean().optional(),
 })
 
 /** Update form settings (name, slug, status, closesAt). Purpose and target
@@ -756,9 +842,13 @@ const updateFormSettingsSchema = z.object({
 export async function updateFormSettings(input: z.input<typeof updateFormSettingsSchema>) {
   const actionRequest = getActionRequest()
   const parsed = updateFormSettingsSchema.parse(input)
-  const { db } = await requireFormAccess({
+  const { db, form } = await requireFormAccess({
     actionRequest, orgId: parsed.orgId, eventId: parsed.eventId, formId: parsed.formId,
   })
+  const opensAt = parsed.opensAt === undefined ? form.opensAt : parsed.opensAt
+  if (opensAt != null && parsed.closesAt != null && opensAt >= parsed.closesAt) {
+    throw new Error('The open date must be before the close date')
+  }
   try {
     await db
       .update(schema.form)
@@ -767,6 +857,8 @@ export async function updateFormSettings(input: z.input<typeof updateFormSetting
         slug: parsed.slug,
         status: parsed.status,
         closesAt: parsed.closesAt,
+        ...(parsed.opensAt !== undefined ? { opensAt: parsed.opensAt } : {}),
+        ...(parsed.blind !== undefined ? { blind: parsed.blind } : {}),
         updatedAt: Date.now(),
       })
       .where(orm.eq(schema.form.id, parsed.formId))
@@ -801,7 +893,7 @@ export async function deleteForm(input: z.input<typeof deleteFormSchema>) {
     throw new Error('This form has responses and cannot be deleted. Archive it instead.')
   }
   await db.delete(schema.form).where(orm.eq(schema.form.id, parsed.formId)).limit(1)
-  const listSegment = form.purpose === 'PORTAL' ? 'portal-forms' : 'forms'
+  const listSegment = form.purpose === 'PORTAL' ? 'portal-forms' : form.purpose === 'EVALUATION' ? 'evaluation' : 'forms'
   throw redirect(`/org/${parsed.orgId}/e/${parsed.eventId}/${listSegment}`)
 }
 
@@ -1521,61 +1613,184 @@ async function insertAssignmentsIdempotent({
   return created
 }
 
-const upsertReviewSchema = z.object({
+const assignReviewsSchema = z.object({
   orgId: z.string().min(1),
   eventId: z.string().min(1),
-  sessionId: z.string().min(1),
-  vote: z.enum(['YES', 'MAYBE', 'NO']),
-  rating: z.number().int().min(1).max(5).nullable().optional(),
-  comment: z.string().max(5000).nullable().optional(),
+  formId: z.string().min(1),
+  reviewerId: z.string().min(1),
+  sessionIds: z.array(z.string().min(1)).min(1).max(100),
+  trackId: z.string().min(1).nullable().optional(),
+  limit: z.number().int().min(1).max(100),
 })
 
-/** Upsert the caller's review for a session (unique sessionId+reviewerId). */
-export async function upsertReview(input: z.input<typeof upsertReviewSchema>) {
+export async function assignEvaluationReviews(input: z.input<typeof assignReviewsSchema>) {
   const actionRequest = getActionRequest()
-  const { session } = await requireOrgAccess(actionRequest, input.orgId)
-  const parsed = upsertReviewSchema.parse(input)
+  await requireSession(actionRequest)
+  const parsed = assignReviewsSchema.parse(input)
   const { db } = await requireEventAccess({
     actionRequest,
     orgId: parsed.orgId,
     eventId: parsed.eventId,
   })
-  const row = await db.query.eventSession.findFirst({
-    where: { id: parsed.sessionId, eventId: parsed.eventId },
-    columns: { id: true, kind: true },
+  const pool = await db.query.evaluationReviewer.findFirst({
+    where: { eventId: parsed.eventId, formId: parsed.formId, userId: parsed.reviewerId },
   })
-  if (!row || row.kind !== 'CONTENT') throw new Error('Session not found')
-
-  const normalized = normalizeReviewInput({
-    vote: parsed.vote,
-    rating: parsed.rating ?? null,
-    comment: parsed.comment ?? null,
+  if (!pool) throw new Error('Reviewer is not in this round')
+  const form = await db.query.form.findFirst({
+    where: { id: parsed.formId, eventId: parsed.eventId, purpose: 'EVALUATION' },
   })
-  const now = Date.now()
-  const reviewId = ulid()
-  await db
-    .insert(schema.review)
-    .values({
-      id: reviewId,
+  if (!form) throw new Error('Evaluation round not found')
+  const sessions = await db.query.eventSession.findMany({
+    where: {
+      id: { in: [...new Set(parsed.sessionIds)] },
       eventId: parsed.eventId,
-      sessionId: parsed.sessionId,
-      reviewerId: session.userId,
-      vote: normalized.vote,
-      rating: normalized.rating,
-      comment: normalized.comment,
-      createdAt: now,
-      updatedAt: now,
-    })
-    .onConflictDoUpdate({
-      target: [schema.review.sessionId, schema.review.reviewerId],
-      set: {
-        vote: normalized.vote,
-        rating: normalized.rating,
-        comment: normalized.comment,
+      kind: 'CONTENT',
+      status: { in: ['PENDING', 'ACCEPT_QUEUE', 'ACCEPTED', 'DECLINE_QUEUE', 'DECLINED'] },
+      ...(parsed.trackId ? { trackId: parsed.trackId } : {}),
+    },
+  })
+  const selected = sessions.slice(0, parsed.limit)
+  if (selected.length === 0) throw new Error('No matching submissions selected')
+  const now = Date.now()
+  const statements = selected.map((row) => db.insert(schema.review).values({
+    eventId: parsed.eventId,
+    formId: parsed.formId,
+    sessionId: row.id,
+    reviewerId: parsed.reviewerId,
+    createdAt: now,
+    updatedAt: now,
+  }).onConflictDoNothing().returning({ id: schema.review.id }))
+  const inserted = await db.batch(statements as [any, ...any[]])
+  return { assigned: inserted.reduce((count, rows) => count + (Array.isArray(rows) ? rows.length : 0), 0) }
+}
+
+const reviewResponseSchema = z.object({
+  reviewId: z.string().min(1),
+  submission: cfpSubmissionSchema,
+  submit: z.boolean(),
+})
+
+export async function saveEvaluationReview(input: z.input<typeof reviewResponseSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = reviewResponseSchema.parse(input)
+  if (parsed.submission.participants.length > 0) throw new Error('Evaluation scorecards cannot contain participants')
+  const db = getDb()
+  const assignment = await db.query.review.findFirst({
+    where: { id: parsed.reviewId, reviewerId: session.userId },
+    with: { form: true, response: { with: { formVersion: true } } },
+  })
+  if (!assignment?.form || assignment.form.purpose !== 'EVALUATION') throw new Error('Review assignment not found')
+  if (assignment.recusedAt != null) throw new Error('This review was recused')
+  const now = Date.now()
+  if (assignment.form.status !== 'OPEN'
+    || (assignment.form.opensAt != null && assignment.form.opensAt > now)
+    || (assignment.form.closesAt != null && assignment.form.closesAt <= now)) {
+    throw new Error('This evaluation round is not open')
+  }
+  const version = assignment.response?.formVersion ?? await db.query.formVersion.findFirst({
+    where: { formId: assignment.formId },
+    orderBy: { createdAt: 'desc', id: 'desc' },
+  })
+  if (!version) throw new Error('Scorecard version not found')
+  const collected = collectFields({ mdxSource: version.mdxSource, scope: { values: parsed.submission.values } })
+  const validation = validateSubmission({
+    collected,
+    ...parsed.submission,
+    allowIncomplete: !parsed.submit,
+  })
+  if (!validation.ok) throw new Error(validation.errors.map((error) => error.message).join('\n'))
+
+  const responseId = assignment.response?.id ?? ulid()
+  const values = flattenSubmissionValues({
+    responseId,
+    submission: parsed.submission,
+    participantSpeakerIds: [],
+    fileFieldNames: new Set(),
+  })
+  const responseStatement = assignment.response
+    ? db.update(schema.formResponse).set({
+        status: parsed.submit ? 'SUBMITTED' : 'DRAFT',
+        submittedAt: parsed.submit ? now : null,
         updatedAt: now,
-      },
-    })
-  return { sessionId: parsed.sessionId, vote: normalized.vote }
+      }).where(orm.eq(schema.formResponse.id, responseId)).limit(1)
+    : db.insert(schema.formResponse).values({
+        id: responseId,
+        eventId: assignment.eventId,
+        formId: assignment.formId,
+        formVersionId: version.id,
+        speakerId: null,
+        reviewId: assignment.id,
+        sessionId: assignment.sessionId,
+        status: parsed.submit ? 'SUBMITTED' : 'DRAFT',
+        submittedAt: parsed.submit ? now : null,
+        createdAt: now,
+        updatedAt: now,
+      })
+  const statements = [
+    responseStatement,
+    ...(assignment.response ? [db.delete(schema.formFieldValue).where(orm.eq(schema.formFieldValue.responseId, responseId))] : []),
+    ...values.map((value) => db.insert(schema.formFieldValue).values(value)),
+  ]
+  await db.batch(statements as [any, ...any[]])
+  return { reviewId: assignment.id, status: parsed.submit ? 'COMPLETED' as const : 'IN_PROGRESS' as const }
+}
+
+const recuseReviewSchema = z.object({ reviewId: z.string().min(1), reason: z.string().trim().min(3).max(1000) })
+
+export async function recuseEvaluationReview(input: z.input<typeof recuseReviewSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = recuseReviewSchema.parse(input)
+  const db = getDb()
+  const assignment = await db.query.review.findFirst({
+    where: { id: parsed.reviewId, reviewerId: session.userId },
+    with: { response: true },
+  })
+  if (!assignment) throw new Error('Review assignment not found')
+  if (assignment.response?.status === 'SUBMITTED') throw new Error('A completed review cannot be recused')
+  const statements = [
+    db.update(schema.review).set({ recusedAt: Date.now(), recusalReason: parsed.reason, updatedAt: Date.now() })
+      .where(orm.eq(schema.review.id, assignment.id)).limit(1),
+    ...(assignment.response
+      ? [db.delete(schema.formResponse).where(orm.eq(schema.formResponse.id, assignment.response.id)).limit(1)]
+      : []),
+  ]
+  await db.batch(statements as [any, ...any[]])
+  return { reviewId: assignment.id, status: 'RECUSED' as const }
+}
+
+const remindReviewerSchema = z.object({
+  orgId: z.string().min(1), eventId: z.string().min(1), formId: z.string().min(1), reviewerId: z.string().min(1),
+})
+
+export async function remindEvaluationReviewer(input: z.input<typeof remindReviewerSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = remindReviewerSchema.parse(input)
+  const { db, event } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const pool = await db.query.evaluationReviewer.findFirst({
+    where: { eventId: parsed.eventId, formId: parsed.formId, userId: parsed.reviewerId },
+    with: { user: true, form: true, assignments: { with: { response: true } } },
+  })
+  if (!pool?.user || !pool.form) throw new Error('Reviewer not found')
+  const pendingCount = pool.assignments.filter((row) => row.recusedAt == null && row.response?.status !== 'SUBMITTED').length
+  if (pendingCount === 0) throw new Error('This reviewer has no outstanding reviews')
+  const now = Date.now()
+  await enqueueAndSend({
+    db,
+    eventId: event.id,
+    toEmail: pool.user.email,
+    dedupeKey: dedupeKeys.reviewReminder(pool.formId, pool.userId, dayBucket(now, event.timezone)),
+    replyTo: replyToFor(event.contactEmail),
+    now,
+    payload: {
+      kind: 'REVIEW_REMINDER',
+      context: { eventName: event.name, eventSlug: event.slug, appUrl: env.APP_URL, timezone: event.timezone, recipientName: pool.user.name },
+      data: { roundName: pool.form.name, reviewUrl: new URL(`/review/${pool.formId}`, env.APP_URL).href, pendingCount, closesAt: pool.form.closesAt },
+    },
+  })
+  return { pendingCount }
 }
 
 const createTaskDefinitionSchema = z.object({
