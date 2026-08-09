@@ -83,6 +83,7 @@ export type EnqueueInput = {
   payload: EmailPayload
   speakerId?: string | null
   sessionId?: string | null
+  batchId?: string | null
   /** Rendered iCalendar. Present only for the SCHEDULE_* kinds. */
   ics?: { method: 'REQUEST' | 'CANCEL'; sequence: number; body: string } | null
 }
@@ -99,6 +100,7 @@ export async function enqueueEmail(input: EnqueueInput): Promise<EnqueueResult> 
       eventId: input.eventId,
       kind: input.payload.kind satisfies EmailKind,
       dedupeKey: input.dedupeKey,
+      batchId: input.batchId ?? null,
       toEmail: input.toEmail,
       speakerId: input.speakerId ?? null,
       sessionId: input.sessionId ?? null,

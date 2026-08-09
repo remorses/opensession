@@ -464,10 +464,17 @@ model EvaluationReviewer {
 // ═════════════════════════════════════════════════════════════════════════════
 
 // Per-participation confirmation lives on SessionParticipant (a speaker can
-// confirm one accepted talk and decline another). An event-level speaker
-// status is DERIVED from their participations, never stored.
+// confirm one accepted talk and decline another). Speaker.status separately
+// tracks the organizer's event-roster workflow.
 enum SpeakerConfirmation {
   PENDING   // accepted session but hasn't confirmed participation yet
+  CONFIRMED
+  DECLINED
+}
+
+enum SpeakerStatus {
+  PENDING
+  INVITED
   CONFIRMED
   DECLINED
 }
@@ -480,6 +487,7 @@ model Speaker {
   user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
 
   email     String
+  status    SpeakerStatus @default(PENDING)
   firstName String
   lastName  String
   // System profile fields (portal "Profile" page). Anything else (dietary
@@ -493,6 +501,7 @@ model Speaker {
   twitterUrl    String?
   headshotFileId String? @unique
   headshotFile   File?   @relation("SpeakerHeadshot", fields: [headshotFileId], references: [id], onDelete: SetNull)
+  avatarUrl      String? // Google profile image fallback when no headshot is uploaded
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -766,8 +775,11 @@ enum TaskSource {
   FORM   // completing the linked portal Form completes the task
 }
 
-// Every task definition auto-assigns to every accepted speaker/session at
-// acceptance time (hard-coded; no per-task assignment mode).
+enum TaskAssignmentPolicy {
+  SELECTED
+  ALL_ACCEPTED
+}
+
 model TaskDefinition {
   id      String     @id @default(cuid())
   eventId String
@@ -776,6 +788,7 @@ model TaskDefinition {
   instructionsHtml String?
   target  TaskTarget
   source  TaskSource @default(MANUAL)
+  assignmentPolicy TaskAssignmentPolicy @default(ALL_ACCEPTED)
 
   formId String?
   form   Form?   @relation(fields: [formId], references: [id], onDelete: SetNull)
@@ -892,6 +905,8 @@ enum EmailKind {
   SCHEDULE_CANCEL         // ICS CANCEL when a session is unscheduled/withdrawn
   REVIEWER_INVITE
   REVIEW_REMINDER
+  SPEAKER_INVITE
+  CUSTOM
 }
 
 enum EmailStatus {
@@ -922,6 +937,7 @@ model EmailMessage {
   //   "ics:{sessionId}:{speakerId}:{icsSequence}"
   // Two concurrent cron workers cannot double-send.
   dedupeKey String @unique
+  batchId String?
 
   toEmail   String
   speakerId String?
@@ -949,6 +965,7 @@ model EmailMessage {
   @@index([eventId, status])
   @@index([speakerId])
   @@index([sessionId])
+  @@index([batchId])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

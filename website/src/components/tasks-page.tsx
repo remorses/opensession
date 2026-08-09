@@ -8,6 +8,8 @@ import {
   createTaskDefinition,
   deleteTaskDefinition,
   updateTaskDefinition,
+  updateTaskAssignmentDue,
+  remindTaskAssignments,
 } from '../actions.tsx'
 import { cn, formatDateUTC } from '../lib/utils.ts'
 import { Button } from './ui/button.tsx'
@@ -22,6 +24,7 @@ import {
 } from './ui/dialog.tsx'
 import { Badge, EmptyState, Input, NativeSelect, Textarea } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
+import { toast, toastActionError } from './ui/toast.tsx'
 
 export type TasksTab = 'all' | 'speaker' | 'submission'
 
@@ -37,6 +40,7 @@ export type TaskListRow = {
   instructionsHtml: string | null
   target: 'SPEAKER' | 'SUBMISSION'
   source: 'MANUAL' | 'FORM'
+  assignmentPolicy: 'SELECTED' | 'ALL_ACCEPTED'
   formId: string | null
   formName: string | null
   dueAt: number | null
@@ -45,18 +49,28 @@ export type TaskListRow = {
   completed: number
   inProgress: number
   notStarted: number
+  assignments: Array<{ id: string; status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED'; dueAt: number | null; speakerId: string; speakerName: string; sessionId: string | null; sessionTitle: string | null }>
 }
 
 export function TasksPage({ tab }: { tab: TasksTab }) {
   const { currentOrgId } = useLoaderData('/org/:orgId/*')
   const { event } = useLoaderData('/org/:orgId/e/:eventId/*')
-  const { tasks, portalForms } = useLoaderData('/org/:orgId/e/:eventId/tasks')
+  const { tasks, portalForms, speakers, acceptedSessions } = useLoaderData('/org/:orgId/e/:eventId/tasks')
   const [createOpen, setCreateOpen] = useState(false)
+  const [assignmentFilter, setAssignmentFilter] = useState<'all' | 'incomplete' | 'complete'>('all')
+  const [selectedAssignments, setSelectedAssignments] = useState<string[]>([])
+  const [reminding, startReminder] = useTransition()
 
   const active = tabs.find((t) => t.value === tab) ?? tabs[0]!
   const visible = active.match
     ? tasks.filter((task) => task.target === active.match)
     : tasks
+  const visibleAssignmentIds = visible.flatMap((task) => task.assignments)
+    .filter((assignment) => assignmentFilter === 'all'
+      || (assignmentFilter === 'complete' ? assignment.status === 'COMPLETED' : assignment.status !== 'COMPLETED'))
+    .map((assignment) => assignment.id)
+  const allAssignmentsSelected = visibleAssignmentIds.length > 0
+    && visibleAssignmentIds.every((id) => selectedAssignments.includes(id))
 
   return (
     <div className="flex flex-col gap-5">
@@ -72,6 +86,25 @@ export function TasksPage({ tab }: { tab: TasksTab }) {
           <PlusIcon />
           Add task
         </Button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <NativeSelect aria-label="Filter task assignments" className="w-44" value={assignmentFilter} onChange={(event) => setAssignmentFilter(event.target.value === 'complete' ? 'complete' : event.target.value === 'incomplete' ? 'incomplete' : 'all')}>
+          <option value="all">All assignments</option>
+          <option value="incomplete">Incomplete</option>
+          <option value="complete">Complete</option>
+        </NativeSelect>
+        <div className="flex items-center gap-2">
+          <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="checkbox" checked={allAssignmentsSelected} onChange={(event) => setSelectedAssignments(event.target.checked ? [...new Set([...selectedAssignments, ...visibleAssignmentIds])] : selectedAssignments.filter((id) => !visibleAssignmentIds.includes(id)))} />Select visible assignments</label>
+          <Button variant="outline" disabled={reminding || selectedAssignments.length === 0} onClick={() => startReminder(async () => {
+            try {
+              const result = await remindTaskAssignments({ orgId: currentOrgId, eventId: event.id, assignmentIds: selectedAssignments })
+              toast.success(`Queued ${result.queued} task reminders`)
+            } catch (error) {
+              toastActionError(error, 'Could not send task reminders')
+            }
+          })}>{reminding ? 'Sending...' : `Remind ${selectedAssignments.length || ''}`}</Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 border-b border-border">
@@ -138,6 +171,11 @@ export function TasksPage({ tab }: { tab: TasksTab }) {
                   eventId={event.id}
                   task={task}
                   portalForms={portalForms}
+                  speakers={speakers}
+                  acceptedSessions={acceptedSessions}
+                  assignmentFilter={assignmentFilter}
+                  selectedAssignments={selectedAssignments}
+                  onAssignmentSelected={(assignmentId, checked) => setSelectedAssignments(checked ? [...new Set([...selectedAssignments, assignmentId])] : selectedAssignments.filter((id) => id !== assignmentId))}
                 />
               ))}
             </TableBody>
@@ -151,6 +189,8 @@ export function TasksPage({ tab }: { tab: TasksTab }) {
         orgId={currentOrgId}
         eventId={event.id}
         portalForms={portalForms}
+        speakers={speakers}
+        acceptedSessions={acceptedSessions}
         mode="create"
       />
     </div>
@@ -162,18 +202,28 @@ function TaskRow({
   eventId,
   task,
   portalForms,
+  speakers,
+  acceptedSessions,
+  assignmentFilter,
+  selectedAssignments,
+  onAssignmentSelected,
 }: {
   orgId: string
   eventId: string
   task: TaskListRow
   portalForms: Array<{ id: string; name: string; target: 'SPEAKER' | 'SUBMISSION' }>
+  speakers: Array<{ id: string; name: string; status: string }>
+  acceptedSessions: Array<{ id: string; title: string; speakerNames: string[] }>
+  assignmentFilter: 'all' | 'incomplete' | 'complete'
+  selectedAssignments: string[]
+  onAssignmentSelected: (assignmentId: string, checked: boolean) => void
 }) {
   const [editOpen, setEditOpen] = useState(false)
   const [pending, startTransition] = useTransition()
   const [error, setError] = useState<string | null>(null)
   const pct = task.total === 0 ? 0 : Math.round((task.completed / task.total) * 100)
 
-  return (
+  return (<>
     <TableRow>
       <TableCell>
         <button
@@ -252,11 +302,20 @@ function TaskRow({
         orgId={orgId}
         eventId={eventId}
         portalForms={portalForms}
+        speakers={speakers}
+        acceptedSessions={acceptedSessions}
         mode="edit"
         task={task}
       />
     </TableRow>
-  )
+    {task.assignments.filter((assignment) => assignmentFilter === 'all' || (assignmentFilter === 'complete' ? assignment.status === 'COMPLETED' : assignment.status !== 'COMPLETED')).map((assignment) => <TableRow key={assignment.id} className="bg-muted/20">
+      <TableCell className="pl-8 text-sm"><label className="flex items-center gap-2"><input type="checkbox" aria-label={`Select ${task.title} for ${assignment.speakerName}`} checked={selectedAssignments.includes(assignment.id)} onChange={(event) => onAssignmentSelected(assignment.id, event.target.checked)} />{assignment.speakerName}</label></TableCell>
+      <TableCell colSpan={2} className="text-xs text-muted-foreground">{assignment.sessionTitle ?? 'Speaker task'}</TableCell>
+      <TableCell><Input aria-label={`Due date for ${assignment.speakerName}`} type="date" defaultValue={assignment.dueAt ? new Date(assignment.dueAt).toISOString().slice(0, 10) : ''} onBlur={(event) => updateTaskAssignmentDue({ orgId, eventId, assignmentId: assignment.id, dueAt: event.target.value ? Date.parse(`${event.target.value}T23:59:59Z`) : null }).catch((error) => { setError(toastActionError(error, 'Could not update the due date')) })} /></TableCell>
+      <TableCell><Badge variant={assignment.status === 'COMPLETED' ? 'success' : 'secondary'}>{assignment.status.toLowerCase().replace('_', ' ')}</Badge></TableCell>
+      <TableCell><Button size="sm" variant="ghost" disabled={assignment.status === 'COMPLETED'} onClick={async () => { try { const result = await remindTaskAssignments({ orgId, eventId, assignmentIds: [assignment.id] }); toast.success(`Queued ${result.queued} task reminder`) } catch (error) { setError(toastActionError(error, 'Could not send the reminder')) } }}>Remind</Button></TableCell>
+    </TableRow>)}
+  </>)
 }
 
 function TaskDialog({
@@ -265,6 +324,8 @@ function TaskDialog({
   orgId,
   eventId,
   portalForms,
+  speakers,
+  acceptedSessions,
   mode,
   task,
 }: {
@@ -273,6 +334,8 @@ function TaskDialog({
   orgId: string
   eventId: string
   portalForms: Array<{ id: string; name: string; target: 'SPEAKER' | 'SUBMISSION' }>
+  speakers: Array<{ id: string; name: string; status: string }>
+  acceptedSessions: Array<{ id: string; title: string; speakerNames: string[] }>
   mode: 'create' | 'edit'
   task?: TaskListRow
 }) {
@@ -284,6 +347,9 @@ function TaskDialog({
   const [dueDate, setDueDate] = useState(
     task?.dueAt ? new Date(task.dueAt).toISOString().slice(0, 10) : '',
   )
+  const [assignmentPolicy, setAssignmentPolicy] = useState<'SELECTED' | 'ALL_ACCEPTED'>(task?.assignmentPolicy ?? 'SELECTED')
+  const [speakerIds, setSpeakerIds] = useState<string[]>([])
+  const [sessionIds, setSessionIds] = useState<string[]>([])
   const [pending, startTransition] = useTransition()
   const [error, setError] = useState<string | null>(null)
 
@@ -298,6 +364,7 @@ function TaskDialog({
       setFormId(task?.formId ?? '')
       setInstructions(task?.instructionsHtml ?? '')
       setDueDate(task?.dueAt ? new Date(task.dueAt).toISOString().slice(0, 10) : '')
+      setAssignmentPolicy(task?.assignmentPolicy ?? 'SELECTED')
       setError(null)
     }
     onOpenChange(next)
@@ -342,6 +409,9 @@ function TaskDialog({
                         formId: source === 'FORM' ? formId || null : null,
                         instructionsHtml: instructions.trim() || undefined,
                         dueAt,
+                        assignmentPolicy,
+                        speakerIds,
+                        sessionIds,
                       })
                     } else if (task) {
                       await updateTaskDefinition({
@@ -376,6 +446,7 @@ function TaskDialog({
                 <label className="flex flex-col gap-1.5 text-sm font-medium">
                   Target
                   <NativeSelect
+                    disabled={mode === 'edit'}
                     value={target}
                     onChange={(e) => {
                       const next = e.target.value as typeof target
@@ -390,6 +461,7 @@ function TaskDialog({
                 <label className="flex flex-col gap-1.5 text-sm font-medium">
                   Source
                   <NativeSelect
+                    disabled={mode === 'edit'}
                     value={source}
                     onChange={(e) => setSource(e.target.value as typeof source)}
                   >
@@ -398,6 +470,13 @@ function TaskDialog({
                   </NativeSelect>
                 </label>
               </div>
+              {mode === 'create' ? <>
+                <label className="flex flex-col gap-1.5 text-sm font-medium">Assignment policy<NativeSelect value={assignmentPolicy} onChange={(event) => setAssignmentPolicy(event.target.value as typeof assignmentPolicy)}><option value="SELECTED">Selected only</option><option value="ALL_ACCEPTED">All accepted, including future</option></NativeSelect></label>
+                {assignmentPolicy === 'SELECTED' ? <div className="grid max-h-48 gap-3 overflow-auto rounded-md border border-border p-3 sm:grid-cols-2">
+                  <fieldset className="flex flex-col gap-2"><legend className="text-sm font-medium">Speakers</legend>{speakers.map((speaker) => <label key={speaker.id} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={speakerIds.includes(speaker.id)} onChange={(event) => setSpeakerIds(event.target.checked ? [...speakerIds, speaker.id] : speakerIds.filter((id) => id !== speaker.id))} />{speaker.name}</label>)}</fieldset>
+                  <fieldset className="flex flex-col gap-2"><legend className="text-sm font-medium">Accepted sessions</legend>{acceptedSessions.map((session) => <label key={session.id} className="flex items-start gap-2 text-sm"><input type="checkbox" checked={sessionIds.includes(session.id)} onChange={(event) => setSessionIds(event.target.checked ? [...sessionIds, session.id] : sessionIds.filter((id) => id !== session.id))} /><span>{session.title}<span className="block text-xs text-muted-foreground">{session.speakerNames.join(', ')}</span></span></label>)}</fieldset>
+                </div> : <p className="text-xs text-muted-foreground">Current accepted participants are assigned now. Future accepted sessions are assigned automatically.</p>}
+              </> : null}
               {source === 'FORM' ? (
                 <label className="flex flex-col gap-1.5 text-sm font-medium">
                   Portal form

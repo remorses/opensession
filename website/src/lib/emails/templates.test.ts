@@ -105,6 +105,16 @@ const payloads: Record<EmailKind, EmailPayload> = {
     context,
     data: { roundName: 'Initial Review', reviewUrl: 'https://opensession.dev/review/F1', pendingCount: 2, closesAt: dueAt },
   },
+  SPEAKER_INVITE: {
+    kind: 'SPEAKER_INVITE',
+    context,
+    data: { portalUrl: 'https://opensession.dev/portal/aie-world-fair' },
+  },
+  CUSTOM: {
+    kind: 'CUSTOM',
+    context,
+    data: { subject: 'Welcome, Ada', body: 'Your speaker portal is ready: https://opensession.dev/portal/aie-world-fair' },
+  },
 }
 
 describe('formatters', () => {
@@ -131,6 +141,7 @@ describe('subjects', () => {
     )
     expect(subjects).toMatchInlineSnapshot(`
       {
+        "CUSTOM": "Welcome, Ada",
         "DECISION_ACCEPTED": "Your talk was accepted for AI Engineer World Fair",
         "DECISION_DECLINED": "Update on your AI Engineer World Fair submission",
         "DRAFT_REMINDER": "Your AI Engineer World Fair draft is still unsubmitted",
@@ -139,6 +150,7 @@ describe('subjects', () => {
         "SCHEDULE_CANCEL": "Shipping RSC on the edge was removed from the schedule",
         "SCHEDULE_INVITE": "Your AI Engineer World Fair session is scheduled",
         "SCHEDULE_UPDATE": "Time change for Shipping RSC on the edge",
+        "SPEAKER_INVITE": "Your AI Engineer World Fair speaker portal",
         "SUBMISSION_CONFIRMATION": "We got your submission for AI Engineer World Fair",
         "TASK_ASSIGNED": "New task: Complete speaker profile",
         "TASK_REMINDER": "Reminder: Upload session materials",
@@ -159,6 +171,21 @@ describe('subjects', () => {
     })
     expect(email.subject).toMatchInlineSnapshot(`"Overdue: Upload session materials"`)
     expect(email.text).toContain('It was due Wed, Sep 30, 2026.')
+  })
+
+  test('manual reminders without a deadline do not claim they are due today', () => {
+    const email = buildEmail({
+      kind: 'TASK_REMINDER',
+      context,
+      data: {
+        assignmentId: 'A3',
+        taskTitle: 'Confirm participation',
+        dueAt: null,
+        daysUntilDue: 0,
+      },
+    })
+    expect(email.text).toContain('is still open')
+    expect(email.text).not.toContain('due today')
   })
 })
 
@@ -219,7 +246,9 @@ describe('bodies', () => {
         "SCHEDULE_UPDATE": "Hey Ada,\\n\\nthe slot for \\"Shipping RSC on the edge\\" at AI Engineer World Fair moved.\\n\\nWhen: Mon, Oct 12, 2026, 10:30 AM PDT to Mon, Oct 12, 2026, 11:00 AM PDT\\nWhere: Room B\\n\\nThe attached invite updates the entry already in your calendar. Details:\\nhttps://opensession.dev/portal/aie-world-fair/submissions/S1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
         "SCHEDULE_CANCEL": "Hey Ada,\\n\\n\\"Shipping RSC on the edge\\" was taken off the AI Engineer World Fair schedule and the calendar entry is cancelled.\\n\\nIf this is a surprise, reply here and we will sort it out.\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
         "REVIEWER_INVITE": "Hey Ada,\\n\\nyou were invited to join the \\"Initial Review\\" reviewer pool for AI Engineer World Fair.\\n\\nAccept the invitation with the Google account that received this email:\\nhttps://opensession.dev/invite/I1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
-        "REVIEW_REMINDER": "Hey Ada,\\n\\nyou still have 2 reviews to finish in Initial Review. The round closes Wed, Sep 30, 2026.\\n\\nhttps://opensession.dev/review/F1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair"
+        "REVIEW_REMINDER": "Hey Ada,\\n\\nyou still have 2 reviews to finish in Initial Review. The round closes Wed, Sep 30, 2026.\\n\\nhttps://opensession.dev/review/F1\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
+        "SPEAKER_INVITE": "Hey Ada,\\n\\nyour speaker portal for AI Engineer World Fair is ready.\\n\\nSign in with this email address to see your sessions and tasks:\\nhttps://opensession.dev/portal/aie-world-fair\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair",
+        "CUSTOM": "Hey Ada,\\n\\nYour speaker portal is ready: https://opensession.dev/portal/aie-world-fair\\n\\nIf anything looks off, just reply to this email.\\nAI Engineer World Fair"
       }"
     `)
   })

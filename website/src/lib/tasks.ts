@@ -5,6 +5,7 @@
 
 export type TaskTarget = 'SPEAKER' | 'SUBMISSION'
 export type TaskSource = 'MANUAL' | 'FORM'
+export type TaskAssignmentPolicy = 'SELECTED' | 'ALL_ACCEPTED'
 export type TaskAssignmentStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED'
 
 export type TaskDefForAssign = {
@@ -12,6 +13,7 @@ export type TaskDefForAssign = {
   eventId: string
   target: TaskTarget
   dueAt: number | null
+  assignmentPolicy?: TaskAssignmentPolicy
 }
 
 export type ParticipantForAssign = {
@@ -46,6 +48,7 @@ export function buildAssignmentsForAcceptance({
   const rows: PlannedTaskAssignment[] = []
 
   for (const def of taskDefs) {
+    if (def.assignmentPolicy === 'SELECTED') continue
     if (def.target === 'SPEAKER') {
       for (const speakerId of speakerIds) {
         rows.push({
@@ -162,6 +165,7 @@ export function defaultFormTaskDefinitions({
       instructionsHtml: null as string | null,
       target: 'SPEAKER' as const,
       source: 'FORM' as const,
+      assignmentPolicy: 'ALL_ACCEPTED' as const,
       formId: speakerProfileFormId,
       dueAt: null as number | null,
       sortOrder: 0,
@@ -173,6 +177,7 @@ export function defaultFormTaskDefinitions({
       instructionsHtml: null as string | null,
       target: 'SUBMISSION' as const,
       source: 'FORM' as const,
+      assignmentPolicy: 'ALL_ACCEPTED' as const,
       formId: sessionMaterialsFormId,
       dueAt: null as number | null,
       sortOrder: 1,

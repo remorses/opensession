@@ -310,6 +310,7 @@ export const speaker = s.sqliteTable('speaker', {
   eventId: s.text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
   userId: s.text('user_id').references(() => user.id, { onDelete: 'set null' }),
   email: s.text('email').notNull(),
+  status: s.text('status', { enum: ['PENDING', 'INVITED', 'CONFIRMED', 'DECLINED'] }).notNull().default('PENDING'),
   firstName: s.text('first_name').notNull(),
   lastName: s.text('last_name').notNull(),
   // System profile fields (portal "Profile" page). Anything else (dietary
@@ -335,6 +336,7 @@ export const speaker = s.sqliteTable('speaker', {
   // One linked speaker identity per user per event. Partial: unlinked
   // (userId NULL) co-speakers can coexist.
   s.uniqueIndex('speaker_event_user_unique').on(table.eventId, table.userId).where(orm.sql`user_id IS NOT NULL`),
+  s.check('speaker_status_check', orm.sql`status IN ('PENDING', 'INVITED', 'CONFIRMED', 'DECLINED')`),
 ])
 
 // ── Sessions / submissions — one table for the whole lifecycle ──────
@@ -403,7 +405,7 @@ export const eventSession = s.sqliteTable('event_session', {
 
 // Speakers/moderators on a session, with role, display order, and
 // per-participation confirmation (a speaker can confirm talk A, decline B).
-// An event-level speaker status is DERIVED from participations, never stored.
+// Roster status is stored on Speaker; per-session confirmation stays here.
 export const sessionParticipant = s.sqliteTable('session_participant', {
   id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
   /** Denormalized: session and speaker must share the event. */
@@ -525,8 +527,8 @@ export const formFieldValue = s.sqliteTable('form_field_value', {
 
 // ── Speaker portal tasks ────────────────────────────────────────────
 // File-request tasks are just FORM tasks whose MDX contains a <FileUpload>
-// field. Every task definition auto-assigns to every accepted
-// speaker/session at acceptance time (hard-coded; no per-task modes).
+// field. ALL_ACCEPTED expands on acceptance; SELECTED keeps only explicit
+// assignments created with the definition.
 
 export const taskDefinition = s.sqliteTable('task_definition', {
   id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
@@ -539,6 +541,9 @@ export const taskDefinition = s.sqliteTable('task_definition', {
   /** MANUAL = checkbox task; FORM = completing the linked portal Form
    *  completes the task (form.target must match the task target). */
   source: s.text('source', { enum: ['MANUAL', 'FORM'] }).notNull().default('MANUAL'),
+  /** SELECTED never expands later. ALL_ACCEPTED backfills current accepted
+   *  participants and applies when future sessions are accepted. */
+  assignmentPolicy: s.text('assignment_policy', { enum: ['SELECTED', 'ALL_ACCEPTED'] }).notNull().default('ALL_ACCEPTED'),
   formId: s.text('form_id'),
   /** Default for NEW assignments (snapshotted per assignment). */
   dueAt: epochMs('due_at'),
@@ -552,6 +557,7 @@ export const taskDefinition = s.sqliteTable('task_definition', {
   s.foreignKey({ columns: [table.formId, table.eventId], foreignColumns: [form.id, form.eventId], name: 'task_definition_form_event_fk' }),
   s.check('task_definition_target_check', orm.sql`target IN ('SPEAKER', 'SUBMISSION')`),
   s.check('task_definition_source_check', orm.sql`source IN ('MANUAL', 'FORM')`),
+  s.check('task_definition_assignment_policy_check', orm.sql`assignment_policy IN ('SELECTED', 'ALL_ACCEPTED')`),
   s.check('task_definition_source_form_check', orm.sql`(source = 'MANUAL' AND form_id IS NULL) OR (source = 'FORM' AND form_id IS NOT NULL)`),
 ])
 
@@ -638,6 +644,8 @@ export const emailMessage = s.sqliteTable('email_message', {
       'SCHEDULE_CANCEL',
       'REVIEWER_INVITE',
       'REVIEW_REMINDER',
+      'SPEAKER_INVITE',
+      'CUSTOM',
     ],
   }).notNull(),
   /** Idempotency: unique insert is the dedupe mechanism. Examples:
@@ -646,6 +654,8 @@ export const emailMessage = s.sqliteTable('email_message', {
    *  "ics:{sessionId}:{speakerId}:{icsSequence}"
    *  Two concurrent cron workers cannot double-send. */
   dedupeKey: s.text('dedupe_key').notNull().unique(),
+  /** Shared by per-recipient CUSTOM snapshots from one organizer send. */
+  batchId: s.text('batch_id'),
   toEmail: s.text('to_email').notNull(),
   speakerId: s.text('speaker_id').references(() => speaker.id, { onDelete: 'set null' }),
   sessionId: s.text('session_id').references(() => eventSession.id, { onDelete: 'set null' }),
@@ -674,7 +684,8 @@ export const emailMessage = s.sqliteTable('email_message', {
   s.index('email_message_event_status_idx').on(table.eventId, table.status),
   s.index('email_message_speaker_idx').on(table.speakerId),
   s.index('email_message_session_idx').on(table.sessionId),
-  s.check('email_message_kind_check', orm.sql`kind IN ('SUBMISSION_CONFIRMATION', 'DECISION_ACCEPTED', 'DECISION_DECLINED', 'TASK_ASSIGNED', 'TASK_REMINDER', 'DRAFT_REMINDER', 'SCHEDULE_INVITE', 'SCHEDULE_UPDATE', 'SCHEDULE_CANCEL', 'REVIEWER_INVITE', 'REVIEW_REMINDER')`),
+  s.index('email_message_batch_idx').on(table.batchId),
+  s.check('email_message_kind_check', orm.sql`kind IN ('SUBMISSION_CONFIRMATION', 'DECISION_ACCEPTED', 'DECISION_DECLINED', 'TASK_ASSIGNED', 'TASK_REMINDER', 'DRAFT_REMINDER', 'SCHEDULE_INVITE', 'SCHEDULE_UPDATE', 'SCHEDULE_CANCEL', 'REVIEWER_INVITE', 'REVIEW_REMINDER', 'SPEAKER_INVITE', 'CUSTOM')`),
   s.check('email_message_status_check', orm.sql`status IN ('QUEUED', 'SENT', 'FAILED')`),
   s.check('email_message_ics_method_check', orm.sql`ics_method IS NULL OR ics_method IN ('REQUEST', 'CANCEL')`),
 ])

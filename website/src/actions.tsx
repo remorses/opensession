@@ -69,6 +69,13 @@ import {
   defaultFormTaskDefinitions,
   type PlannedTaskAssignment,
 } from './lib/tasks.ts'
+import {
+  applySpeakerMergeFields,
+  normalizeSpeakerEmail,
+  planParticipantChange,
+  prepareSpeakerImport,
+  type SpeakerCsvRow,
+} from './lib/speaker-operations.ts'
 
 // ── Org actions (multi-org + team access) ───────────────────────────
 //
@@ -1272,6 +1279,7 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
             eventId: def.eventId,
             target: def.target,
             dueAt: def.dueAt,
+            assignmentPolicy: def.assignmentPolicy,
           })),
           participants: row.participants.map((p) => ({ speakerId: p.speakerId })),
           sessionId: row.id,
@@ -1576,6 +1584,7 @@ async function assignTasksForAcceptedSession({
         eventId: def.eventId,
         target: def.target,
         dueAt: def.dueAt,
+        assignmentPolicy: def.assignmentPolicy,
       })),
       participants,
       sessionId,
@@ -1793,6 +1802,257 @@ export async function remindEvaluationReviewer(input: z.input<typeof remindRevie
   return { pendingCount }
 }
 
+// ── Speaker roster, participants, and communications ────────────────
+
+const speakerProfileInput = z.object({
+  orgId: z.string().min(1), eventId: z.string().min(1),
+  speakerId: z.string().min(1).optional(),
+  email: z.email().max(320), firstName: z.string().trim().min(1).max(80),
+  lastName: z.string().trim().min(1).max(80),
+  status: z.enum(['PENDING', 'INVITED', 'CONFIRMED', 'DECLINED']).default('PENDING'),
+  jobTitle: z.string().trim().max(160).nullable().optional(),
+  companyName: z.string().trim().max(160).nullable().optional(),
+  bio: z.string().trim().max(5000).nullable().optional(),
+  pronouns: z.string().trim().max(80).nullable().optional(),
+  websiteUrl: z.string().trim().max(500).nullable().optional(),
+  linkedinUrl: z.string().trim().max(500).nullable().optional(),
+  twitterUrl: z.string().trim().max(500).nullable().optional(),
+})
+
+export async function saveSpeaker(input: z.input<typeof speakerProfileInput>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = speakerProfileInput.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const values = {
+    email: normalizeSpeakerEmail(parsed.email), firstName: parsed.firstName, lastName: parsed.lastName,
+    status: parsed.status, jobTitle: parsed.jobTitle?.trim() || null,
+    companyName: parsed.companyName?.trim() || null, bio: parsed.bio?.trim() || null,
+    pronouns: parsed.pronouns?.trim() || null, websiteUrl: parsed.websiteUrl?.trim() || null,
+    linkedinUrl: parsed.linkedinUrl?.trim() || null, twitterUrl: parsed.twitterUrl?.trim() || null,
+    updatedAt: Date.now(),
+  }
+  try {
+    if (parsed.speakerId) {
+      const updated = await db.update(schema.speaker).set(values).where(orm.and(
+        orm.eq(schema.speaker.id, parsed.speakerId), orm.eq(schema.speaker.eventId, parsed.eventId),
+      )).limit(1).returning({ id: schema.speaker.id })
+      if (!updated[0]) throw new Error('Speaker not found')
+      return { speakerId: updated[0].id, created: false }
+    }
+    const [created] = await db.insert(schema.speaker).values({ eventId: parsed.eventId, ...values }).returning({ id: schema.speaker.id })
+    return { speakerId: created!.id, created: true }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Speaker not found') throw error
+    throw new Error(`A speaker with email ${values.email} already exists in this event`)
+  }
+}
+
+const importSpeakersSchema = z.object({
+  orgId: z.string().min(1), eventId: z.string().min(1),
+  rows: z.array(z.object({
+    firstName: z.string(), lastName: z.string(), email: z.string(),
+    jobTitle: z.string().nullable(), companyName: z.string().nullable(), bio: z.string().nullable(),
+  })).min(1).max(1000),
+})
+
+export async function importSpeakers(input: { orgId: string; eventId: string; rows: SpeakerCsvRow[] }) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = importSpeakersSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const existing = await db.query.speaker.findMany({ where: { eventId: parsed.eventId } })
+  const plan = prepareSpeakerImport(parsed.rows, existing.map((row) => row.email))
+  if (plan.errors.length > 0) return { inserted: 0, skipped: plan.skipped.length, errors: plan.errors }
+  let inserted = 0
+  if (plan.inserted.length > 0) {
+    const now = Date.now()
+    const statements = plan.inserted.map((row) => db.insert(schema.speaker).values({
+      eventId: parsed.eventId, ...row, status: 'PENDING', createdAt: now, updatedAt: now,
+    }).onConflictDoNothing().returning({ id: schema.speaker.id }))
+    for (let index = 0; index < statements.length; index += 40) {
+      const results = await db.batch(statements.slice(index, index + 40) as [any, ...any[]])
+      inserted += results.reduce((count, rows) => count + (Array.isArray(rows) ? rows.length : 0), 0)
+    }
+  }
+  return { inserted, skipped: plan.skipped.length + plan.inserted.length - inserted, errors: [] }
+}
+
+const participantInput = z.object({
+  orgId: z.string().min(1), eventId: z.string().min(1), sessionId: z.string().min(1),
+  speakerId: z.string().min(1), role: z.enum(['SPEAKER', 'MODERATOR']),
+  confirmationStatus: z.enum(['PENDING', 'CONFIRMED', 'DECLINED']),
+  sortOrder: z.number().int().min(0).max(1000),
+})
+
+export async function saveSessionParticipant(input: z.input<typeof participantInput>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = participantInput.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const [sessionRow, speakerRow] = await db.batch([
+    db.query.eventSession.findFirst({ where: { id: parsed.sessionId, eventId: parsed.eventId } }),
+    db.query.speaker.findFirst({ where: { id: parsed.speakerId, eventId: parsed.eventId } }),
+  ] as const)
+  if (!sessionRow || sessionRow.kind !== 'CONTENT') throw new Error('Content session not found')
+  if (!speakerRow) throw new Error('Speaker not found')
+  const now = Date.now()
+  const patch = planParticipantChange(parsed, now)
+  await db.insert(schema.sessionParticipant).values({
+    eventId: parsed.eventId, sessionId: parsed.sessionId, speakerId: parsed.speakerId, ...patch,
+  }).onConflictDoUpdate({
+    target: [schema.sessionParticipant.sessionId, schema.sessionParticipant.speakerId], set: patch,
+  })
+  if (sessionRow.status === 'ACCEPTED') {
+    await assignTasksForAcceptedSession({ db, eventId: parsed.eventId, sessionId: parsed.sessionId, participants: [{ speakerId: parsed.speakerId }], now })
+  }
+  return { speakerId: parsed.speakerId }
+}
+
+const removeParticipantSchema = participantInput.pick({ orgId: true, eventId: true, sessionId: true, speakerId: true })
+export async function removeSessionParticipant(input: z.input<typeof removeParticipantSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = removeParticipantSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const sessionRow = await db.query.eventSession.findFirst({
+    where: { id: parsed.sessionId, eventId: parsed.eventId, kind: 'CONTENT' },
+  })
+  if (!sessionRow) throw new Error('Content session not found')
+  await db.delete(schema.sessionParticipant).where(orm.and(
+    orm.eq(schema.sessionParticipant.eventId, parsed.eventId),
+    orm.eq(schema.sessionParticipant.sessionId, parsed.sessionId),
+    orm.eq(schema.sessionParticipant.speakerId, parsed.speakerId),
+  )).limit(1)
+  if (sessionRow.status === 'ACCEPTED') {
+    const [automaticDefinitions, remainingAcceptedParticipations] = await db.batch([
+      db.query.taskDefinition.findMany({
+        where: { eventId: parsed.eventId, assignmentPolicy: 'ALL_ACCEPTED' },
+      }),
+      db.query.sessionParticipant.findMany({
+        where: { eventId: parsed.eventId, speakerId: parsed.speakerId, session: { status: 'ACCEPTED' } },
+      }),
+    ] as const)
+    const automaticIds = automaticDefinitions.map((definition) => definition.id)
+    if (automaticIds.length > 0) {
+      await db.delete(schema.taskAssignment).where(orm.and(
+        orm.eq(schema.taskAssignment.eventId, parsed.eventId),
+        orm.eq(schema.taskAssignment.speakerId, parsed.speakerId),
+        orm.inArray(schema.taskAssignment.taskDefinitionId, automaticIds),
+        remainingAcceptedParticipations.length === 0
+          ? orm.or(orm.isNull(schema.taskAssignment.sessionId), orm.eq(schema.taskAssignment.sessionId, parsed.sessionId))
+          : orm.eq(schema.taskAssignment.sessionId, parsed.sessionId),
+      ))
+    }
+  }
+  return { speakerId: parsed.speakerId }
+}
+
+const inviteSpeakerSchema = z.object({ orgId: z.string().min(1), eventId: z.string().min(1), speakerId: z.string().min(1) })
+export async function inviteSpeakerToPortal(input: z.input<typeof inviteSpeakerSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = inviteSpeakerSchema.parse(input)
+  const { db, event } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const speaker = await db.query.speaker.findFirst({ where: { id: parsed.speakerId, eventId: parsed.eventId } })
+  if (!speaker) throw new Error('Speaker not found')
+  const now = Date.now()
+  const outcome = await enqueueAndSend({
+    db, eventId: event.id, speakerId: speaker.id, toEmail: speaker.email,
+    dedupeKey: `speaker-invite:${speaker.id}:${now}`, replyTo: replyToFor(event.contactEmail), now,
+    payload: {
+      kind: 'SPEAKER_INVITE',
+      context: { eventName: event.name, eventSlug: event.slug, appUrl: env.APP_URL, timezone: event.timezone, recipientName: speaker.firstName },
+      data: { portalUrl: new URL(`/portal/${event.slug}`, env.APP_URL).href },
+    },
+  })
+  await db.update(schema.speaker).set({ status: 'INVITED', updatedAt: now }).where(orm.eq(schema.speaker.id, speaker.id)).limit(1)
+  return { queued: outcome.inserted, sent: outcome.sent }
+}
+
+const customCommunicationSchema = z.object({
+  orgId: z.string().min(1), eventId: z.string().min(1),
+  speakerIds: z.array(z.string().min(1)).min(1).max(500),
+  subject: z.string().trim().min(1).max(998), body: z.string().trim().min(1).max(50_000),
+})
+export async function sendCustomSpeakerCommunication(input: z.input<typeof customCommunicationSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = customCommunicationSchema.parse(input)
+  const { db, event } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const speakerIds = [...new Set(parsed.speakerIds)]
+  const speakers = await db.query.speaker.findMany({
+    where: { eventId: parsed.eventId, id: { in: speakerIds } },
+    with: { participations: { with: { session: true } } },
+  })
+  if (speakers.length !== speakerIds.length) throw new Error('One or more selected speakers were not found in this event')
+  const batchId = ulid()
+  const now = Date.now()
+  let queued = 0
+  let sent = 0
+  for (const speaker of speakers) {
+    const recipient = {
+      firstName: speaker.firstName, lastName: speaker.lastName, email: speaker.email,
+      eventName: event.name, portalUrl: new URL(`/portal/${event.slug}`, env.APP_URL).href,
+      sessionTitles: speaker.participations.flatMap((row) => row.session?.title ? [row.session.title] : []),
+    }
+    const outcome = await enqueueAndSend({
+      db, eventId: event.id, speakerId: speaker.id, batchId, toEmail: speaker.email,
+      dedupeKey: `custom:${batchId}:${speaker.id}`, replyTo: replyToFor(event.contactEmail), now,
+      payload: {
+        kind: 'CUSTOM',
+        context: { eventName: event.name, eventSlug: event.slug, appUrl: env.APP_URL, timezone: event.timezone, recipientName: speaker.firstName },
+        data: { subject: applySpeakerMergeFields(parsed.subject, recipient), body: applySpeakerMergeFields(parsed.body, recipient) },
+      },
+    })
+    if (outcome.inserted) queued += 1
+    if (outcome.sent) sent += 1
+  }
+  return { batchId, queued, sent }
+}
+
+const assignmentDueSchema = z.object({ orgId: z.string().min(1), eventId: z.string().min(1), assignmentId: z.string().min(1), dueAt: z.number().int().positive().nullable() })
+export async function updateTaskAssignmentDue(input: z.input<typeof assignmentDueSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = assignmentDueSchema.parse(input)
+  const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const rows = await db.update(schema.taskAssignment).set({ dueAt: parsed.dueAt, updatedAt: Date.now() }).where(orm.and(
+    orm.eq(schema.taskAssignment.id, parsed.assignmentId), orm.eq(schema.taskAssignment.eventId, parsed.eventId),
+  )).limit(1).returning({ id: schema.taskAssignment.id })
+  if (!rows[0]) throw new Error('Task assignment not found')
+  return { assignmentId: rows[0].id }
+}
+
+const remindAssignmentsSchema = z.object({ orgId: z.string().min(1), eventId: z.string().min(1), assignmentIds: z.array(z.string().min(1)).min(1).max(500) })
+export async function remindTaskAssignments(input: z.input<typeof remindAssignmentsSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = remindAssignmentsSchema.parse(input)
+  const { db, event } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  const rows = await db.query.taskAssignment.findMany({
+    where: { eventId: parsed.eventId, id: { in: [...new Set(parsed.assignmentIds)] }, status: { in: ['NOT_STARTED', 'IN_PROGRESS'] } },
+    with: { speaker: true, taskDefinition: true, session: true },
+  })
+  const now = Date.now()
+  let queued = 0
+  for (const row of rows) {
+    if (!row.speaker || !row.taskDefinition) continue
+    const outcome = await enqueueAndSend({
+      db, eventId: event.id, speakerId: row.speakerId, sessionId: row.sessionId,
+      toEmail: row.speaker.email, dedupeKey: `manual-task-reminder:${row.id}:${now}`,
+      replyTo: replyToFor(event.contactEmail), now,
+      payload: {
+        kind: 'TASK_REMINDER',
+        context: { eventName: event.name, eventSlug: event.slug, appUrl: env.APP_URL, timezone: event.timezone, recipientName: row.speaker.firstName },
+        data: { assignmentId: row.id, taskTitle: row.taskDefinition.title, dueAt: row.dueAt, sessionTitle: row.session?.title, daysUntilDue: row.dueAt == null ? 0 : Math.ceil((row.dueAt - now) / 86_400_000) },
+      },
+    })
+    if (outcome.inserted) queued += 1
+  }
+  return { queued }
+}
+
 const createTaskDefinitionSchema = z.object({
   orgId: z.string().min(1),
   eventId: z.string().min(1),
@@ -1802,10 +2062,14 @@ const createTaskDefinitionSchema = z.object({
   source: z.enum(['MANUAL', 'FORM']),
   formId: z.string().min(1).nullable().optional(),
   dueAt: z.number().int().positive().nullable().optional(),
+  assignmentPolicy: z.enum(['SELECTED', 'ALL_ACCEPTED']).default('SELECTED'),
+  speakerIds: z.array(z.string().min(1)).max(500).default([]),
+  sessionIds: z.array(z.string().min(1)).max(500).default([]),
 })
 
 export async function createTaskDefinition(input: z.input<typeof createTaskDefinitionSchema>) {
   const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
   const parsed = createTaskDefinitionSchema.parse(input)
   const { db } = await requireEventAccess({
     actionRequest,
@@ -1827,9 +2091,42 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
     columns: { sortOrder: true },
   })
   const sortOrder = existing.reduce((max, row) => Math.max(max, row.sortOrder), -1) + 1
-  const [created] = await db
-    .insert(schema.taskDefinition)
-    .values({
+  const taskDefinitionId = ulid()
+  const now = Date.now()
+  const [acceptedSessions, selectedSpeakers] = await db.batch([
+    db.query.eventSession.findMany({
+      where: {
+        eventId: parsed.eventId,
+        status: 'ACCEPTED',
+        kind: 'CONTENT',
+        ...(parsed.assignmentPolicy === 'SELECTED' && parsed.sessionIds.length
+          ? { id: { in: parsed.sessionIds } }
+          : {}),
+      },
+      with: { participants: true },
+    }),
+    db.query.speaker.findMany({
+      where: { eventId: parsed.eventId, id: { in: parsed.speakerIds } },
+    }),
+  ] as const)
+  const selectedSpeakerIds = new Set(selectedSpeakers.map((row) => row.id))
+  if (parsed.assignmentPolicy === 'SELECTED' && selectedSpeakers.length !== new Set(parsed.speakerIds).size) {
+    throw new Error('One or more selected speakers were not found in this event')
+  }
+  const selectedSessionCount = acceptedSessions.filter((session) => parsed.sessionIds.includes(session.id)).length
+  if (parsed.assignmentPolicy === 'SELECTED' && selectedSessionCount !== new Set(parsed.sessionIds).size) {
+    throw new Error('One or more selected sessions were not accepted in this event')
+  }
+  const participants = acceptedSessions.flatMap((session) =>
+    session.participants
+      .filter((participant) => parsed.assignmentPolicy === 'ALL_ACCEPTED' || selectedSpeakerIds.has(participant.speakerId) || parsed.sessionIds.includes(session.id))
+      .map((participant) => ({ speakerId: participant.speakerId, sessionId: session.id })),
+  )
+  if (parsed.assignmentPolicy === 'SELECTED' && participants.length === 0 && selectedSpeakers.length === 0) {
+    throw new Error('Select at least one speaker or accepted session')
+  }
+  const definitionInsert = db.insert(schema.taskDefinition).values({
+      id: taskDefinitionId,
       eventId: parsed.eventId,
       title: parsed.title,
       instructionsHtml: parsed.instructionsHtml?.trim() || null,
@@ -1837,10 +2134,25 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
       source: parsed.source,
       formId,
       dueAt: parsed.dueAt ?? null,
+      assignmentPolicy: parsed.assignmentPolicy,
       sortOrder,
     })
-    .returning({ id: schema.taskDefinition.id })
-  return { taskDefinitionId: created!.id }
+  const assignmentRows = parsed.target === 'SPEAKER'
+    ? [...new Set([...selectedSpeakers.map((row) => row.id), ...participants.map((row) => row.speakerId)])].map((speakerId) => ({ speakerId, sessionId: null }))
+    : participants.map((row) => ({ speakerId: row.speakerId, sessionId: row.sessionId }))
+  await db.batch([
+    definitionInsert,
+    ...assignmentRows.map((row) => db.insert(schema.taskAssignment).values({
+      eventId: parsed.eventId,
+      taskDefinitionId,
+      speakerId: row.speakerId,
+      sessionId: row.sessionId,
+      dueAt: parsed.dueAt ?? null,
+      createdAt: now,
+      updatedAt: now,
+    }).onConflictDoNothing()),
+  ] as [any, ...any[]])
+  return { taskDefinitionId, assigned: assignmentRows.length }
 }
 
 const updateTaskDefinitionSchema = z.object({
@@ -1857,6 +2169,7 @@ const updateTaskDefinitionSchema = z.object({
 
 export async function updateTaskDefinition(input: z.input<typeof updateTaskDefinitionSchema>) {
   const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
   const parsed = updateTaskDefinitionSchema.parse(input)
   const { db } = await requireEventAccess({
     actionRequest,
@@ -1867,6 +2180,9 @@ export async function updateTaskDefinition(input: z.input<typeof updateTaskDefin
     where: { id: parsed.taskDefinitionId, eventId: parsed.eventId },
   })
   if (!existing) throw new Error('Task not found')
+  if (existing.target !== parsed.target || existing.source !== parsed.source) {
+    throw new Error('Task target and source cannot change after creation')
+  }
   const formId = parsed.source === 'FORM' ? (parsed.formId ?? null) : null
   const form = formId
     ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId } })
@@ -1908,6 +2224,7 @@ const deleteTaskDefinitionSchema = z.object({
 
 export async function deleteTaskDefinition(input: z.input<typeof deleteTaskDefinitionSchema>) {
   const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
   const parsed = deleteTaskDefinitionSchema.parse(input)
   const { db } = await requireEventAccess({
     actionRequest,

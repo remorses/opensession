@@ -46,6 +46,8 @@ export type EmailListRow = {
   sentAt: number | null
   bodyHtml: string
   bodyText: string | null
+  batchId: string | null
+  batchRecipients: number | null
 }
 
 const tabs: { value: EmailsTab; label: string; status: EmailStatus | null }[] = [
@@ -195,6 +197,11 @@ function EmailRow({
           <Badge variant="outline" className="ml-1.5 px-1.5">
             ics
           </Badge>
+        ) : null}
+        {row.batchId ? (
+          <div className="text-xs text-muted-foreground">
+            Batch {row.batchId.slice(-6)} · {row.batchRecipients} recipients
+          </div>
         ) : null}
       </TableCell>
       <TableCell className="text-muted-foreground">{row.toEmail}</TableCell>

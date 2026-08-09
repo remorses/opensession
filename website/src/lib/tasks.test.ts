@@ -88,6 +88,19 @@ describe('buildAssignmentsForAcceptance', () => {
       }),
     ).toEqual([])
   })
+
+  test('acceptance applies only ALL_ACCEPTED definitions', () => {
+    const rows = buildAssignmentsForAcceptance({
+      taskDefs: [
+        { ...defs[0]!, assignmentPolicy: 'SELECTED' as const },
+        { ...defs[1]!, assignmentPolicy: 'ALL_ACCEPTED' as const },
+      ],
+      participants: [{ speakerId: 'sp-a' }],
+      sessionId: 'ses-1',
+      now: 1,
+    })
+    expect(rows.map((row) => row.taskDefinitionId)).toEqual(['td-sub'])
+  })
 })
 
 describe('assertTaskDefinitionShape', () => {
@@ -154,6 +167,7 @@ describe('summarizeAssignmentProgress / defaults', () => {
     })).toMatchInlineSnapshot(`
       [
         {
+          "assignmentPolicy": "ALL_ACCEPTED",
           "createdAt": 42,
           "dueAt": null,
           "eventId": "evt",
@@ -165,6 +179,7 @@ describe('summarizeAssignmentProgress / defaults', () => {
           "title": "Complete Speaker Profile",
         },
         {
+          "assignmentPolicy": "ALL_ACCEPTED",
           "createdAt": 42,
           "dueAt": null,
           "eventId": "evt",

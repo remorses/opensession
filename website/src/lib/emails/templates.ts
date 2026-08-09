@@ -28,6 +28,8 @@ export type EmailKind =
   | 'SCHEDULE_CANCEL'
   | 'REVIEWER_INVITE'
   | 'REVIEW_REMINDER'
+  | 'SPEAKER_INVITE'
+  | 'CUSTOM'
 
 export type BuiltEmail = { subject: string; html: string; text: string }
 
@@ -229,6 +231,8 @@ export type ScheduleData = {
 
 export type ReviewerInviteData = { roundName: string; inviteUrl: string }
 export type ReviewReminderData = { roundName: string; reviewUrl: string; pendingCount: number; closesAt: number | null }
+export type SpeakerInviteData = { portalUrl: string }
+export type CustomEmailData = { subject: string; body: string }
 
 export type EmailPayload =
   | { kind: 'SUBMISSION_CONFIRMATION'; context: EmailContext; data: SubmissionConfirmationData }
@@ -242,6 +246,8 @@ export type EmailPayload =
   | { kind: 'SCHEDULE_CANCEL'; context: EmailContext; data: ScheduleData }
   | { kind: 'REVIEWER_INVITE'; context: EmailContext; data: ReviewerInviteData }
   | { kind: 'REVIEW_REMINDER'; context: EmailContext; data: ReviewReminderData }
+  | { kind: 'SPEAKER_INVITE'; context: EmailContext; data: SpeakerInviteData }
+  | { kind: 'CUSTOM'; context: EmailContext; data: CustomEmailData }
 
 /** Single entry point: send.ts never picks a builder by hand. */
 export function buildEmail(payload: EmailPayload): BuiltEmail {
@@ -268,6 +274,10 @@ export function buildEmail(payload: EmailPayload): BuiltEmail {
       return buildReviewerInvite(payload.context, payload.data)
     case 'REVIEW_REMINDER':
       return buildReviewReminder(payload.context, payload.data)
+    case 'SPEAKER_INVITE':
+      return buildSpeakerInvite(payload.context, payload.data)
+    case 'CUSTOM':
+      return buildCustomEmail(payload.context, payload.data)
   }
 }
 
@@ -375,11 +385,13 @@ export function buildTaskReminder(
 ): BuiltEmail {
   const url = portalTaskUrl(context, data.assignmentId)
   const overdue = data.daysUntilDue < 0
-  const when = overdue
-    ? `It was due ${data.dueAt == null ? 'earlier' : formatEventDate(data.dueAt, context.timezone)}.`
-    : data.daysUntilDue === 0
-      ? 'It is due today.'
-      : `It is due in ${data.daysUntilDue} day${data.daysUntilDue === 1 ? '' : 's'}.`
+  const when = data.dueAt == null
+    ? 'Please complete it when you can.'
+    : overdue
+      ? `It was due ${formatEventDate(data.dueAt, context.timezone)}.`
+      : data.daysUntilDue === 0
+        ? 'It is due today.'
+        : `It is due in ${data.daysUntilDue} day${data.daysUntilDue === 1 ? '' : 's'}.`
   const subject = overdue
     ? `Overdue: ${data.taskTitle}`
     : `Reminder: ${data.taskTitle}`
@@ -524,5 +536,26 @@ export function buildReviewReminder(context: EmailContext, data: ReviewReminderD
       `you still have ${count} to finish in ${data.roundName}.${deadline}`,
       data.reviewUrl,
     ],
+  })
+}
+
+export function buildSpeakerInvite(context: EmailContext, data: SpeakerInviteData): BuiltEmail {
+  return compose(context, `Your ${context.eventName} speaker portal`, {
+    html: [
+      paragraph(`your speaker portal for <strong>${escapeHtml(context.eventName)}</strong> is ready.`),
+      paragraph(`Sign in with this email address to see your sessions and tasks: ${link(data.portalUrl, data.portalUrl)}`),
+    ],
+    text: [
+      `your speaker portal for ${context.eventName} is ready.`,
+      `Sign in with this email address to see your sessions and tasks:\n${data.portalUrl}`,
+    ],
+  })
+}
+
+export function buildCustomEmail(context: EmailContext, data: CustomEmailData): BuiltEmail {
+  const lines = data.body.split(/\r?\n/).filter((line) => line.trim())
+  return compose(context, data.subject, {
+    html: lines.map((line) => paragraph(escapeHtml(line))),
+    text: lines,
   })
 }

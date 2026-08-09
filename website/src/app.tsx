@@ -777,7 +777,7 @@ export const app = new Spiceflow()
     })
     if (!found) throw redirect(`/org/${params.orgId}`)
     const { tracks, formats, rooms, ...event } = found
-    return { event, tracks, formats, rooms }
+    return { event, tracks, formats, rooms, appUrl: env.APP_URL }
   })
 
   .layout('/org/:orgId/e/:eventId/*', async ({ children }) => {
@@ -1383,12 +1383,12 @@ export const app = new Spiceflow()
 
   .loader('/org/:orgId/e/:eventId/tasks', async ({ params }) => {
     const db = getDb()
-    const [defs, portalForms] = await db.batch([
+    const [defs, portalForms, speakers, acceptedSessions] = await db.batch([
       db.query.taskDefinition.findMany({
         where: { eventId: params.eventId },
         with: {
           form: true,
-          assignments: { columns: { id: true, status: true } },
+           assignments: { with: { speaker: true, session: true } },
         },
         orderBy: { sortOrder: 'asc', createdAt: 'asc' },
       }),
@@ -1396,6 +1396,12 @@ export const app = new Spiceflow()
         where: { eventId: params.eventId, purpose: 'PORTAL' },
         columns: { id: true, name: true, target: true },
         orderBy: { name: 'asc' },
+      }),
+      db.query.speaker.findMany({ where: { eventId: params.eventId }, orderBy: { firstName: 'asc', lastName: 'asc' } }),
+      db.query.eventSession.findMany({
+        where: { eventId: params.eventId, kind: 'CONTENT', status: 'ACCEPTED' },
+        with: { participants: { with: { speaker: true } } },
+        orderBy: { title: 'asc' },
       }),
     ] as const)
 
@@ -1407,14 +1413,33 @@ export const app = new Spiceflow()
         instructionsHtml: def.instructionsHtml,
         target: def.target,
         source: def.source,
+        assignmentPolicy: def.assignmentPolicy,
         formId: def.formId,
         formName: def.form?.name ?? null,
         dueAt: def.dueAt,
         sortOrder: def.sortOrder,
         ...progress,
+        assignments: def.assignments.map((assignment) => ({
+          id: assignment.id,
+          status: assignment.status,
+          dueAt: assignment.dueAt,
+          speakerId: assignment.speakerId,
+          speakerName: assignment.speaker ? `${assignment.speaker.firstName} ${assignment.speaker.lastName}` : 'Removed speaker',
+          sessionId: assignment.sessionId,
+          sessionTitle: assignment.session?.title ?? null,
+        })),
       }
     })
-    return { tasks, portalForms }
+    return {
+      tasks,
+      portalForms,
+      speakers: speakers.map((speaker) => ({ id: speaker.id, name: `${speaker.firstName} ${speaker.lastName}`, status: speaker.status })),
+      acceptedSessions: acceptedSessions.map((session) => ({
+        id: session.id,
+        title: session.title ?? 'Untitled',
+        speakerNames: session.participants.flatMap((row) => row.speaker ? [`${row.speaker.firstName} ${row.speaker.lastName}`] : []),
+      })),
+    }
   })
 
   .page({
@@ -1449,12 +1474,62 @@ export const app = new Spiceflow()
       return <PortalFormsPage tab={query.tab ?? 'speaker'} />
     },
   })
-  .page('/org/:orgId/e/:eventId/speakers', async () => (
-    <ComingSoonPage
-      title="Speakers"
-      description="Event speakers with profiles, confirmations, and outstanding tasks."
-    />
-  ))
+  .loader('/org/:orgId/e/:eventId/speakers', async ({ params }) => {
+    const db = getDb()
+    const rows = await db.query.speaker.findMany({
+      where: { eventId: params.eventId },
+      with: {
+        participations: { with: { session: true } },
+        taskAssignments: true,
+      },
+      orderBy: { firstName: 'asc', lastName: 'asc' },
+    })
+    return { speakers: rows.map((speaker) => ({
+      id: speaker.id, firstName: speaker.firstName, lastName: speaker.lastName,
+      email: speaker.email, status: speaker.status, jobTitle: speaker.jobTitle,
+      companyName: speaker.companyName, avatarUrl: speaker.avatarUrl,
+      headshotFileId: speaker.headshotFileId,
+      sessions: speaker.participations.length,
+      sessionTitles: speaker.participations.flatMap((participation) =>
+        participation.session?.title ? [participation.session.title] : [],
+      ),
+      outstandingTasks: speaker.taskAssignments.filter((row) => row.status !== 'COMPLETED').length,
+    })), existingEmails: rows.map((speaker) => speaker.email) }
+  })
+  .page({
+    path: '/org/:orgId/e/:eventId/speakers',
+    query: z.object({ status: z.enum(['all', 'pending', 'invited', 'confirmed', 'declined']).optional() }),
+    handler: async ({ query }) => {
+      const { SpeakersPage } = await import('./components/speakers-page.tsx')
+      return <SpeakersPage initialStatus={query.status ?? 'all'} />
+    },
+  })
+  .loader('/org/:orgId/e/:eventId/speakers/:speakerId', async ({ params, response }) => {
+    const db = getDb()
+    const [speaker, sessions] = await db.batch([
+      db.query.speaker.findFirst({
+        where: { id: params.speakerId, eventId: params.eventId },
+        with: {
+          headshotFile: true,
+          participations: { orderBy: { sortOrder: 'asc' }, with: { session: true } },
+          taskAssignments: { with: { taskDefinition: true, session: true }, orderBy: { createdAt: 'asc' } },
+          uploadedFiles: { orderBy: { createdAt: 'desc' } },
+          emailMessages: { orderBy: { createdAt: 'desc' }, limit: 100 },
+        },
+      }),
+      db.query.eventSession.findMany({
+        where: { eventId: params.eventId, kind: 'CONTENT' },
+        with: { participants: { orderBy: { sortOrder: 'asc' }, with: { speaker: true } } },
+        orderBy: { title: 'asc' },
+      }),
+    ] as const)
+    if (!speaker) response.status = 404
+    return { speaker, sessions }
+  })
+  .page('/org/:orgId/e/:eventId/speakers/:speakerId', async () => {
+    const { SpeakerDetailPage } = await import('./components/speakers-page.tsx')
+    return <SpeakerDetailPage />
+  })
   // ── Emails (?tab=all|queued|sent|failed|reminders) ────────────────
 
   .loader('/org/:orgId/e/:eventId/emails', async ({ params }) => {
@@ -1466,6 +1541,10 @@ export const app = new Spiceflow()
       // tail. Older rows stay queryable in D1 for auditing.
       limit: 300,
     })
+    const batchSizes = new Map<string, number>()
+    for (const row of rows) {
+      if (row.batchId) batchSizes.set(row.batchId, (batchSizes.get(row.batchId) ?? 0) + 1)
+    }
     return {
       emails: rows.map((row) => ({
         id: row.id,
@@ -1480,6 +1559,8 @@ export const app = new Spiceflow()
         sentAt: row.sentAt,
         bodyHtml: row.bodyHtml,
         bodyText: row.bodyText,
+        batchId: row.batchId,
+        batchRecipients: row.batchId ? (batchSizes.get(row.batchId) ?? 1) : null,
       })),
     }
   })
