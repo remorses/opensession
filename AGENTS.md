@@ -134,9 +134,47 @@ Reference implementations (the products we clone; consult when unsure about beha
   /playbook/speaker-dashboard, /playbook/allowing-speakers-to-edit-sessions,
   /playbook/collecting-and-sharing-presentations, /playbook/features-detailed
 - Kill My SaaS evaluation suite: https://forge.smol.ai/swyx/killmysaas-evals
-  Read the matching `specs/*.yaml`, fixtures, and rubric before implementing a workflow.
-  Clone it outside this public repo when needed; never vendor its fixture credentials or
+  This is executable customer acceptance criteria, not only a test harness. Clone it outside
+  this public repo when needed; never vendor its fixture credentials, saved auth state, or
   generated evaluation artifacts into OpenSession.
+
+### Kill My SaaS customer requirements
+
+Use the evaluation suite to understand concrete examples of what the challenge customer
+expects. Read its sources in this order before implementing or reviewing a matching workflow:
+
+1. `docs/00-how-sessionboard-works.md` for the complete customer journey and module handoffs.
+2. The matching `docs/0N-*.md` for product intent and populated-screen expectations.
+3. The matching `specs/0N-*.yaml` for the executable scenarios, exact rubric pass criteria,
+   evidence requirements, and feature ownership boundaries.
+4. `fixtures/sample-data.json`, `fixtures/speakers.csv`, and the upload fixtures for the exact
+   people, event, proposals, files, and sentinel values used to prove persistence.
+
+The required evaluation has 18 stateful scenarios and 84 rubric items across six areas:
+CFP (20%), abstract management (20%), speaker management (15%), content management (15%),
+agenda (10%), and public widgets (20%). Speaker CRM is optional extra credit. Run required
+areas in numeric order against one deployment: CFP submissions become reviewed abstracts,
+accepted talks become sessions, sessions receive portal files and agenda slots, and the
+published agenda feeds anonymous widgets. Do not replace this chain with isolated seeded
+screens.
+
+Pay special attention to the rubric item types that expose incomplete clones:
+
+- `roundtrip`: data written by a speaker or reviewer persists and appears unchanged to the
+  organizer.
+- `scoping`: reviewers see only assignments, speakers see only their own portal data, and
+  public pages do not leak private or unapproved records.
+- `rule`: close dates lock submission and editing, file uploads create versions, and agenda
+  room/speaker conflicts are enforced or visibly flagged.
+- `handoff`: accepted proposal → session → agenda → public output requires no data re-entry.
+- `bulk` and `side-effect`: CSV import, assignment/reminder operations, exports, ZIP files,
+  emails, and calendar files work beyond a one-record demo.
+
+The evaluator uses a browser agent on one origin and a separate evidence-only judge. Visible
+controls, confirmation states, reload persistence, populated lists, role isolation, and
+screenshots of completed states matter. A form that merely renders is not proof that its
+submission, persistence, or downstream handoff works. Some email, export, calendar, and
+third-party embed checks remain manual; validate those with real outputs, not mocks.
 
 ## Validation — required after EVERY feature
 
