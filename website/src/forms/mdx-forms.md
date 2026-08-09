@@ -292,6 +292,8 @@ In the admin MDX preview, uploads stay disabled (no `uploadFile` callback).
 | `tracks` | Event track options `{ value, label }[]` |
 | `formats` | Event format options `{ value, label }[]` |
 
+Expressions can read plain scope data, compare values, and create inline arrays or objects. **Function and method calls are disabled**, including callbacks, constructors, and tagged templates. Put reusable behavior in an OpenSession form component instead of MDX code.
+
 Checkbox values are **`'true'` / `'false'` strings**, not booleans:
 
 ```mdx

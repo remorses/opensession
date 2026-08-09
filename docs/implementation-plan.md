@@ -518,10 +518,10 @@ cards-for-grouping, gap-based spacing, `@variant dark`).
 ## 6. MDX forms: render, validate, submit
 
 The whole form is one MDX source per immutable `FormVersion` (live = newest version).
-safe-mdx renders it with `{ values, tracks, formats, Math }` in scope; conditional logic
-uses `<Show when={expression}>` because safe-mdx does not evaluate JSX nested inside a
-JavaScript expression. Attribute expressions are evaluated by safe-mdx's safe AST
-interpreter (no eval, workerd-safe — verified in `safe-mdx/src/safe-mdx.tsx`).
+safe-mdx renders it with `{ values, tracks, formats }` in scope; conditional logic uses
+`<Show when={expression}>` because safe-mdx does not evaluate JSX nested inside a
+JavaScript expression. Attribute expressions are evaluated by safe-mdx's AST interpreter
+with function and method calls explicitly disabled on both client and server.
 
 ### Default forms created with every event
 

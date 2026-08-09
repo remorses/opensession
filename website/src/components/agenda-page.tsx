@@ -15,7 +15,13 @@
 import { useMemo, useState, useTransition } from 'react'
 import { Link, router, useLoaderData } from 'spiceflow/react'
 import { CalendarDaysIcon, TriangleAlertIcon } from 'lucide-react'
-import { scheduleSession, unscheduleSession } from '../actions.tsx'
+import {
+  applyAutoPlace,
+  previewAutoPlace,
+  scheduleSession,
+  setProgramPublication,
+  unscheduleSession,
+} from '../actions.tsx'
 import {
   conflictSessionIds,
   formatDayLabel,
@@ -86,6 +92,8 @@ export function AgendaPage({ view }: { view: AgendaView }) {
   const [draft, setDraft] = useState<PlacementDraft | null>(null)
   /** Rail selection: the next clicked cell places THIS session. */
   const [picked, setPicked] = useState<string | null>(null)
+  const [plan, setPlan] = useState<Awaited<ReturnType<typeof previewAutoPlace>> | null>(null)
+  const [toolbarPending, startToolbarTransition] = useTransition()
 
   const conflicting = useMemo(() => conflictSessionIds(conflicts), [conflicts])
   const scheduled = sessions.filter(isScheduled)
@@ -113,13 +121,56 @@ export function AgendaPage({ view }: { view: AgendaView }) {
             {scheduled.length} scheduled · {unscheduled.length} unscheduled · times in {timezone}
           </p>
         </div>
-        <Button
-          disabled={rooms.length === 0 || sessions.length === 0}
-          onClick={() => openPlacement({})}
-        >
-          <CalendarDaysIcon />
-          Place a session
-        </Button>
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          {event.programPublishedAt ? (
+            <Button
+              variant="outline"
+              render={<Link href={router.href(`/public/${event.slug}/agenda`)} target="_blank" />}
+            >
+              View public agenda
+            </Button>
+          ) : null}
+          <Button
+            variant="outline"
+            disabled={toolbarPending || rooms.length === 0 || unscheduled.length === 0}
+            onClick={() => {
+              startToolbarTransition(async () => {
+                const result = await runAction(
+                  () => previewAutoPlace({ orgId: currentOrgId, eventId: event.id }),
+                  { fallbackError: 'Could not build an automatic placement preview' },
+                )
+                if (result) setPlan(result)
+              })
+            }}
+          >
+            Auto-place
+          </Button>
+          <Button
+            variant={event.programPublishedAt ? 'outline' : 'default'}
+            disabled={toolbarPending}
+            onClick={() => {
+              startToolbarTransition(async () => {
+                await runAction(
+                  () => setProgramPublication({
+                    orgId: currentOrgId,
+                    eventId: event.id,
+                    published: !event.programPublishedAt,
+                  }),
+                  { fallbackError: event.programPublishedAt ? 'Could not unpublish the program' : 'Could not publish the program' },
+                )
+              })
+            }}
+          >
+            {event.programPublishedAt ? 'Unpublish' : 'Publish program'}
+          </Button>
+          <Button
+            disabled={rooms.length === 0 || sessions.length === 0}
+            onClick={() => openPlacement({})}
+          >
+            <CalendarDaysIcon />
+            Place a session
+          </Button>
+        </div>
       </div>
 
       <div className="flex items-center gap-1 border-b border-border">
@@ -204,7 +255,81 @@ export function AgendaPage({ view }: { view: AgendaView }) {
         days={days}
         sessions={sessions}
       />
+      <AutoPlaceDialog
+        plan={plan}
+        onClose={() => setPlan(null)}
+        orgId={currentOrgId}
+        eventId={event.id}
+      />
     </div>
+  )
+}
+
+function AutoPlaceDialog({
+  plan,
+  onClose,
+  orgId,
+  eventId,
+}: {
+  plan: Awaited<ReturnType<typeof previewAutoPlace>> | null
+  onClose: () => void
+  orgId: string
+  eventId: string
+}) {
+  const [pending, startTransition] = useTransition()
+  if (!plan) return null
+  return (
+    <Dialog open onOpenChange={(open) => (open ? undefined : onClose())}>
+      <DialogPopup className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>Automatic placement preview</DialogTitle>
+          <DialogDescription>
+            Existing slots stay fixed. The planner uses the first conflict-free day, time, and room.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col gap-1.5">
+              <span className="text-sm font-medium">Will place ({plan.placements.length})</span>
+              {plan.placements.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No sessions can be placed.</p>
+              ) : plan.placements.map((placement) => (
+                <div key={placement.sessionId} className="flex items-center justify-between gap-4 text-sm">
+                  <span className="truncate font-medium">{placement.title}</span>
+                  <span className="shrink-0 tabular-nums text-muted-foreground">
+                    {formatDayLabel(placement.dayKey)} · {minutesToLabel(placement.startMinute)} · {placement.roomName}
+                  </span>
+                </div>
+              ))}
+            </div>
+            {plan.unplaced.length > 0 ? (
+              <div className="flex flex-col gap-1.5">
+                <span className="text-sm font-medium text-destructive">Still unplaced ({plan.unplaced.length})</span>
+                {plan.unplaced.map((row) => <span key={row.sessionId} className="text-sm text-muted-foreground">{row.title}</span>)}
+              </div>
+            ) : null}
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={onClose}>Cancel</Button>
+              <Button
+                type="button"
+                disabled={pending || plan.placements.length === 0}
+                onClick={() => {
+                  startTransition(async () => {
+                    const result = await runAction(
+                      () => applyAutoPlace({ orgId, eventId }),
+                      { fallbackError: 'Could not apply the automatic placement plan' },
+                    )
+                    if (result) onClose()
+                  })
+                }}
+              >
+                {pending ? 'Applying…' : `Apply ${plan.placements.length} placements`}
+              </Button>
+            </div>
+          </div>
+        </DialogPanel>
+      </DialogPopup>
+    </Dialog>
   )
 }
 

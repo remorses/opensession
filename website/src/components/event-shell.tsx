@@ -9,6 +9,7 @@
 
 import {
   CalendarDaysIcon,
+  CodeXmlIcon,
   FileIcon,
   FileTextIcon,
   InboxIcon,
@@ -69,7 +70,10 @@ const navGroups: NavGroup[] = [
   },
   {
     label: 'Communications',
-    items: [{ label: 'Emails', segment: 'emails', icon: MailIcon }],
+    items: [
+      { label: 'Emails', segment: 'emails', icon: MailIcon },
+      { label: 'Embeds', segment: 'embeds', icon: CodeXmlIcon },
+    ],
   },
   {
     label: 'Configure',

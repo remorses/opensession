@@ -253,6 +253,7 @@ model Event {
   startsAt    DateTime
   endsAt      DateTime
   description String?
+  programPublishedAt DateTime? // independent public-program publication state
   contactEmail String? // Reply-To for all event mail
   logoFileId  String? @unique
   logoFile    File?   @relation("EventLogo", fields: [logoFileId], references: [id])

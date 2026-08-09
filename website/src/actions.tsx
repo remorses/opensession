@@ -31,6 +31,7 @@ import { validateSubmission } from './forms/validate.ts'
 import { flattenSubmissionValues } from './lib/cfp-submission.ts'
 import {
   clearSessionSlot,
+  loadAgendaSessions,
   scheduleSessionSlot,
   MAX_SLOT_MINUTES,
 } from './lib/agenda-server.ts'
@@ -55,7 +56,8 @@ import {
   replyToFor,
   sendEmailMessage,
 } from './lib/emails/send.ts'
-import { zonedEpoch } from './lib/conflicts.ts'
+import { eventDayKeys, toZonedSlot, zonedEpoch } from './lib/conflicts.ts'
+import { autoPlaceSessions } from './lib/public-program.ts'
 import { invitationAcceptanceDecision } from './lib/reviews.ts'
 import {
   applyTransition,
@@ -1423,6 +1425,106 @@ export async function unscheduleSession(input: z.input<typeof unscheduleSessionS
     eventId: parsed.eventId,
   })
   return clearSessionSlot({ db, event, sessionId: parsed.sessionId, now: Date.now() })
+}
+
+const agendaPlanSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+})
+
+async function buildAgendaPlan({
+  db,
+  event,
+}: {
+  db: ReturnType<typeof getDb>
+  event: typeof schema.event.$inferSelect
+}) {
+  const [sessions, rooms] = await Promise.all([
+    loadAgendaSessions(db, event.id),
+    db.query.room.findMany({ where: { eventId: event.id }, orderBy: { sortOrder: 'asc', name: 'asc' } }),
+  ])
+  const result = autoPlaceSessions({
+    days: eventDayKeys(event.startsAt, event.endsAt, event.timezone),
+    rooms,
+    sessions: sessions.map((session) => {
+      const start = session.startsAt == null ? null : toZonedSlot(session.startsAt, event.timezone)
+      const end = session.endsAt == null ? null : toZonedSlot(session.endsAt, event.timezone)
+      return {
+        id: session.id,
+        roomId: session.roomId,
+        dayKey: start?.dayKey ?? null,
+        startMinute: start?.minutes ?? null,
+        endMinute: end ? (end.dayKey === start?.dayKey ? end.minutes : 24 * 60) : null,
+        durationMinutes: session.format?.defaultDurationMinutes ?? 30,
+        speakerIds: session.participants.map((participant) => participant.speakerId),
+      }
+    }),
+  })
+  const titleById = new Map(sessions.map((session) => [session.id, session.title?.trim() || 'Untitled']))
+  const roomById = new Map(rooms.map((room) => [room.id, room.name]))
+  return {
+    placements: result.placements.map((placement) => ({
+      ...placement,
+      title: titleById.get(placement.sessionId) ?? 'Untitled',
+      roomName: roomById.get(placement.roomId) ?? 'Room',
+    })),
+    unplaced: result.unplacedSessionIds.map((sessionId) => ({
+      sessionId,
+      title: titleById.get(sessionId) ?? 'Untitled',
+    })),
+  }
+}
+
+/** Compute a deterministic plan without writing schedule rows. */
+export async function previewAutoPlace(input: z.input<typeof agendaPlanSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = agendaPlanSchema.parse(input)
+  const { db, event } = await requireEventAccess({ actionRequest, ...parsed })
+  return buildAgendaPlan({ db, event })
+}
+
+/** Recompute and apply the deterministic plan through the normal schedule writer. */
+export async function applyAutoPlace(input: z.input<typeof agendaPlanSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = agendaPlanSchema.parse(input)
+  const { db, event } = await requireEventAccess({ actionRequest, ...parsed })
+  const plan = await buildAgendaPlan({ db, event })
+  let emailsQueued = 0
+  for (const placement of plan.placements) {
+    const result = await scheduleSessionSlot({
+      db,
+      event,
+      sessionId: placement.sessionId,
+      roomId: placement.roomId,
+      dayKey: placement.dayKey,
+      startMinute: placement.startMinute,
+      durationMinutes: placement.durationMinutes,
+      confirmConflicts: false,
+      now: Date.now(),
+    })
+    if (!result.scheduled) throw new Error(`Schedule changed while placing ${placement.title}. Preview again.`)
+    emailsQueued += result.emailsQueued
+  }
+  return { ...plan, applied: plan.placements.length, emailsQueued }
+}
+
+const setProgramPublicationSchema = agendaPlanSchema.extend({ published: z.boolean() })
+
+/** Publish or unpublish the attendee program without changing the event lifecycle. */
+export async function setProgramPublication(input: z.input<typeof setProgramPublicationSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = setProgramPublicationSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const programPublishedAt = parsed.published ? Date.now() : null
+  await db.update(schema.event)
+    .set({ programPublishedAt, updatedAt: Date.now() })
+    .where(orm.eq(schema.event.id, parsed.eventId))
+    .limit(1)
+  return { published: parsed.published, programPublishedAt }
 }
 
 const setSessionVisibilitySchema = z.object({

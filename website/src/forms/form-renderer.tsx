@@ -12,7 +12,14 @@ import * as React from 'react'
 import { MdastToJsx, type MyRootContent, type SafeMdxError } from 'safe-mdx'
 import { mdxParse } from 'safe-mdx/parse'
 import { Button } from '../components/ui/button.tsx'
-import { collectFields, type FieldOption, type FieldValue, type FormSubmission, type ValuesRecord } from './collect-fields.ts'
+import {
+  collectFields,
+  FORM_EVALUATE_OPTIONS,
+  type FieldOption,
+  type FieldValue,
+  type FormSubmission,
+  type ValuesRecord,
+} from './collect-fields.ts'
 import { formComponents } from './components-map.tsx'
 import { FormValuesContext, type FormValuesState } from './field-components.tsx'
 
@@ -104,6 +111,7 @@ export function FormRenderer({
       mdast: mdast.ast,
       components: formComponents,
       scope: { ...scope, values },
+      evaluateOptions: FORM_EVALUATE_OPTIONS,
     })
     rendered = visitor.run()
     errors = visitor.errors

@@ -65,7 +65,6 @@ import {
 } from './lib/submissions.ts'
 import { summarizeAssignmentProgress } from './lib/tasks.ts'
 import {
-  isPublicContentEligible,
   latestTaskFileVersions,
   selectLatestZipEntries,
   taskFileSlotKey,
@@ -74,10 +73,38 @@ import { cn, formatDateRange } from './lib/utils.ts'
 import { Badge } from './components/ui/primitives.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
 import { OpenSessionLogo } from './components/auth-page.tsx'
+import {
+  filterPublicSessions,
+  isPublicProgramSession,
+  projectPublicProgram,
+  type PublicProgram,
+  type PublicProgramFilters,
+  type PublicProgramSource,
+} from './lib/public-program.ts'
+import { buildIcsCalendar } from './lib/ics.ts'
 
 // ── Schemas ─────────────────────────────────────────────────────────
 
 const loginQuerySchema = z.object({ callbackURL: z.string().optional() })
+const publicProgramQuerySchema = z.object({
+  q: z.string().trim().max(100).optional(),
+  track: z.string().trim().max(100).optional(),
+  format: z.string().trim().max(100).optional(),
+  room: z.string().trim().max(100).optional(),
+})
+const embedProgramQuerySchema = publicProgramQuerySchema.extend({
+  accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
+  compact: z.enum(['0', '1']).optional(),
+  fields: z.string().regex(/^(description|speakers|track|format|room|time)(,(description|speakers|track|format|room|time))*$/).optional(),
+})
+const personalIcsQuerySchema = z.object({ session: z.array(z.string().min(1).max(100)).min(1).max(100) })
+
+function validatedEmbedQuery(request: Request) {
+  const parsed = embedProgramQuerySchema.safeParse(
+    Object.fromEntries(new URL(request.url).searchParams.entries()),
+  )
+  return parsed.success ? parsed.data : null
+}
 
 type PortalSubmissionListRow = {
   id: string
@@ -435,6 +462,7 @@ export const app = new Spiceflow()
       },
     })
     if (!file?.event) return fileNotFound()
+    const fileEvent = file.event
 
     const session = await getSession(request)
     const [linkedSpeaker, member, coverSession, headshotSpeakers] = await db.batch([
@@ -449,11 +477,11 @@ export const app = new Spiceflow()
       }),
     ] as const)
     const publicFieldReference = file.formFieldValues.some((value) =>
-      value.response?.session ? isPublicContentEligible(value.response.session) : false,
+      value.response?.session ? isPublicProgramSession(fileEvent, value.response.session) : false,
     )
     const publicHeadshot = headshotSpeakers.some((speaker) =>
       speaker.participations.some((participation) =>
-        participation.session ? isPublicContentEligible(participation.session) : false,
+        participation.session ? isPublicProgramSession(fileEvent, participation.session) : false,
       ),
     )
     const owningSpeaker = Boolean(linkedSpeaker && (
@@ -467,7 +495,7 @@ export const app = new Spiceflow()
     if (!canAccessFile({
       isOrgMember: Boolean(member),
       isOwningSpeaker: owningSpeaker,
-      hasPublicSessionReference: Boolean(coverSession) || publicFieldReference,
+      hasPublicSessionReference: Boolean(coverSession && isPublicProgramSession(fileEvent, coverSession)) || publicFieldReference,
       isPublicSpeakerHeadshot: publicHeadshot,
     })) return fileNotFound()
 
@@ -804,6 +832,91 @@ export const app = new Spiceflow()
     const { PortalTaskDetailPage } = await import('./components/portal-shell.tsx')
     return <PortalTaskDetailPage />
   })
+
+  // ── Published program, feeds, and iframe widgets ──────────────────
+  // Both route families call loadPublicProgram(). This is the only anonymous
+  // projection and therefore the only place publication and approval gates live.
+
+  .loader('/public/:eventSlug/*', async ({ params }) => ({
+    program: await loadPublicProgram(params.eventSlug),
+  }))
+  .loader('/embed/:eventSlug/*', async ({ params }) => ({
+    program: await loadPublicProgram(params.eventSlug),
+  }))
+  .get('/public/:eventSlug', async ({ params }) => {
+    throw redirect(`/public/${encodeURIComponent(params.eventSlug)}/sessions`)
+  }, { detail: { hide: true } })
+  .page({
+    path: '/public/:eventSlug/sessions',
+    query: publicProgramQuerySchema,
+    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'sessions', query),
+  })
+  .page({
+    path: '/public/:eventSlug/speakers',
+    query: publicProgramQuerySchema,
+    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'speakers', query),
+  })
+  .page({
+    path: '/public/:eventSlug/agenda',
+    query: publicProgramQuerySchema,
+    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'agenda', query),
+  })
+  .page({
+    path: '/public/:eventSlug/itinerary',
+    query: publicProgramQuerySchema,
+    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'itinerary', query),
+  })
+  .page({
+    path: '/public/:eventSlug/gallery',
+    query: publicProgramQuerySchema,
+    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'gallery', query),
+  })
+  .page({
+    path: '/embed/:eventSlug/sessions',
+    query: embedProgramQuerySchema,
+    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'sessions', request, response.headers),
+  })
+  .page({
+    path: '/embed/:eventSlug/speakers',
+    query: embedProgramQuerySchema,
+    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'speakers', request, response.headers),
+  })
+  .page({
+    path: '/embed/:eventSlug/agenda',
+    query: embedProgramQuerySchema,
+    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'agenda', request, response.headers),
+  })
+  .page({
+    path: '/embed/:eventSlug/itinerary',
+    query: embedProgramQuerySchema,
+    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'itinerary', request, response.headers),
+  })
+  .page({
+    path: '/embed/:eventSlug/gallery',
+    query: embedProgramQuerySchema,
+    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'gallery', request, response.headers),
+  })
+  .get('/public/:eventSlug/schedule.json', async ({ params, query }) => {
+      const program = await loadPublicProgram(params.eventSlug)
+      if (!program) return json({ error: 'not_found' }, { status: 404 })
+      return json({ event: program.event, sessions: filterPublicSessions(program.sessions, query) }, { headers: publicFeedHeaders('application/json; charset=utf-8') })
+    }, { query: publicProgramQuerySchema })
+  .get('/public/:eventSlug/speakers.json', async ({ params }) => {
+    const program = await loadPublicProgram(params.eventSlug)
+    if (!program) return json({ error: 'not_found' }, { status: 404 })
+    return json({ event: program.event, speakers: program.speakers }, { headers: publicFeedHeaders('application/json; charset=utf-8') })
+  })
+  .get('/public/:eventSlug/schedule.ics', async ({ params, query }) => {
+      const program = await loadPublicProgram(params.eventSlug)
+      if (!program) return new Response('Not found', { status: 404 })
+      return publicCalendarResponse(program, filterPublicSessions(program.sessions, query), `${program.event.slug}-schedule.ics`)
+    }, { query: publicProgramQuerySchema })
+  .get('/public/:eventSlug/personal.ics', async ({ params, query }) => {
+      const program = await loadPublicProgram(params.eventSlug)
+      if (!program) return new Response('Not found', { status: 404 })
+      const selected = new Set(query.session)
+      return publicCalendarResponse(program, program.sessions.filter((session) => selected.has(session.id)), `${program.event.slug}-my-schedule.ics`)
+    }, { query: personalIcsQuerySchema })
 
   // ── Org dashboard (/org/:orgId/*) ─────────────────────────────────
   // The org id lives in the URL. The wildcard loader guards auth +
@@ -1539,6 +1652,11 @@ export const app = new Spiceflow()
     },
   })
 
+  .page('/org/:orgId/e/:eventId/embeds', async () => {
+    const { EmbedBuilder } = await import('./components/embed-builder.tsx')
+    return <EmbedBuilder />
+  })
+
   // ── Tasks ─────────────────────────────────────────────────────────
 
   .loader('/org/:orgId/e/:eventId/tasks', async ({ params }) => {
@@ -1786,6 +1904,117 @@ export const app = new Spiceflow()
   .use(holocronApp)
 
 // ── Event page helpers ──────────────────────────────────────────────
+
+export async function loadPublicProgram(eventSlug: string): Promise<PublicProgram | null> {
+  const found = await getDb().query.event.findFirst({
+    where: { slug: eventSlug },
+    with: {
+      sessions: {
+        with: {
+          room: true,
+          track: true,
+          format: true,
+          participants: {
+            with: { speaker: true },
+            orderBy: { sortOrder: 'asc' },
+          },
+        },
+        orderBy: { startsAt: 'asc', id: 'asc' },
+      },
+    },
+  })
+  if (!found) return null
+  const { sessions, ...event } = found
+  return projectPublicProgram({ event, sessions } as PublicProgramSource)
+}
+
+async function renderPublicProgram(
+  program: PublicProgram | null,
+  view: 'sessions' | 'speakers' | 'agenda' | 'itinerary' | 'gallery',
+  filters: PublicProgramFilters,
+) {
+  if (!program) return <PublicUnavailable />
+  const { PublicProgramPage } = await import('./components/public-program-page.tsx')
+  return <PublicProgramPage program={program} view={view} initialFilters={filters} />
+}
+
+async function renderEmbedProgram(
+  program: PublicProgram | null,
+  view: 'sessions' | 'speakers' | 'agenda' | 'itinerary' | 'gallery',
+  query: PublicProgramFilters & { accent?: string; compact?: '0' | '1'; fields?: string },
+  headers: Headers,
+) {
+  headers.set('content-security-policy', 'frame-ancestors *')
+  headers.set('referrer-policy', 'strict-origin-when-cross-origin')
+  headers.set('cache-control', 'public, max-age=60, stale-while-revalidate=300')
+  headers.set('access-control-allow-origin', '*')
+  if (!program) return <PublicUnavailable />
+  const { accent, compact, fields, ...filters } = query
+  const { PublicProgramPage } = await import('./components/public-program-page.tsx')
+  return (
+    <PublicProgramPage
+      program={program}
+      view={view}
+      embed
+      initialFilters={filters}
+      accent={accent}
+      compact={compact === '1'}
+      visibleFields={fields?.split(',')}
+    />
+  )
+}
+
+async function renderValidatedEmbedProgram(
+  program: PublicProgram | null,
+  view: 'sessions' | 'speakers' | 'agenda' | 'itinerary' | 'gallery',
+  request: Request,
+  headers: Headers,
+) {
+  const query = validatedEmbedQuery(request)
+  if (!query) return json({ error: 'invalid_embed_query' }, { status: 400 })
+  return renderEmbedProgram(program, view, query, headers)
+}
+
+function publicFeedHeaders(contentType: string): HeadersInit {
+  return {
+    'content-type': contentType,
+    'cache-control': 'public, max-age=60, stale-while-revalidate=300',
+    'access-control-allow-origin': '*',
+    'x-content-type-options': 'nosniff',
+  }
+}
+
+function publicCalendarResponse(
+  program: PublicProgram,
+  sessions: PublicProgram['sessions'],
+  fileName: string,
+) {
+  let appDomain = 'opensession.dev'
+  try {
+    appDomain = new URL(env.APP_URL).host
+  } catch {}
+  const body = buildIcsCalendar(sessions.map((session) => ({
+    sessionId: session.id,
+    appDomain,
+    sequence: 0,
+    title: session.title,
+    description: session.description,
+    startsAt: session.startsAt,
+    endsAt: session.endsAt,
+    roomName: session.room.name,
+    location: program.event.location,
+    url: new URL(`/public/${program.event.slug}/sessions`, env.APP_URL).href,
+    organizerEmail: 'notifications@opensession.dev',
+    organizerName: program.event.name,
+    stamp: program.event.programPublishedAt ?? session.startsAt,
+  })))
+  return new Response(body, {
+    headers: {
+      ...Object.fromEntries(new Headers(publicFeedHeaders('text/calendar; charset=utf-8'))),
+      'content-disposition': `attachment; filename="${fileName.replace(/[^a-zA-Z0-9._-]/g, '-')}"`,
+    },
+  })
+}
 
 async function loadReviewerRound(request: Request, formId: string) {
   const sessionUser = await requireSession(request)

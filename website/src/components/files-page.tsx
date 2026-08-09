@@ -80,9 +80,9 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
   const incompleteAssignments = [...new Set(
     visible.filter((slot) => slot.status !== 'COMPLETED').map((slot) => slot.assignmentId),
   )]
-  const zipHref = router.href(`/org/${currentOrgId}/e/${event.id}/files.zip`, {
-    slot: selectedSlots.map((slot) => slot.slotKey),
-  })
+  const zipHref = `/org/${currentOrgId}/e/${event.id}/files.zip?${new URLSearchParams(
+    selectedSlots.map((slot) => ['slot', slot.slotKey]),
+  )}`
 
   function setFilters(next: { status?: FilesStatus; kind?: FilesKind }) {
     router.push(router.href(`/org/${currentOrgId}/e/${event.id}/files`, {

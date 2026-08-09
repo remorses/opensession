@@ -184,6 +184,40 @@ describe('collectFields', () => {
     `)
   })
 
+  test('blocks function calls from form scope', () => {
+    let captured: string | null = null
+    const MDX = dedent`
+      <TextField name="title" label={capture(values.secret)} />
+    `
+    const result = collectFields({
+      mdxSource: MDX,
+      scope: {
+        ...scopeWith({ secret: 'session-cookie' }),
+        capture: (value: string) => {
+          captured = value
+          return 'Captured'
+        },
+      },
+    })
+    expect({ captured, errors: result.errors }).toMatchInlineSnapshot(`
+      {
+        "captured": null,
+        "errors": [
+          {
+            "line": 1,
+            "message": "Failed to evaluate expression attribute: label={capture(values.secret)}. Functions are not supported",
+            "type": "expression",
+          },
+          {
+            "line": 1,
+            "message": "Expressions in jsx prop not evaluated: (label={capture(values.secret)})",
+            "type": "expression",
+          },
+        ],
+      }
+    `)
+  })
+
   test('collector-level errors: missing name, duplicate names, nested participants', () => {
     const MDX = dedent`
       <TextField label="No name" />

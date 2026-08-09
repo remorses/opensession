@@ -26,7 +26,7 @@
 // and participant child fields are collected once and applied to every
 // submitted participant during validation.
 
-import { MdastToJsx, type MyRootContent, type SafeMdxError } from 'safe-mdx'
+import { MdastToJsx, type EvaluateOptions, type MyRootContent, type SafeMdxError } from 'safe-mdx'
 import { mdxParse } from 'safe-mdx/parse'
 
 // ── Shared submission types (the public data contract) ──────────────
@@ -75,6 +75,10 @@ export type FormScope = {
   tracks?: FieldOption[]
   formats?: FieldOption[]
 } & Record<string, unknown>
+
+/** A non-empty safe-mdx scope enables calls by default. Form expressions only
+ * need plain data access, so keep calls disabled on both client and server. */
+export const FORM_EVALUATE_OPTIONS = { functions: false } satisfies EvaluateOptions
 
 // ── Option helpers (shared with the client field components) ────────
 
@@ -182,6 +186,7 @@ export function collectFields({ mdxSource, scope }: { mdxSource: string; scope: 
     mdast,
     components: collectorComponents as any,
     scope,
+    evaluateOptions: FORM_EVALUATE_OPTIONS,
     // Invoke function components directly; host tags (p, h1, div, ...)
     // become pass-through children wrappers so markers inside markdown
     // containers still reach the flattener.

@@ -149,6 +149,8 @@ export const event = s.sqliteTable('event', {
   startsAt: epochMs('starts_at').notNull(),
   endsAt: epochMs('ends_at').notNull(),
   description: s.text('description'),
+  /** Null while the agenda is private. Set when the organizer publishes the program. */
+  programPublishedAt: epochMs('program_published_at'),
   /** Reply-To for every outbound email of this event. Seeded from the
    *  creator's account email so speaker replies reach a real human; editable
    *  in Settings → Details. NULL falls back to the platform sender. */
