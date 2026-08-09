@@ -219,8 +219,8 @@ function SessionsRow({
             })
           }}
         >
-          <option value="PUBLIC">Public</option>
-          <option value="PRIVATE">Private</option>
+          <option value="PUBLIC">Approved</option>
+          <option value="PRIVATE">Not approved</option>
         </NativeSelect>
       </TableCell>
       <TableCell>

@@ -301,6 +301,7 @@ export function FileUpload({
   const { value, set } = useFieldBinding(name)
   const [uploading, setUploading] = React.useState(false)
   const [error, setError] = React.useState<string | null>(null)
+  const [uploadedName, setUploadedName] = React.useState<string | null>(null)
 
   const onChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
@@ -309,10 +310,12 @@ export function FileUpload({
     setError(null)
     try {
       set(await ctx.uploadFile(file, name))
+      setUploadedName(file.name)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed')
     } finally {
       setUploading(false)
+      e.currentTarget.value = ''
     }
   }
 
@@ -330,10 +333,14 @@ export function FileUpload({
       />
       {!ctx.uploadFile ? (
         <span className="text-xs text-muted-foreground">File uploads are not available in this preview.</span>
-      ) : null}
+      ) : (
+        <span className="text-xs text-muted-foreground">
+          Accepted: {accept || 'common documents and images'} · Maximum file size: 100 MB
+        </span>
+      )}
       {uploading ? <span className="text-xs text-muted-foreground">Uploading…</span> : null}
       {typeof value === 'string' && value ? (
-        <span className="text-xs text-muted-foreground">Uploaded file: {value}</span>
+        <span className="text-xs text-muted-foreground">Uploaded file: {uploadedName ?? 'saved file'}</span>
       ) : null}
       {error ? <span className="text-xs text-destructive">{error}</span> : null}
     </FieldShell>

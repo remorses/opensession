@@ -16,6 +16,7 @@ import {
 } from 'lucide-react'
 import { ErrorBoundary, Link, useLoaderData } from 'spiceflow/react'
 import {
+  addTaskComment,
   completeManualTaskAssignment,
   savePortalProfile,
   savePortalSubmission,
@@ -35,10 +36,10 @@ import { OpenSessionLogo } from './auth-page.tsx'
 import { PublicFormWizard, SubmittedSuccess } from './public-form-wizard.tsx'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
-import { Badge, EmptyState } from './ui/primitives.tsx'
+import { Badge, EmptyState, Textarea } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
 import { SessionStatusBadge } from './abstracts-page.tsx'
-import { Toaster } from './ui/toast.tsx'
+import { toast, toastActionError, Toaster } from './ui/toast.tsx'
 
 type PortalShellData = {
   portalMissing: boolean
@@ -461,7 +462,7 @@ export function PortalSubmissionDetailPage() {
     )
   }
 
-  const uploadFile = makeUpload(event.id)
+  const uploadFile = makeUpload({ eventId: event.id })
 
   const withdraw = async () => {
     setWithdrawing(true)
@@ -593,7 +594,7 @@ export function PortalProfilePage() {
     )
   }
   const { event, speaker, userEmail, userName } = shell
-  const uploadFile = makeUpload(event.id)
+  const uploadFile = makeUpload({ eventId: event.id })
 
   if (!profileForm || !profileMdx) {
     return (
@@ -766,19 +767,27 @@ type TaskDetailData = {
     source: 'MANUAL' | 'FORM'
     status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED'
     sessionTitle: string | null
+    dueAt: number | null
   } | null
   formMdx: string | null
   scope: { tracks: Array<{ value: string; label: string }>; formats: Array<{ value: string; label: string }> }
   initialValues: ValuesRecord
   initialParticipants: ValuesRecord[]
+  deliverables: Array<{
+    fieldName: string
+    currentFileId: string
+    versions: Array<{ id: string; fileName: string; sizeBytes: number; createdAt: number }>
+    comments: Array<{ id: string; body: string; createdAt: number; authorName: string }>
+  }>
 }
 
 export function PortalTaskDetailPage() {
   const shell = usePortalShell()
-  const { assignment, formMdx, scope, initialValues, initialParticipants } =
-    useLoaderData('/portal/:eventSlug/tasks/:assignmentId') as TaskDetailData
+  const { assignment, formMdx, scope, initialValues, initialParticipants, deliverables } =
+    useLoaderData('/portal/:eventSlug/tasks/:assignmentId')
   const [error, setError] = React.useState<string | null>(null)
   const [done, setDone] = React.useState(false)
+  const [uploaded, setUploaded] = React.useState<Record<string, TaskDetailData['deliverables'][number]['versions']>>({})
 
   if (shell.portalMissing || !shell.event) {
     return (
@@ -805,21 +814,19 @@ export function PortalTaskDetailPage() {
     )
   }
 
-  const uploadFile = makeUpload(event.id)
-
-  if (done || assignment.status === 'COMPLETED') {
-    return (
-      <PortalShell active="tasks">
-        <SubmittedSuccess
-          title={assignment.title}
-          footer={(
-            <Button variant="outline" render={<Link href={portalPath(event.slug, 'tasks')} />}>
-              Back to tasks
-            </Button>
-          )}
-        />
-      </PortalShell>
-    )
+  const uploadFile = makeUpload({
+    eventId: event.id,
+    taskAssignmentId: assignment.id,
+    onUploaded(fieldName, versions) {
+      setUploaded((current) => ({ ...current, [fieldName]: versions }))
+    },
+  })
+  const completed = done || assignment.status === 'COMPLETED'
+  const visibleDeliverables = deliverables.map((slot) => ({ ...slot }))
+  for (const [fieldName, versions] of Object.entries(uploaded)) {
+    const existing = visibleDeliverables.find((slot) => slot.fieldName === fieldName)
+    if (existing) existing.versions = versions
+    else visibleDeliverables.push({ fieldName, currentFileId: versions[0]?.id ?? '', versions, comments: [] })
   }
 
   return (
@@ -845,10 +852,22 @@ export function PortalTaskDetailPage() {
               {assignment.sessionTitle}
             </p>
           ) : null}
+          {assignment.dueAt ? (
+            <p className="text-sm text-muted-foreground">Due: {formatDateTimeUTC(assignment.dueAt)}</p>
+          ) : null}
         </div>
         {error ? <p className="whitespace-pre-wrap text-sm text-destructive">{error}</p> : null}
 
-        {assignment.source === 'MANUAL' ? (
+        {completed ? (
+          <SubmittedSuccess
+            title={assignment.title}
+            footer={(
+              <Button variant="outline" render={<Link href={portalPath(event.slug, 'tasks')} />}>
+                Back to tasks
+              </Button>
+            )}
+          />
+        ) : assignment.source === 'MANUAL' ? (
           <Button
             className="self-start"
             onClick={async () => {
@@ -896,6 +915,11 @@ export function PortalTaskDetailPage() {
         ) : (
           <p className="text-sm text-muted-foreground">This form task has no published form version.</p>
         )}
+        <TaskDeliverables
+          eventId={event.id}
+          assignmentId={assignment.id}
+          deliverables={visibleDeliverables}
+        />
       </div>
     </PortalShell>
   )
@@ -918,11 +942,110 @@ function TaskStatusIcon({ status }: { status: string }) {
   )
 }
 
-function makeUpload(eventId: string) {
+function TaskDeliverables({ eventId, assignmentId, deliverables }: {
+  eventId: string
+  assignmentId: string
+  deliverables: TaskDetailData['deliverables']
+}) {
+  if (deliverables.length === 0) return null
+  return (
+    <Frame className="flex flex-col gap-5 p-5">
+      <div className="flex flex-col gap-1">
+        <h2 className="font-medium">Uploaded files</h2>
+        <p className="text-sm text-muted-foreground">Every upload stays available. The newest version is current.</p>
+      </div>
+      {deliverables.map((slot) => (
+        <TaskDeliverableThread
+          key={slot.fieldName}
+          eventId={eventId}
+          assignmentId={assignmentId}
+          slot={slot}
+        />
+      ))}
+    </Frame>
+  )
+}
+
+function TaskDeliverableThread({ eventId, assignmentId, slot }: {
+  eventId: string
+  assignmentId: string
+  slot: TaskDetailData['deliverables'][number]
+}) {
+  const [body, setBody] = React.useState('')
+  const [pending, startTransition] = React.useTransition()
+  return (
+    <section className="grid gap-5 border-t border-border pt-4 first:border-0 first:pt-0 lg:grid-cols-2">
+      <div className="flex flex-col gap-2">
+        <h3 className="text-sm font-medium">{slot.fieldName}</h3>
+        {slot.versions.map((file, index) => (
+          <div key={file.id} className="flex items-center justify-between gap-3 border-b border-border pb-2 last:border-0">
+            <div className="min-w-0">
+              <Link href={`/files/${file.id}`} className="text-sm font-medium no-underline hover:underline">
+                {file.fileName}
+              </Link>
+              <p className="text-xs text-muted-foreground">
+                v{slot.versions.length - index} · {formatDateTimeUTC(file.createdAt)}
+              </p>
+            </div>
+            <Badge variant={index === 0 ? 'success' : 'outline'}>{index === 0 ? 'Current' : 'Previous'}</Badge>
+          </div>
+        ))}
+      </div>
+      <div className="flex flex-col gap-3">
+        <h3 className="text-sm font-medium">Comments</h3>
+        {slot.comments.length === 0 ? (
+          <p className="text-sm text-muted-foreground">No comments yet.</p>
+        ) : slot.comments.map((comment) => (
+          <div key={comment.id} className="flex flex-col gap-0.5 border-b border-border pb-2 last:border-0">
+            <p className="text-xs text-muted-foreground">
+              <span className="font-medium text-foreground">{comment.authorName}</span> · {formatDateTimeUTC(comment.createdAt)}
+            </p>
+            <p className="whitespace-pre-wrap text-sm">{comment.body}</p>
+          </div>
+        ))}
+        <Textarea
+          aria-label={`Comment on ${slot.fieldName}`}
+          rows={2}
+          value={body}
+          onChange={(event) => setBody(event.target.value)}
+          placeholder="Add a note for the organizer"
+        />
+        <Button
+          size="sm"
+          className="self-start"
+          disabled={pending || !body.trim()}
+          onClick={() => startTransition(async () => {
+            try {
+              await addTaskComment({ eventId, assignmentId, fieldName: slot.fieldName, body })
+              setBody('')
+              toast.success('Comment added')
+            } catch (error) {
+              toastActionError(error, 'Could not add comment')
+            }
+          })}
+        >
+          {pending ? 'Adding...' : 'Add comment'}
+        </Button>
+      </div>
+    </section>
+  )
+}
+
+type UploadedVersion = { id: string; fileName: string; sizeBytes: number; createdAt: number }
+
+function makeUpload({ eventId, taskAssignmentId, onUploaded }: {
+  eventId: string
+  taskAssignmentId?: string
+  onUploaded?: (fieldName: string, versions: UploadedVersion[]) => void
+}) {
   return async (file: File, fieldName: string) => {
     const body = new FormData()
     body.set('file', file)
     body.set('eventId', eventId)
+    if (taskAssignmentId) {
+      body.set('taskAssignmentId', taskAssignmentId)
+      body.set('fieldName', fieldName)
+    }
     body.set(
       'kind',
       fieldName.includes('headshot') ? 'HEADSHOT'
@@ -931,8 +1054,14 @@ function makeUpload(eventId: string) {
             : 'DOCUMENT',
     )
     const response = await fetch('/api/upload', { method: 'POST', body })
-    const result: { fileId?: string; error?: string; message?: string } = await response.json()
+    const result: {
+      fileId?: string
+      error?: string
+      message?: string
+      versions?: UploadedVersion[]
+    } = await response.json()
     if (!response.ok || !result.fileId) throw new Error(result.message ?? result.error ?? 'Upload failed')
+    if (result.versions) onUploaded?.(fieldName, result.versions)
     return result.fileId
   }
 }

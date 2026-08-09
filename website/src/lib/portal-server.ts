@@ -179,6 +179,8 @@ export async function getPortalAssignment(eventId: string, speakerId: string, as
         },
       },
       session: true,
+      files: { orderBy: { createdAt: 'desc', id: 'desc' } },
+      comments: { with: { author: true }, orderBy: { createdAt: 'asc', id: 'asc' } },
     },
   })
   if (!row || !assignmentOwnedBySpeaker(row, speakerId) || !row.taskDefinition) return null
@@ -570,6 +572,8 @@ export async function submitPortalFormTask({
     fileIds: fieldRows.flatMap((row) => (row.fileId ? [row.fileId] : [])),
   })
 
+  await assertTaskSlotFiles({ db, eventId, assignmentId, fieldRows })
+
   const now = Date.now()
   const projected = extractWellKnown(submission)
   const queries: [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]] = [
@@ -615,6 +619,26 @@ export async function submitPortalFormTask({
 
   await db.batch(queries)
   return { responseId, assignmentId, status: 'COMPLETED' as const }
+}
+
+export async function assertTaskSlotFiles({ db, eventId, assignmentId, fieldRows }: {
+  db: ReturnType<typeof getDb>
+  eventId: string
+  assignmentId: string
+  fieldRows: Array<{ name: string; fileId?: string | null }>
+}) {
+  const selected = fieldRows.filter((row): row is { name: string; fileId: string } => Boolean(row.fileId))
+  if (selected.length === 0) return
+  const files = await db.query.file.findMany({
+    where: { eventId, id: { in: [...new Set(selected.map((row) => row.fileId))] } },
+  })
+  const byId = new Map(files.map((file) => [file.id, file]))
+  for (const row of selected) {
+    const file = byId.get(row.fileId)
+    if (file?.taskAssignmentId !== assignmentId || file.fieldName !== row.name) {
+      throw new Error(`Upload ${row.name} through this task before submitting it`)
+    }
+  }
 }
 
 async function loadPortalContextByEventId(eventId: string, session: Session) {

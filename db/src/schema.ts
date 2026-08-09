@@ -1,5 +1,5 @@
 // Schema for the OpenSession D1 database — an open-source SessionBoard clone
-// (CFP forms, speaker portal, review, agenda, embeds).
+// (CFP forms, speaker portal, deliverables, review, agenda, embeds).
 //
 // Design source of truth: /schema.prisma (23 models). This file is the 1:1
 // drizzle translation. Auth + org tables are ported unchanged from the akarso
@@ -579,6 +579,7 @@ export const taskAssignment = s.sqliteTable('task_assignment', {
   createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
   updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
+  s.uniqueIndex('task_assignment_id_event_unique').on(table.id, table.eventId),
   s.index('task_assignment_definition_status_idx').on(table.taskDefinitionId, table.status),
   s.index('task_assignment_speaker_status_idx').on(table.speakerId, table.status),
   s.index('task_assignment_session_idx').on(table.sessionId),
@@ -592,6 +593,44 @@ export const taskAssignment = s.sqliteTable('task_assignment', {
   s.uniqueIndex('task_assignment_speaker_unique').on(table.taskDefinitionId, table.speakerId).where(orm.sql`session_id IS NULL`),
   s.uniqueIndex('task_assignment_session_unique').on(table.taskDefinitionId, table.speakerId, table.sessionId).where(orm.sql`session_id IS NOT NULL`),
   s.check('task_assignment_status_check', orm.sql`status IN ('NOT_STARTED', 'IN_PROGRESS', 'COMPLETED')`),
+])
+
+// Persistent speaker-organizer discussion for one file field on one task.
+export const taskComment = s.sqliteTable('task_comment', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  taskAssignmentId: s.text('task_assignment_id').notNull().references(() => taskAssignment.id, { onDelete: 'cascade' }),
+  fieldName: s.text('field_name').notNull(),
+  authorUserId: s.text('author_user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  body: s.text('body').notNull(),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.index('task_comment_assignment_field_created_idx').on(table.taskAssignmentId, table.fieldName, table.createdAt),
+  s.index('task_comment_author_idx').on(table.authorUserId),
+  s.check('task_comment_field_check', orm.sql`length(trim(field_name)) > 0`),
+  s.check('task_comment_body_check', orm.sql`length(trim(body)) > 0`),
+])
+
+// Immutable typed snapshots created after every organizer session edit.
+export const sessionRevision = s.sqliteTable('session_revision', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  eventId: s.text('event_id').notNull(),
+  sessionId: s.text('session_id').notNull(),
+  title: s.text('title'),
+  description: s.text('description'),
+  trackId: s.text('track_id'),
+  formatId: s.text('format_id'),
+  coverImageFileId: s.text('cover_image_file_id'),
+  editorUserId: s.text('editor_user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  restoredFromRevisionId: s.text('restored_from_revision_id').references((): s.AnySQLiteColumn => sessionRevision.id),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.index('session_revision_session_created_idx').on(table.sessionId, table.createdAt),
+  s.index('session_revision_editor_idx').on(table.editorUserId),
+  s.foreignKey({
+    columns: [table.sessionId, table.eventId],
+    foreignColumns: [eventSession.id, eventSession.eventId],
+    name: 'session_revision_session_event_fk',
+  }).onDelete('cascade'),
 ])
 
 // ── Files — metadata rows; bytes live in R2 ─────────────────────────
@@ -611,10 +650,14 @@ export const file = s.sqliteTable('file', {
   /** Object-storage key (R2): {eventId}/{ulid}/{fileName}. */
   storageKey: s.text('storage_key').notNull().unique(),
   uploadedBySpeakerId: s.text('uploaded_by_speaker_id').references(() => speaker.id, { onDelete: 'set null' }),
+  /** Uploads attach to their logical task slot before form submission. */
+  taskAssignmentId: s.text('task_assignment_id').references(() => taskAssignment.id, { onDelete: 'set null' }),
+  fieldName: s.text('field_name'),
   createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
 }, (table) => [
   s.index('file_event_id_idx').on(table.eventId),
   s.index('file_uploaded_by_idx').on(table.uploadedBySpeakerId),
+  s.index('file_task_slot_created_idx').on(table.taskAssignmentId, table.fieldName, table.createdAt),
   s.check('file_kind_check', orm.sql`kind IN ('HEADSHOT', 'SLIDES', 'DOCUMENT', 'IMAGE', 'OTHER')`),
 ])
 
@@ -697,7 +740,7 @@ export const relations = orm.defineRelations(
     user, session, account, verification, org, orgMember, orgInvitation,
     event, track, format, room, form, evaluationReviewer, formVersion, speaker, eventSession,
     sessionParticipant, formResponse, formFieldValue, review, taskDefinition,
-    taskAssignment, file, emailMessage,
+    taskAssignment, taskComment, sessionRevision, file, emailMessage,
   },
   (r) => ({
     user: {
@@ -711,6 +754,8 @@ export const relations = orm.defineRelations(
       speakerIdentities: r.many.speaker(),
       reviews: r.many.review(),
       evaluationMemberships: r.many.evaluationReviewer(),
+      taskComments: r.many.taskComment(),
+      sessionRevisions: r.many.sessionRevision(),
     },
     session: {
       user: r.one.user({ from: r.session.userId, to: r.user.id }),
@@ -808,6 +853,7 @@ export const relations = orm.defineRelations(
       reviews: r.many.review({ from: r.eventSession.id, to: r.review.sessionId }),
       taskAssignments: r.many.taskAssignment({ from: r.eventSession.id, to: r.taskAssignment.sessionId }),
       emailMessages: r.many.emailMessage({ from: r.eventSession.id, to: r.emailMessage.sessionId }),
+      revisions: r.many.sessionRevision(),
     },
     sessionParticipant: {
       session: r.one.eventSession({ from: r.sessionParticipant.sessionId, to: r.eventSession.id }),
@@ -847,11 +893,28 @@ export const relations = orm.defineRelations(
       speaker: r.one.speaker({ from: r.taskAssignment.speakerId, to: r.speaker.id }),
       session: r.one.eventSession({ from: r.taskAssignment.sessionId, to: r.eventSession.id }),
       formResponse: r.one.formResponse({ from: r.taskAssignment.id, to: r.formResponse.taskAssignmentId }),
+      files: r.many.file(),
+      comments: r.many.taskComment(),
+    },
+    taskComment: {
+      taskAssignment: r.one.taskAssignment({ from: r.taskComment.taskAssignmentId, to: r.taskAssignment.id }),
+      author: r.one.user({ from: r.taskComment.authorUserId, to: r.user.id }),
+    },
+    sessionRevision: {
+      session: r.one.eventSession({ from: r.sessionRevision.sessionId, to: r.eventSession.id }),
+      editor: r.one.user({ from: r.sessionRevision.editorUserId, to: r.user.id }),
+      restoredFrom: r.one.sessionRevision({
+        from: r.sessionRevision.restoredFromRevisionId,
+        to: r.sessionRevision.id,
+        alias: 'restoredFrom',
+      }),
+      restores: r.many.sessionRevision({ alias: 'restoredFrom' }),
     },
     file: {
       event: r.one.event({ from: r.file.eventId, to: r.event.id }),
       uploadedBySpeaker: r.one.speaker({ from: r.file.uploadedBySpeakerId, to: r.speaker.id }),
       formFieldValues: r.many.formFieldValue({ from: r.file.id, to: r.formFieldValue.fileId }),
+      taskAssignment: r.one.taskAssignment({ from: r.file.taskAssignmentId, to: r.taskAssignment.id }),
     },
     emailMessage: {
       event: r.one.event({ from: r.emailMessage.eventId, to: r.event.id }),

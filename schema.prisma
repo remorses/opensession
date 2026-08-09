@@ -8,7 +8,7 @@
 // Scope: events, form builder (conditional logic + routing), submissions
 // (abstract → session lifecycle), evaluation (rounds/scorecards/reviews),
 // agenda (drafts/placements/rules), speaker portal (tasks, file requests,
-// files), emails (templates/reminders/log/ICS), embeds.
+// files and deliverable versions/comments), emails (templates/reminders/log/ICS), embeds.
 // Out of scope per brief: CRM, CMS pages, payments, marketing, sponsors.
 //
 // ── Constraints Prisma cannot express (added in the drizzle/SQL migration) ──
@@ -89,6 +89,8 @@ model User {
   speakerIdentities Speaker[] // linked speaker rows across events
   reviews           Review[]
   evaluationMemberships EvaluationReviewer[]
+  taskComments       TaskComment[]
+  sessionRevisions   SessionRevision[]
 
   @@map("user")
 }
@@ -267,6 +269,7 @@ model Event {
   taskDefinitions TaskDefinition[]
   files           File[]
   emailMessages   EmailMessage[]
+  revisions       SessionRevision[]
   evaluationReviewers EvaluationReviewer[]
   invitations     OrgInvitation[]
 
@@ -833,6 +836,8 @@ model TaskAssignment {
   updatedAt   DateTime   @updatedAt
 
   formResponse FormResponse?
+  files        File[]
+  comments     TaskComment[]
 
   // Uniqueness via TWO partial indexes (see header appendix) — a plain
   // composite unique fails for speaker tasks because sessionId is NULL and
@@ -841,6 +846,43 @@ model TaskAssignment {
   @@index([taskDefinitionId, status])
   @@index([speakerId, status])
   @@index([sessionId])
+}
+
+model TaskComment {
+  id               String         @id @default(cuid())
+  taskAssignmentId String
+  taskAssignment   TaskAssignment @relation(fields: [taskAssignmentId], references: [id], onDelete: Cascade)
+  fieldName        String
+  authorUserId     String
+  author           User           @relation(fields: [authorUserId], references: [id], onDelete: Cascade)
+  body             String
+  createdAt        DateTime       @default(now())
+
+  @@index([taskAssignmentId, fieldName, createdAt])
+  @@index([authorUserId])
+  @@map("task_comment")
+}
+
+model SessionRevision {
+  id                     String          @id @default(cuid())
+  eventId                String
+  sessionId              String
+  session                Session         @relation(fields: [sessionId, eventId], references: [id, eventId], onDelete: Cascade)
+  title                  String?
+  description            String?
+  trackId                String?
+  formatId               String?
+  coverImageFileId       String?
+  editorUserId           String
+  editor                 User            @relation(fields: [editorUserId], references: [id], onDelete: Cascade)
+  restoredFromRevisionId String?
+  restoredFrom           SessionRevision? @relation("RestoredRevision", fields: [restoredFromRevisionId], references: [id])
+  restores               SessionRevision[] @relation("RestoredRevision")
+  createdAt              DateTime        @default(now())
+
+  @@index([sessionId, createdAt])
+  @@index([editorUserId])
+  @@map("session_revision")
 }
 
 enum FileKind {
@@ -870,6 +912,9 @@ model File {
 
   uploadedBySpeakerId String?
   uploadedBySpeaker   Speaker? @relation("UploadedBySpeaker", fields: [uploadedBySpeakerId], references: [id], onDelete: SetNull)
+  taskAssignmentId    String?
+  taskAssignment      TaskAssignment? @relation(fields: [taskAssignmentId], references: [id], onDelete: SetNull)
+  fieldName           String?
 
   createdAt DateTime @default(now())
 
@@ -881,6 +926,7 @@ model File {
 
   @@index([eventId])
   @@index([uploadedBySpeakerId])
+  @@index([taskAssignmentId, fieldName, createdAt])
 }
 
 // ═════════════════════════════════════════════════════════════════════════════

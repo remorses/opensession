@@ -9,7 +9,9 @@ import { z } from 'zod'
 import { app as holocronApp } from '@holocron.so/vite/app'
 import { env } from 'cloudflare:workers'
 import * as schema from 'db/schema'
+import * as orm from 'drizzle-orm'
 import { ulid } from 'ulid'
+import { Zip, ZipPassThrough } from 'fflate'
 import {
   getAuth,
   getSession,
@@ -21,7 +23,7 @@ import {
   getDb,
   requireSession,
 } from './db.ts'
-import { collectFields, libraryOptions, type FieldOption } from './forms/collect-fields.ts'
+import { collectFields, libraryOptions, type FieldOption, type ValuesRecord } from './forms/collect-fields.ts'
 import { loadAgendaSessions, speakerDisplayName } from './lib/agenda-server.ts'
 import { canAccessFile, restoreSubmissionValues } from './lib/cfp-submission.ts'
 import {
@@ -62,6 +64,12 @@ import {
   sessionMatchesQuery,
 } from './lib/submissions.ts'
 import { summarizeAssignmentProgress } from './lib/tasks.ts'
+import {
+  isPublicContentEligible,
+  latestTaskFileVersions,
+  selectLatestZipEntries,
+  taskFileSlotKey,
+} from './lib/content-management.ts'
 import { cn, formatDateRange } from './lib/utils.ts'
 import { Badge } from './components/ui/primitives.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
@@ -101,6 +109,28 @@ type PortalShellLoaderData = {
   userName: string
   submissions: PortalSubmissionListRow[]
   assignments: PortalAssignmentListRow[]
+}
+
+type PortalTaskLoaderData = {
+  assignment: {
+    id: string
+    title: string
+    instructionsHtml: string | null
+    source: 'MANUAL' | 'FORM'
+    status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED'
+    sessionTitle: string | null
+    dueAt: number | null
+  } | null
+  formMdx: string | null
+  scope: { tracks: FieldOption[]; formats: FieldOption[] }
+  initialValues: ValuesRecord
+  initialParticipants: ValuesRecord[]
+  deliverables: Array<{
+    fieldName: string
+    currentFileId: string
+    versions: Array<{ id: string; fileName: string; sizeBytes: number; createdAt: number }>
+    comments: Array<{ id: string; body: string; createdAt: number; authorName: string }>
+  }>
 }
 
 function emptyPortalShell(userEmail: string, userName: string): PortalShellLoaderData {
@@ -309,6 +339,8 @@ export const app = new Spiceflow()
     const eventId = String(body.get('eventId') ?? '')
     const kindResult = z.enum(['HEADSHOT', 'SLIDES', 'DOCUMENT', 'IMAGE', 'OTHER'])
       .safeParse(body.get('kind'))
+    const assignmentId = String(body.get('taskAssignmentId') ?? '').trim()
+    const fieldName = String(body.get('fieldName') ?? '').trim()
     if (!(uploaded instanceof File) || !eventId || !kindResult.success) {
       return json({ error: 'invalid_upload', message: 'File, eventId, and kind are required' }, { status: 400 })
     }
@@ -327,6 +359,21 @@ export const app = new Spiceflow()
       db.query.speaker.findFirst({ where: { eventId, userId: session.userId } }),
     ] as const)
     if (!member && !speaker) return json({ error: 'not_found', message: 'Event not found' }, { status: 404 })
+    if (Boolean(assignmentId) !== Boolean(fieldName) || fieldName.length > 200) {
+      return json({ error: 'invalid_task_slot', message: 'A task assignment and field name are both required' }, { status: 400 })
+    }
+    const assignment = assignmentId
+      ? await db.query.taskAssignment.findFirst({
+        where: { id: assignmentId, eventId },
+        with: { taskDefinition: true },
+      }) ?? null
+      : null
+    if (assignmentId) {
+      if (!speaker || !assignment || assignment.speakerId !== speaker.id
+        || assignment.status === 'COMPLETED' || assignment.taskDefinition?.source !== 'FORM') {
+        return json({ error: 'not_found', message: 'Task assignment not found' }, { status: 404 })
+      }
+    }
 
     const fileId = ulid()
     const fileName = sanitizeFileName(uploaded.name)
@@ -335,7 +382,7 @@ export const app = new Spiceflow()
       httpMetadata: { contentType: uploaded.type },
     })
     try {
-      await db.insert(schema.file).values({
+      const insertFile = db.insert(schema.file).values({
         id: fileId,
         eventId,
         kind: kindResult.data,
@@ -344,19 +391,48 @@ export const app = new Spiceflow()
         sizeBytes: uploaded.size,
         storageKey,
         uploadedBySpeakerId: speaker?.id ?? null,
+        taskAssignmentId: assignment?.id ?? null,
+        fieldName: assignment ? fieldName : null,
       })
+      if (assignment) {
+        await db.batch([
+          insertFile,
+          db.update(schema.taskAssignment).set({ status: 'IN_PROGRESS', updatedAt: Date.now() })
+            .where(orm.eq(schema.taskAssignment.id, assignment.id)).limit(1),
+        ] as const)
+      } else await insertFile
     } catch (cause) {
       await env.FILES.delete(storageKey)
       throw cause
     }
-    return { fileId, fileName, sizeBytes: uploaded.size }
+    const versions = assignment
+      ? await db.query.file.findMany({
+          where: { eventId, taskAssignmentId: assignment.id, fieldName },
+          orderBy: { createdAt: 'desc', id: 'desc' },
+        })
+      : []
+    return {
+      fileId,
+      fileName,
+      sizeBytes: uploaded.size,
+      versions: versions.map((file) => ({
+        id: file.id,
+        fileName: file.fileName,
+        sizeBytes: file.sizeBytes,
+        createdAt: file.createdAt,
+      })),
+    }
   })
 
   .get('/files/:fileId', async ({ params, request }) => {
     const db = getDb()
     const file = await db.query.file.findFirst({
       where: { id: params.fileId },
-      with: { event: true, formFieldValues: { with: { response: { with: { session: true } } } } },
+      with: {
+        event: true,
+        taskAssignment: { with: { speaker: true } },
+        formFieldValues: { with: { response: { with: { session: true } } } },
+      },
     })
     if (!file?.event) return fileNotFound()
 
@@ -373,11 +449,11 @@ export const app = new Spiceflow()
       }),
     ] as const)
     const publicFieldReference = file.formFieldValues.some((value) =>
-      value.response?.session?.status === 'ACCEPTED' && value.response.session.visibility === 'PUBLIC',
+      value.response?.session ? isPublicContentEligible(value.response.session) : false,
     )
     const publicHeadshot = headshotSpeakers.some((speaker) =>
       speaker.participations.some((participation) =>
-        participation.session?.status === 'ACCEPTED' && participation.session.visibility === 'PUBLIC',
+        participation.session ? isPublicContentEligible(participation.session) : false,
       ),
     )
     const owningSpeaker = Boolean(linkedSpeaker && (
@@ -386,6 +462,7 @@ export const app = new Spiceflow()
       || file.formFieldValues.some((value) =>
         value.subjectSpeakerId === linkedSpeaker.id || value.response?.speakerId === linkedSpeaker.id,
       )
+      || file.taskAssignment?.speaker?.id === linkedSpeaker.id
     ))
     if (!canAccessFile({
       isOrgMember: Boolean(member),
@@ -404,6 +481,31 @@ export const app = new Spiceflow()
       'cache-control': publicHeadshot || coverSession || publicFieldReference ? 'public, max-age=300' : 'private, no-store',
     })
     return new Response(object.body, { headers })
+  })
+
+  .route({
+    method: 'GET',
+    path: '/org/:orgId/e/:eventId/files.zip',
+    query: z.object({ slot: z.array(z.string()).min(1).max(100) }),
+    async handler({ params, query, request, waitUntil }) {
+      const session = await requireSession(request)
+      const member = await lookupOrgMember(session.userId, params.orgId)
+      if (!member) return fileNotFound()
+      const db = getDb()
+      const event = await db.query.event.findFirst({ where: { id: params.eventId, orgId: params.orgId } })
+      if (!event) return fileNotFound()
+      const files = await loadZipFiles({ db, eventId: event.id, selectedSlots: new Set(query.slot) })
+      if (files.length === 0) return fileNotFound()
+      const archive = streamZip(files)
+      waitUntil(archive.done)
+      return new Response(archive.readable, {
+        headers: {
+          'content-type': 'application/zip',
+          'content-disposition': `attachment; filename="${sanitizeFileName(event.slug)}-files.zip"`,
+          'cache-control': 'private, no-store',
+        },
+      })
+    },
   })
 
   // ── Public CFP submission ─────────────────────────────────────────
@@ -624,7 +726,7 @@ export const app = new Spiceflow()
     },
   })
 
-  .loader('/portal/:eventSlug/tasks/:assignmentId', async ({ params, request }) => {
+  .loader('/portal/:eventSlug/tasks/:assignmentId', async ({ params, request }): Promise<PortalTaskLoaderData> => {
     const session = await getSession(request)
     if (!session) {
       throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}/tasks/${params.assignmentId}`)}`)
@@ -633,20 +735,22 @@ export const app = new Spiceflow()
     if (!ctx?.speaker) {
       return {
         assignment: null,
-        formMdx: null as string | null,
-        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
-        initialValues: {} as Record<string, string>,
-        initialParticipants: [] as Array<Record<string, string>>,
+        formMdx: null,
+        scope: { tracks: [], formats: [] },
+        initialValues: {},
+        initialParticipants: [],
+        deliverables: [],
       }
     }
     const loaded = await getPortalAssignment(ctx.event.id, ctx.speaker.id, params.assignmentId)
     if (!loaded) {
       return {
         assignment: null,
-        formMdx: null as string | null,
-        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
-        initialValues: {} as Record<string, string>,
-        initialParticipants: [] as Array<Record<string, string>>,
+        formMdx: null,
+        scope: { tracks: [], formats: [] },
+        initialValues: {},
+        initialParticipants: [],
+        deliverables: [],
       }
     }
     const db = getDb()
@@ -664,11 +768,35 @@ export const app = new Spiceflow()
         source: def?.source ?? 'MANUAL',
         status: loaded.assignment.status,
         sessionTitle: loaded.assignment.session?.title ?? null,
+        dueAt: loaded.assignment.dueAt,
       },
       formMdx: loaded.formVersion?.mdxSource ?? null,
       scope: { tracks: libraryOptions(tracks), formats: libraryOptions(formats) },
-      initialValues: profileDraft.values as Record<string, string>,
-      initialParticipants: [] as Array<Record<string, string>>,
+      initialValues: {
+        ...profileDraft.values,
+        ...Object.fromEntries(
+          latestTaskFileVersions(loaded.assignment.files).map((slot) => [slot.fieldName, slot.currentFileId]),
+        ),
+      },
+      initialParticipants: [],
+      deliverables: latestTaskFileVersions(loaded.assignment.files).map((slot) => ({
+        fieldName: slot.fieldName,
+        currentFileId: slot.currentFileId,
+        versions: slot.versions.map((file) => ({
+          id: file.id,
+          fileName: file.fileName,
+          sizeBytes: file.sizeBytes,
+          createdAt: file.createdAt,
+        })),
+        comments: loaded.assignment.comments
+          .filter((comment) => comment.fieldName === slot.fieldName)
+          .map((comment) => ({
+            id: comment.id,
+            body: comment.body,
+            createdAt: comment.createdAt,
+            authorName: comment.author?.name ?? 'User',
+          })),
+      })),
     }
   })
 
@@ -836,9 +964,6 @@ export const app = new Spiceflow()
     )
   })
 
-  // ── Event sections (placeholders until their tasks land) ──────────
-  // Every sidebar item is a registered page so navigation never 404s.
-
   // ── Abstracts list + detail + CSV ─────────────────────────────────
 
   .loader('/org/:orgId/e/:eventId/abstracts', async ({ params, request }) => {
@@ -943,6 +1068,10 @@ export const app = new Spiceflow()
           },
           orderBy: { submittedAt: 'desc', createdAt: 'desc' },
         },
+        revisions: {
+          with: { editor: true },
+          orderBy: { createdAt: 'desc', id: 'desc' },
+        },
       },
     })
     if (!found) throw redirect(`/org/${params.orgId}/e/${params.eventId}/abstracts`)
@@ -997,6 +1126,10 @@ export const app = new Spiceflow()
         decidedAt: found.decidedAt,
         notifiedAt: found.notifiedAt,
         withdrawnAt: found.withdrawnAt,
+        visibility: found.visibility,
+        trackId: found.trackId,
+        formatId: found.formatId,
+        coverImageFileId: found.coverImageFileId,
       },
       trackName: found.track?.name ?? null,
       formatName: found.format?.name ?? null,
@@ -1012,6 +1145,17 @@ export const app = new Spiceflow()
       })),
       reviews,
       fieldValues,
+      revisions: found.revisions.map((revision) => ({
+        id: revision.id,
+        title: revision.title,
+        description: revision.description,
+        trackId: revision.trackId,
+        formatId: revision.formatId,
+        coverImageFileId: revision.coverImageFileId,
+        createdAt: revision.createdAt,
+        editorName: revision.editor?.name ?? revision.editor?.email ?? 'Organizer',
+        restoredFromRevisionId: revision.restoredFromRevisionId,
+      })),
     }
   })
 
@@ -1110,12 +1254,28 @@ export const app = new Spiceflow()
     },
   })
 
-  .page('/org/:orgId/e/:eventId/files', async () => (
-    <ComingSoonPage
-      title="Files"
-      description="Every file uploaded to this event: headshots, slides, cover images, and logos."
-    />
-  ))
+  .loader('/org/:orgId/e/:eventId/files', async ({ params }) => {
+    return loadFilesWorkspace(getDb(), params.eventId)
+  })
+
+  .page({
+    path: '/org/:orgId/e/:eventId/files',
+    query: z.object({
+      status: z.enum(['all', 'incomplete', 'complete']).optional(),
+      kind: z.enum(['all', 'slides', 'images', 'documents']).optional(),
+    }),
+    handler: async ({ query, loaderData }) => {
+      const { FilesPage } = await import('./components/files-page.tsx')
+      return (
+        <FilesPage
+          status={query.status ?? 'all'}
+          kind={query.kind ?? 'all'}
+          fileSlots={loaderData.fileSlots}
+          otherFiles={loaderData.otherFiles}
+        />
+      )
+    },
+  })
   // ── Forms (CFP) list + MDX editor ─────────────────────────────────
   // The live MDX of a form is the newest FormVersion. List counts come
   // from ONE db.query (responses relation aggregated in JS — form counts
@@ -1773,20 +1933,6 @@ function EventStatusBadge({ status }: { status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED' 
   )
 }
 
-/** Consistent placeholder for event sections that later tasks implement.
-    Registered as real pages so sidebar navigation never 404s. */
-function ComingSoonPage({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold tracking-tight">{title}</h1>
-        <p className="text-sm text-muted-foreground">{description}</p>
-      </div>
-      <Badge variant="outline" className="w-fit px-1.5">Coming soon</Badge>
-    </div>
-  )
-}
-
 function PublicUnavailable() {
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-16">
@@ -1836,6 +1982,158 @@ function sanitizeFileName(fileName: string): string {
 
 function fileNotFound() {
   return new Response('Not found', { status: 404, headers: { 'cache-control': 'no-store' } })
+}
+
+export async function loadFilesWorkspace(db: ReturnType<typeof getDb>, eventId: string) {
+  const [assignments, files] = await db.batch([
+    db.query.taskAssignment.findMany({
+      where: { eventId },
+      with: {
+        speaker: true,
+        session: true,
+        files: { orderBy: { createdAt: 'desc', id: 'desc' } },
+        comments: { with: { author: true }, orderBy: { createdAt: 'asc', id: 'asc' } },
+        taskDefinition: {
+          with: { form: { with: { versions: { orderBy: { createdAt: 'desc', id: 'desc' }, limit: 1 } } } },
+        },
+      },
+      orderBy: { createdAt: 'asc' },
+    }),
+    db.query.file.findMany({
+      where: { eventId },
+      with: { formFieldValues: { with: { response: { with: { taskAssignment: true } } } } },
+      orderBy: { createdAt: 'desc', id: 'desc' },
+    }),
+  ] as const)
+
+  const selectedFileIdsBySlot = new Map<string, Set<string>>()
+  for (const file of files) {
+    for (const value of file.formFieldValues) {
+      const assignmentId = value.response?.taskAssignment?.id
+      if (!assignmentId) continue
+      const key = taskFileSlotKey(assignmentId, value.name)
+      const selected = selectedFileIdsBySlot.get(key)
+      if (selected) selected.add(file.id)
+      else selectedFileIdsBySlot.set(key, new Set([file.id]))
+    }
+  }
+  const fileSlots = assignments.flatMap((assignment) => {
+    const formVersion = assignment.taskDefinition?.form?.versions[0]
+    const collected = formVersion
+      ? collectFields({ mdxSource: formVersion.mdxSource, scope: { values: {} } })
+      : null
+    const fieldNames = new Set([
+      ...(collected?.fields ?? []),
+      ...(collected?.participantFields ?? []),
+    ].filter((field) => field.type === 'file').map((field) => field.name))
+    for (const file of assignment.files) {
+      if (file.fieldName) fieldNames.add(file.fieldName)
+    }
+    return [...fieldNames].sort().map((fieldName) => {
+      const versions = assignment.files.filter((file) => file.fieldName === fieldName)
+      const selectedFileIds = selectedFileIdsBySlot.get(taskFileSlotKey(assignment.id, fieldName)) ?? new Set()
+      return {
+        slotKey: taskFileSlotKey(assignment.id, fieldName),
+        assignmentId: assignment.id,
+        fieldName,
+        taskTitle: assignment.taskDefinition?.title ?? 'Task',
+        dueAt: assignment.dueAt,
+        status: assignment.status,
+        speakerName: assignment.speaker
+          ? `${assignment.speaker.firstName} ${assignment.speaker.lastName}`
+          : 'Removed speaker',
+        sessionTitle: assignment.session?.title ?? null,
+        versions: versions.map((file, index) => ({
+          id: file.id,
+          fileName: file.fileName,
+          mimeType: file.mimeType,
+          sizeBytes: file.sizeBytes,
+          createdAt: file.createdAt,
+          current: index === 0,
+          selectedOnSubmit: selectedFileIds.has(file.id),
+        })),
+        comments: assignment.comments.filter((comment) => comment.fieldName === fieldName).map((comment) => ({
+          id: comment.id,
+          body: comment.body,
+          createdAt: comment.createdAt,
+          authorName: comment.author?.name ?? 'User',
+        })),
+      }
+    })
+  })
+  return {
+    fileSlots,
+    otherFiles: files.filter((file) => !file.taskAssignmentId).map((file) => ({
+      id: file.id,
+      fileName: file.fileName,
+      kind: file.kind,
+      createdAt: file.createdAt,
+    })),
+  }
+}
+
+export async function loadZipFiles({ db, eventId, selectedSlots }: {
+  db: ReturnType<typeof getDb>
+  eventId: string
+  selectedSlots: ReadonlySet<string>
+}): Promise<Array<{ archivePath: string; storageKey: string }>> {
+  const rows = await db.query.file.findMany({
+    where: { eventId, taskAssignmentId: { isNotNull: true } },
+    with: { taskAssignment: { with: { speaker: true, session: true } } },
+  })
+  const entries = selectLatestZipEntries(rows.map((file) => ({
+    ...file,
+    speakerName: file.taskAssignment?.speaker
+      ? `${file.taskAssignment.speaker.firstName} ${file.taskAssignment.speaker.lastName}`
+      : 'Speaker',
+    sessionTitle: file.taskAssignment?.session?.title ?? null,
+  })), selectedSlots)
+  const fileById = new Map(rows.map((file) => [file.id, file]))
+  return entries.map((entry) => ({
+    archivePath: entry.archivePath,
+    storageKey: fileById.get(entry.fileId)!.storageKey,
+  }))
+}
+
+export function streamZip(entries: Array<{ archivePath: string; storageKey: string }>): {
+  readable: ReadableStream<Uint8Array>
+  done: Promise<void>
+} {
+  const { readable, writable } = new TransformStream<Uint8Array, Uint8Array>()
+  const writer = writable.getWriter()
+  let writes = Promise.resolve()
+  const zip = new Zip((error, chunk, final) => {
+    if (error) {
+      writes = writes.then(() => writer.abort(error))
+      return
+    }
+    writes = writes.then(() => writer.write(chunk))
+    if (final) writes = writes.then(() => writer.close())
+  })
+  const done = (async () => {
+    try {
+      for (const entry of entries) {
+        const object = await env.FILES.get(entry.storageKey)
+        if (!object) throw new Error(`Missing R2 object for ${entry.archivePath}`)
+        const zipFile = new ZipPassThrough(entry.archivePath)
+        zip.add(zipFile)
+        const reader = object.body.getReader()
+        while (true) {
+          const chunk = await reader.read()
+          if (chunk.done) break
+          zipFile.push(chunk.value)
+        }
+        zipFile.push(new Uint8Array(), true)
+      }
+      zip.end()
+      await writes
+    } catch (error) {
+      zip.terminate()
+      await writer.abort(error)
+      throw error
+    }
+  })()
+  return { readable, done }
 }
 
 // ── Dashboard shell (sigillo-style chrome) ──────────────────────────

@@ -111,8 +111,44 @@ export function SpeakersPage({ initialStatus }: { initialStatus: RosterStatus })
 
 function SpeakerDialog({ open, onOpenChange, orgId, eventId, speaker }: any) {
   const [pending, startTransition] = useTransition()
+  const [headshotFileId, setHeadshotFileId] = useState<string | null>(speaker?.headshotFileId ?? null)
+  const [uploading, setUploading] = useState(false)
   return <Dialog open={open} onOpenChange={onOpenChange}><DialogPopup className="max-w-xl"><DialogHeader><DialogTitle>{speaker ? 'Edit speaker' : 'Add speaker'}</DialogTitle><DialogDescription>Roster status is independent from confirmation on each session.</DialogDescription></DialogHeader><DialogPanel>
-    <form className="grid gap-3 sm:grid-cols-2" onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); startTransition(async () => { try { const result = await saveSpeaker({ orgId, eventId, speakerId: speaker?.id, firstName: String(data.get('firstName')), lastName: String(data.get('lastName')), email: String(data.get('email')), status: String(data.get('status')) as SpeakerStatus, jobTitle: String(data.get('jobTitle')), companyName: String(data.get('companyName')), bio: String(data.get('bio')), pronouns: String(data.get('pronouns')), websiteUrl: String(data.get('websiteUrl')), linkedinUrl: String(data.get('linkedinUrl')), twitterUrl: String(data.get('twitterUrl')) }); onOpenChange(false); toast.success(result.created ? 'Speaker added' : 'Speaker saved') } catch (error) { toastActionError(error, 'Could not save speaker') } }) }}>
+    <form className="grid gap-3 sm:grid-cols-2" onSubmit={(event) => { event.preventDefault(); const data = new FormData(event.currentTarget); startTransition(async () => { try { const result = await saveSpeaker({ orgId, eventId, speakerId: speaker?.id, firstName: String(data.get('firstName')), lastName: String(data.get('lastName')), email: String(data.get('email')), status: String(data.get('status')) as SpeakerStatus, jobTitle: String(data.get('jobTitle')), companyName: String(data.get('companyName')), bio: String(data.get('bio')), pronouns: String(data.get('pronouns')), websiteUrl: String(data.get('websiteUrl')), linkedinUrl: String(data.get('linkedinUrl')), twitterUrl: String(data.get('twitterUrl')), headshotFileId }); onOpenChange(false); toast.success(result.created ? 'Speaker added' : 'Speaker saved') } catch (error) { toastActionError(error, 'Could not save speaker') } }) }}>
+      <label className="flex flex-col gap-2 text-sm sm:col-span-2">
+        Headshot
+        <div className="flex items-center gap-3">
+          {headshotFileId ? <img src={`/files/${headshotFileId}`} alt="Headshot preview" className="size-16 rounded-full object-cover" /> : null}
+          <div className="flex flex-col gap-1">
+            <Input
+              type="file"
+              accept="image/png,image/jpeg,image/webp"
+              disabled={uploading}
+              onChange={async (event) => {
+                const file = event.target.files?.[0]
+                if (!file) return
+                setUploading(true)
+                try {
+                  const body = new FormData()
+                  body.set('file', file)
+                  body.set('eventId', eventId)
+                  body.set('kind', 'HEADSHOT')
+                  const response = await fetch('/api/upload', { method: 'POST', body })
+                  const result: { fileId?: string; message?: string } = await response.json()
+                  if (!response.ok || !result.fileId) throw new Error(result.message ?? 'Upload failed')
+                  setHeadshotFileId(result.fileId)
+                  toast.success('Headshot uploaded. Save the profile to apply it.')
+                } catch (error) {
+                  toastActionError(error, 'Could not upload headshot')
+                } finally {
+                  setUploading(false)
+                }
+              }}
+            />
+            <span className="text-xs text-muted-foreground">PNG, JPEG, or WebP · Maximum 100 MB</span>
+          </div>
+        </div>
+      </label>
       <label className="flex flex-col gap-1 text-sm">First name<Input name="firstName" required defaultValue={speaker?.firstName ?? ''} /></label>
       <label className="flex flex-col gap-1 text-sm">Last name<Input name="lastName" required defaultValue={speaker?.lastName ?? ''} /></label>
       <label className="flex flex-col gap-1 text-sm sm:col-span-2">Email<Input name="email" type="email" required defaultValue={speaker?.email ?? ''} /></label>
@@ -124,7 +160,7 @@ function SpeakerDialog({ open, onOpenChange, orgId, eventId, speaker }: any) {
       <label className="flex flex-col gap-1 text-sm">Website<Input name="websiteUrl" defaultValue={speaker?.websiteUrl ?? ''} /></label>
       <label className="flex flex-col gap-1 text-sm">LinkedIn<Input name="linkedinUrl" defaultValue={speaker?.linkedinUrl ?? ''} /></label>
       <label className="flex flex-col gap-1 text-sm">X / Twitter<Input name="twitterUrl" defaultValue={speaker?.twitterUrl ?? ''} /></label>
-      <div className="flex justify-end gap-2 sm:col-span-2"><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={pending}>{pending ? 'Saving...' : 'Save'}</Button></div>
+      <div className="flex justify-end gap-2 sm:col-span-2"><Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button type="submit" disabled={pending || uploading}>{pending ? 'Saving...' : 'Save'}</Button></div>
     </form>
   </DialogPanel></DialogPopup></Dialog>
 }

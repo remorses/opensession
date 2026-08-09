@@ -235,8 +235,8 @@ async function enqueueTaskReminders(db: Db, now: number): Promise<number> {
  * DB first, then R2. A leaked object costs pennies and a later sweep can find it
  * by storage key; a deleted object referenced by a live row is unrecoverable.
  *
- * If a future feature adds a fifth place that points at `file`, add a NOT EXISTS
- * clause here or the cron will start deleting live uploads.
+ * Task-slot files are live before a final form response exists, so their direct
+ * assignment reference is also part of the guard.
  */
 async function collectOrphanFiles(db: Db, now: number): Promise<number> {
   const cutoff = now - FILE_GC_GRACE_MS
@@ -247,6 +247,7 @@ async function collectOrphanFiles(db: Db, now: number): Promise<number> {
       AND NOT EXISTS (SELECT 1 FROM speaker WHERE headshot_file_id = file.id)
       AND NOT EXISTS (SELECT 1 FROM event_session WHERE cover_image_file_id = file.id)
       AND NOT EXISTS (SELECT 1 FROM event WHERE logo_file_id = file.id)
+      AND task_assignment_id IS NULL
     RETURNING storage_key
   `)
   for (const row of deleted) {

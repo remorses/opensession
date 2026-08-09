@@ -504,11 +504,11 @@ async function requireEventAccess({ actionRequest, orgId, eventId }: {
   orgId: string
   eventId: string
 }) {
-  await requireOrgAccess(actionRequest, orgId)
+  const access = await requireOrgAccess(actionRequest, orgId)
   const db = getDb()
   const event = await db.query.event.findFirst({ where: { id: eventId, orgId } })
   if (!event) throw new Error('Event not found')
-  return { db, event }
+  return { db, event, session: access.session }
 }
 
 const updateEventSchema = z.object({
@@ -1817,6 +1817,7 @@ const speakerProfileInput = z.object({
   websiteUrl: z.string().trim().max(500).nullable().optional(),
   linkedinUrl: z.string().trim().max(500).nullable().optional(),
   twitterUrl: z.string().trim().max(500).nullable().optional(),
+  headshotFileId: z.string().min(1).nullable().optional(),
 })
 
 export async function saveSpeaker(input: z.input<typeof speakerProfileInput>) {
@@ -1824,12 +1825,19 @@ export async function saveSpeaker(input: z.input<typeof speakerProfileInput>) {
   await requireSession(actionRequest)
   const parsed = speakerProfileInput.parse(input)
   const { db } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  if (parsed.headshotFileId) {
+    const headshot = await db.query.file.findFirst({
+      where: { id: parsed.headshotFileId, eventId: parsed.eventId, kind: { in: ['HEADSHOT', 'IMAGE'] } },
+    })
+    if (!headshot) throw new Error('Headshot file not found in this event')
+  }
   const values = {
     email: normalizeSpeakerEmail(parsed.email), firstName: parsed.firstName, lastName: parsed.lastName,
     status: parsed.status, jobTitle: parsed.jobTitle?.trim() || null,
     companyName: parsed.companyName?.trim() || null, bio: parsed.bio?.trim() || null,
     pronouns: parsed.pronouns?.trim() || null, websiteUrl: parsed.websiteUrl?.trim() || null,
     linkedinUrl: parsed.linkedinUrl?.trim() || null, twitterUrl: parsed.twitterUrl?.trim() || null,
+    headshotFileId: parsed.headshotFileId ?? undefined,
     updatedAt: Date.now(),
   }
   try {
@@ -2053,6 +2061,169 @@ export async function remindTaskAssignments(input: z.input<typeof remindAssignme
   return { queued }
 }
 
+const taskCommentSchema = z.object({
+  eventId: z.string().min(1),
+  assignmentId: z.string().min(1),
+  fieldName: z.string().trim().min(1).max(200),
+  body: z.string().trim().min(1).max(5000),
+})
+
+export async function addTaskComment(input: z.input<typeof taskCommentSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = taskCommentSchema.parse(input)
+  const db = getDb()
+  const assignment = await db.query.taskAssignment.findFirst({
+    where: { id: parsed.assignmentId, eventId: parsed.eventId },
+    with: { speaker: true },
+  })
+  if (!assignment?.speaker) throw new Error('Task assignment not found')
+  const event = await db.query.event.findFirst({ where: { id: parsed.eventId } })
+  if (!event) throw new Error('Task assignment not found')
+  const member = await db.query.orgMember.findFirst({
+    where: { orgId: event.orgId, userId: session.userId },
+  })
+  if (assignment.speaker.userId !== session.userId && !member) {
+    throw new Error('Task assignment not found')
+  }
+  const slot = await db.query.file.findFirst({
+    where: {
+      eventId: parsed.eventId,
+      taskAssignmentId: parsed.assignmentId,
+      fieldName: parsed.fieldName,
+    },
+  })
+  if (!slot) throw new Error('Upload a file before starting a comment thread')
+  const commentId = ulid()
+  await db.insert(schema.taskComment).values({
+    id: commentId,
+    taskAssignmentId: parsed.assignmentId,
+    fieldName: parsed.fieldName,
+    authorUserId: session.userId,
+    body: parsed.body,
+  })
+  return { commentId }
+}
+
+const sessionContentSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+  title: z.string().trim().min(1).max(300),
+  description: z.string().trim().max(20_000).nullable(),
+  trackId: z.string().min(1).nullable(),
+  formatId: z.string().min(1).nullable(),
+  coverImageFileId: z.string().min(1).nullable(),
+})
+
+export async function saveSessionContent(input: z.input<typeof sessionContentSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = sessionContentSchema.parse(input)
+  const { db, session } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const [current, track, format, cover] = await db.batch([
+    db.query.eventSession.findFirst({
+      where: { id: parsed.sessionId, eventId: parsed.eventId, kind: 'CONTENT' },
+    }),
+    db.query.track.findFirst({ where: { id: parsed.trackId ?? '__none__', eventId: parsed.eventId } }),
+    db.query.format.findFirst({ where: { id: parsed.formatId ?? '__none__', eventId: parsed.eventId } }),
+    db.query.file.findFirst({
+      where: {
+        id: parsed.coverImageFileId ?? '__none__',
+        eventId: parsed.eventId,
+        kind: { in: ['HEADSHOT', 'IMAGE'] },
+      },
+    }),
+  ] as const)
+  if (!current) throw new Error('Content session not found')
+  if (parsed.trackId && !track) throw new Error('Track not found in this event')
+  if (parsed.formatId && !format) throw new Error('Format not found in this event')
+  if (parsed.coverImageFileId && !cover) throw new Error('Cover image not found in this event')
+  if (current.status === 'DRAFT') throw new Error('Submit the abstract before editing program content')
+
+  const revisionId = ulid()
+  const now = Date.now()
+  await db.batch([
+    db.update(schema.eventSession).set({
+      title: parsed.title,
+      description: parsed.description?.trim() || null,
+      trackId: parsed.trackId,
+      formatId: parsed.formatId,
+      coverImageFileId: parsed.coverImageFileId,
+      updatedAt: now,
+    }).where(orm.and(
+      orm.eq(schema.eventSession.id, parsed.sessionId),
+      orm.eq(schema.eventSession.eventId, parsed.eventId),
+    )).limit(1),
+    db.insert(schema.sessionRevision).values({
+      id: revisionId,
+      eventId: parsed.eventId,
+      sessionId: parsed.sessionId,
+      title: parsed.title,
+      description: parsed.description?.trim() || null,
+      trackId: parsed.trackId,
+      formatId: parsed.formatId,
+      coverImageFileId: parsed.coverImageFileId,
+      editorUserId: session.userId,
+      createdAt: now,
+    }),
+  ] as const)
+  return { revisionId }
+}
+
+const restoreRevisionSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  sessionId: z.string().min(1),
+  revisionId: z.string().min(1),
+})
+
+export async function restoreSessionRevision(input: z.input<typeof restoreRevisionSchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = restoreRevisionSchema.parse(input)
+  const { db, session } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const revision = await db.query.sessionRevision.findFirst({
+    where: { id: parsed.revisionId, eventId: parsed.eventId, sessionId: parsed.sessionId },
+  })
+  if (!revision) throw new Error('Session revision not found')
+  const restoredRevisionId = ulid()
+  const now = Date.now()
+  await db.batch([
+    db.update(schema.eventSession).set({
+      title: revision.title,
+      description: revision.description,
+      trackId: revision.trackId,
+      formatId: revision.formatId,
+      coverImageFileId: revision.coverImageFileId,
+      updatedAt: now,
+    }).where(orm.and(
+      orm.eq(schema.eventSession.id, parsed.sessionId),
+      orm.eq(schema.eventSession.eventId, parsed.eventId),
+    )).limit(1),
+    db.insert(schema.sessionRevision).values({
+      id: restoredRevisionId,
+      eventId: parsed.eventId,
+      sessionId: parsed.sessionId,
+      title: revision.title,
+      description: revision.description,
+      trackId: revision.trackId,
+      formatId: revision.formatId,
+      coverImageFileId: revision.coverImageFileId,
+      editorUserId: session.userId,
+      restoredFromRevisionId: revision.id,
+      createdAt: now,
+    }),
+  ] as const)
+  return { revisionId: restoredRevisionId, restoredFromRevisionId: revision.id }
+}
+
 const createTaskDefinitionSchema = z.object({
   orgId: z.string().min(1),
   eventId: z.string().min(1),
@@ -2236,15 +2407,21 @@ export async function deleteTaskDefinition(input: z.input<typeof deleteTaskDefin
     columns: { id: true },
   })
   if (!existing) throw new Error('Task not found')
-  // Assignments cascade via FK.
-  await db
-    .delete(schema.taskDefinition)
-    .where(
-      orm.and(
-        orm.eq(schema.taskDefinition.id, parsed.taskDefinitionId),
-        orm.eq(schema.taskDefinition.eventId, parsed.eventId),
+  const assignments = await db.query.taskAssignment.findMany({
+    where: { eventId: parsed.eventId, taskDefinitionId: parsed.taskDefinitionId },
+  })
+  const deleteDefinition = db.delete(schema.taskDefinition).where(orm.and(
+    orm.eq(schema.taskDefinition.id, parsed.taskDefinitionId),
+    orm.eq(schema.taskDefinition.eventId, parsed.eventId),
+  )).limit(1)
+  if (assignments.length === 0) await deleteDefinition
+  else {
+    await db.batch([
+      db.update(schema.file).set({ taskAssignmentId: null, fieldName: null }).where(
+        orm.inArray(schema.file.taskAssignmentId, assignments.map((row) => row.id)),
       ),
-    )
-    .limit(1)
+      deleteDefinition,
+    ] as const)
+  }
   return { taskDefinitionId: parsed.taskDefinitionId }
 }

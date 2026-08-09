@@ -4,22 +4,32 @@
 
 import { useState, useTransition } from 'react'
 import { Link, router, useLoaderData } from 'spiceflow/react'
-import { ArrowLeftIcon } from 'lucide-react'
-import { updateSessionStatus } from '../actions.tsx'
-import { toastActionError } from './ui/toast.tsx'
+import { ArrowLeftIcon, HistoryIcon, PencilIcon } from 'lucide-react'
+import {
+  restoreSessionRevision,
+  saveSessionContent,
+  setSessionVisibility,
+  updateSessionStatus,
+} from '../actions.tsx'
+import { runAction, toastActionError } from './ui/toast.tsx'
 import type { SessionStatus } from '../lib/submissions.ts'
 import { formatDateTimeUTC } from '../lib/utils.ts'
 import { SessionStatusBadge } from './abstracts-page.tsx'
 import { Button } from './ui/button.tsx'
 import { Frame, FramePanel } from './ui/frame.tsx'
-import { Badge } from './ui/primitives.tsx'
+import {
+  Dialog, DialogDescription, DialogHeader, DialogPanel, DialogPopup, DialogTitle,
+} from './ui/dialog.tsx'
+import { Badge, Input, NativeSelect, Textarea } from './ui/primitives.tsx'
 
 export function AbstractDetailPage() {
   const { currentOrgId } = useLoaderData('/org/:orgId/*')
-  const { event } = useLoaderData('/org/:orgId/e/:eventId/*')
+  const { event, tracks, formats } = useLoaderData('/org/:orgId/e/:eventId/*')
   const data = useLoaderData('/org/:orgId/e/:eventId/abstracts/:sessionId')
-  const { session, participants, reviews, fieldValues, trackName, formatName, formName } =
+  const { session, participants, reviews, fieldValues, trackName, formatName, formName, revisions } =
     data
+  const [editOpen, setEditOpen] = useState(false)
+  const [visibilityPending, startVisibility] = useTransition()
 
   return (
     <div className="flex flex-col gap-6">
@@ -50,6 +60,29 @@ export function AbstractDetailPage() {
             sessionId={session.id}
             status={session.status}
           />
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <NativeSelect
+              aria-label="Content approval"
+              className="w-36"
+              disabled={visibilityPending}
+              value={session.visibility}
+              onChange={(change) => startVisibility(async () => {
+                await runAction(() => setSessionVisibility({
+                  orgId: currentOrgId,
+                  eventId: event.id,
+                  sessionId: session.id,
+                  visibility: change.target.value === 'PUBLIC' ? 'PUBLIC' : 'PRIVATE',
+                }), { fallbackError: 'Could not update content approval' })
+              })}
+            >
+              <option value="PRIVATE">Not approved</option>
+              <option value="PUBLIC">Approved</option>
+            </NativeSelect>
+            <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
+              <PencilIcon data-icon="inline-start" />
+              Edit content
+            </Button>
+          </div>
         </div>
       </div>
 
@@ -135,9 +168,158 @@ export function AbstractDetailPage() {
               )}
             </FramePanel>
           </Frame>
+
+          <Frame>
+            <FramePanel className="flex flex-col gap-3">
+              <div className="flex items-center gap-2">
+                <HistoryIcon className="size-4 text-muted-foreground" />
+                <h2 className="text-sm font-medium">Content history ({revisions.length})</h2>
+              </div>
+              {revisions.length === 0 ? (
+                <p className="text-sm text-muted-foreground">Edits made here will appear as restorable versions.</p>
+              ) : revisions.map((revision) => (
+                <RevisionRow
+                  key={revision.id}
+                  orgId={currentOrgId}
+                  eventId={event.id}
+                  sessionId={session.id}
+                  revision={revision}
+                />
+              ))}
+            </FramePanel>
+          </Frame>
         </div>
       </div>
+      <SessionContentDialog
+        open={editOpen}
+        onOpenChange={setEditOpen}
+        orgId={currentOrgId}
+        eventId={event.id}
+        session={session}
+        tracks={tracks}
+        formats={formats}
+      />
     </div>
+  )
+}
+
+function RevisionRow({ orgId, eventId, sessionId, revision }: {
+  orgId: string
+  eventId: string
+  sessionId: string
+  revision: {
+    id: string
+    title: string | null
+    description: string | null
+    editorName: string
+    createdAt: number
+    restoredFromRevisionId: string | null
+  }
+}) {
+  const [pending, startTransition] = useTransition()
+  return (
+    <div className="flex items-start justify-between gap-3 border-b border-border pb-3 last:border-0 last:pb-0">
+      <div className="min-w-0">
+        <p className="truncate text-sm font-medium">{revision.title ?? 'Untitled'}</p>
+        <p className="text-xs text-muted-foreground">
+          {revision.editorName} · {formatDateTimeUTC(revision.createdAt)}
+          {revision.restoredFromRevisionId ? ' · restored' : ''}
+        </p>
+        <p className="line-clamp-2 text-xs text-muted-foreground">{revision.description ?? 'No abstract'}</p>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={pending}
+        onClick={() => startTransition(async () => {
+          await runAction(() => restoreSessionRevision({
+            orgId,
+            eventId,
+            sessionId,
+            revisionId: revision.id,
+          }), { success: 'Revision restored', fallbackError: 'Could not restore revision' })
+        })}
+      >
+        {pending ? 'Restoring...' : 'Restore'}
+      </Button>
+    </div>
+  )
+}
+
+function SessionContentDialog({ open, onOpenChange, orgId, eventId, session, tracks, formats }: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  orgId: string
+  eventId: string
+  session: {
+    id: string
+    title: string | null
+    description: string | null
+    trackId: string | null
+    formatId: string | null
+    coverImageFileId: string | null
+  }
+  tracks: Array<{ id: string; name: string }>
+  formats: Array<{ id: string; name: string }>
+}) {
+  const [pending, startTransition] = useTransition()
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogPopup className="max-w-2xl">
+        <DialogHeader>
+          <DialogTitle>Edit session content</DialogTitle>
+          <DialogDescription>Each save creates an immutable version with your name and timestamp.</DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <form className="flex flex-col gap-4" onSubmit={(event) => {
+            event.preventDefault()
+            const form = new FormData(event.currentTarget)
+            startTransition(async () => {
+              const saved = await runAction(() => saveSessionContent({
+                orgId,
+                eventId,
+                sessionId: session.id,
+                title: String(form.get('title')),
+                description: String(form.get('description')).trim() || null,
+                trackId: String(form.get('trackId')).trim() || null,
+                formatId: String(form.get('formatId')).trim() || null,
+                coverImageFileId: session.coverImageFileId,
+              }), { success: 'Session content saved', fallbackError: 'Could not save session content' })
+              if (saved) onOpenChange(false)
+            })
+          }}>
+            <label className="flex flex-col gap-1.5 text-sm font-medium">
+              Title
+              <Input name="title" required maxLength={300} defaultValue={session.title ?? ''} />
+            </label>
+            <label className="flex flex-col gap-1.5 text-sm font-medium">
+              Abstract
+              <Textarea name="description" rows={9} maxLength={20_000} defaultValue={session.description ?? ''} />
+            </label>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <label className="flex flex-col gap-1.5 text-sm font-medium">
+                Track
+                <NativeSelect name="trackId" defaultValue={session.trackId ?? ''}>
+                  <option value="">No track</option>
+                  {tracks.map((track) => <option key={track.id} value={track.id}>{track.name}</option>)}
+                </NativeSelect>
+              </label>
+              <label className="flex flex-col gap-1.5 text-sm font-medium">
+                Format
+                <NativeSelect name="formatId" defaultValue={session.formatId ?? ''}>
+                  <option value="">No format</option>
+                  {formats.map((format) => <option key={format.id} value={format.id}>{format.name}</option>)}
+                </NativeSelect>
+              </label>
+            </div>
+            <div className="flex justify-end gap-2">
+              <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+              <Button type="submit" disabled={pending}>{pending ? 'Saving...' : 'Save version'}</Button>
+            </div>
+          </form>
+        </DialogPanel>
+      </DialogPopup>
+    </Dialog>
   )
 }
 
