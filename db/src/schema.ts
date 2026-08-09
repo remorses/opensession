@@ -1,5 +1,5 @@
 // Schema for the OpenSession D1 database — an open-source SessionBoard clone
-// (CFP forms, speaker portal, deliverables, review, agenda, embeds).
+// (CFP forms, speaker portal, deliverables, review, agenda, embeds, speaker CRM).
 //
 // Design source of truth: /schema.prisma (23 models). This file is the 1:1
 // drizzle translation. Auth + org tables are ported unchanged from the akarso
@@ -131,6 +131,96 @@ export const orgMember = s.sqliteTable('org_member', {
   // Makes invite acceptance idempotent via onConflictDoNothing.
   s.uniqueIndex('org_member_org_id_user_id_unique').on(table.orgId, table.userId),
   s.check('org_member_role_check', orm.sql`role IN ('admin', 'member')`),
+])
+
+// ── Organization speaker CRM ────────────────────────────────────────
+// Contacts are canonical across events in one organization. The sourcing
+// pipeline is fixed in application code; only each contact's current stage,
+// score, and rationale are stored. Notes and transitions are append-only
+// activities. Segments use explicit supported columns, never opaque JSON.
+
+export const orgContact = s.sqliteTable('org_contact', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  orgId: s.text('org_id').notNull().references(() => org.orgId, { onDelete: 'cascade' }),
+  email: s.text('email').notNull(),
+  firstName: s.text('first_name').notNull(),
+  lastName: s.text('last_name').notNull(),
+  jobTitle: s.text('job_title'),
+  companyName: s.text('company_name'),
+  bio: s.text('bio'),
+  stage: s.text('stage', { enum: ['RESEARCHING', 'IDENTIFIED', 'CONTACTED', 'INTERESTED', 'CONFIRMED', 'DECLINED'] }),
+  score: s.integer('score', { mode: 'number' }),
+  rationale: s.text('rationale'),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+  updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.uniqueIndex('org_contact_org_email_unique').on(table.orgId, table.email),
+  s.uniqueIndex('org_contact_id_org_unique').on(table.id, table.orgId),
+  s.index('org_contact_org_name_idx').on(table.orgId, table.lastName, table.firstName),
+  s.index('org_contact_org_stage_idx').on(table.orgId, table.stage),
+  s.check('org_contact_stage_check', orm.sql`stage IS NULL OR stage IN ('RESEARCHING', 'IDENTIFIED', 'CONTACTED', 'INTERESTED', 'CONFIRMED', 'DECLINED')`),
+  s.check('org_contact_score_check', orm.sql`score IS NULL OR (score >= 0 AND score <= 100)`),
+])
+
+export const contactTag = s.sqliteTable('contact_tag', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  orgId: s.text('org_id').notNull().references(() => org.orgId, { onDelete: 'cascade' }),
+  name: s.text('name').notNull(),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.uniqueIndex('contact_tag_org_name_unique').on(table.orgId, table.name),
+  s.uniqueIndex('contact_tag_id_org_unique').on(table.id, table.orgId),
+  s.index('contact_tag_org_idx').on(table.orgId),
+  s.check('contact_tag_name_check', orm.sql`length(trim(name)) > 0`),
+])
+
+export const contactTagLink = s.sqliteTable('contact_tag_link', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  orgId: s.text('org_id').notNull(),
+  contactId: s.text('contact_id').notNull(),
+  tagId: s.text('tag_id').notNull(),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.uniqueIndex('contact_tag_link_contact_tag_unique').on(table.contactId, table.tagId),
+  s.index('contact_tag_link_org_idx').on(table.orgId),
+  s.index('contact_tag_link_tag_idx').on(table.tagId),
+  s.foreignKey({ columns: [table.contactId, table.orgId], foreignColumns: [orgContact.id, orgContact.orgId], name: 'contact_tag_link_contact_org_fk' }).onDelete('cascade'),
+  s.foreignKey({ columns: [table.tagId, table.orgId], foreignColumns: [contactTag.id, contactTag.orgId], name: 'contact_tag_link_tag_org_fk' }).onDelete('cascade'),
+])
+
+export const contactSegment = s.sqliteTable('contact_segment', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  orgId: s.text('org_id').notNull().references(() => org.orgId, { onDelete: 'cascade' }),
+  name: s.text('name').notNull(),
+  companyName: s.text('company_name'),
+  jobTitle: s.text('job_title'),
+  tagId: s.text('tag_id'),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+  updatedAt: epochMs('updated_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.uniqueIndex('contact_segment_org_name_unique').on(table.orgId, table.name),
+  s.index('contact_segment_org_idx').on(table.orgId),
+  s.foreignKey({ columns: [table.tagId, table.orgId], foreignColumns: [contactTag.id, contactTag.orgId], name: 'contact_segment_tag_org_fk' }).onDelete('cascade'),
+  s.check('contact_segment_criteria_check', orm.sql`company_name IS NOT NULL OR job_title IS NOT NULL OR tag_id IS NOT NULL`),
+])
+
+export const contactActivity = s.sqliteTable('contact_activity', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  orgId: s.text('org_id').notNull(),
+  contactId: s.text('contact_id').notNull(),
+  actorUserId: s.text('actor_user_id').notNull().references(() => user.id, { onDelete: 'cascade' }),
+  kind: s.text('kind', { enum: ['NOTE', 'STAGE_TRANSITION', 'OUTREACH', 'EVENT_ADDED', 'MERGE'] }).notNull(),
+  body: s.text('body'),
+  fromStage: s.text('from_stage', { enum: ['RESEARCHING', 'IDENTIFIED', 'CONTACTED', 'INTERESTED', 'CONFIRMED', 'DECLINED'] }),
+  toStage: s.text('to_stage', { enum: ['RESEARCHING', 'IDENTIFIED', 'CONTACTED', 'INTERESTED', 'CONFIRMED', 'DECLINED'] }),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.index('contact_activity_contact_created_idx').on(table.contactId, table.createdAt),
+  s.index('contact_activity_org_kind_idx').on(table.orgId, table.kind),
+  s.foreignKey({ columns: [table.contactId, table.orgId], foreignColumns: [orgContact.id, orgContact.orgId], name: 'contact_activity_contact_org_fk' }).onDelete('cascade'),
+  s.check('contact_activity_kind_check', orm.sql`kind IN ('NOTE', 'STAGE_TRANSITION', 'OUTREACH', 'EVENT_ADDED', 'MERGE')`),
+  s.check('contact_activity_transition_check', orm.sql`(kind = 'STAGE_TRANSITION' AND to_stage IS NOT NULL) OR (kind <> 'STAGE_TRANSITION' AND from_stage IS NULL AND to_stage IS NULL)`),
+  s.check('contact_activity_body_check', orm.sql`kind = 'STAGE_TRANSITION' OR (body IS NOT NULL AND length(trim(body)) > 0)`),
 ])
 
 // ── Event ───────────────────────────────────────────────────────────
@@ -311,6 +401,8 @@ export const speaker = s.sqliteTable('speaker', {
   id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
   eventId: s.text('event_id').notNull().references(() => event.id, { onDelete: 'cascade' }),
   userId: s.text('user_id').references(() => user.id, { onDelete: 'set null' }),
+  /** Canonical cross-event organization contact. */
+  contactId: s.text('contact_id').references(() => orgContact.id, { onDelete: 'set null' }),
   email: s.text('email').notNull(),
   status: s.text('status', { enum: ['PENDING', 'INVITED', 'CONFIRMED', 'DECLINED'] }).notNull().default('PENDING'),
   firstName: s.text('first_name').notNull(),
@@ -333,6 +425,7 @@ export const speaker = s.sqliteTable('speaker', {
 }, (table) => [
   s.index('speaker_event_id_idx').on(table.eventId),
   s.index('speaker_user_id_idx').on(table.userId),
+  s.index('speaker_contact_id_idx').on(table.contactId),
   s.uniqueIndex('speaker_event_email_unique').on(table.eventId, table.email),
   s.uniqueIndex('speaker_id_event_unique').on(table.id, table.eventId),
   // One linked speaker identity per user per event. Partial: unlinked
@@ -703,6 +796,8 @@ export const emailMessage = s.sqliteTable('email_message', {
   batchId: s.text('batch_id'),
   toEmail: s.text('to_email').notNull(),
   speakerId: s.text('speaker_id').references(() => speaker.id, { onDelete: 'set null' }),
+  /** Organization CRM recipient when outreach starts from the directory. */
+  contactId: s.text('contact_id').references(() => orgContact.id, { onDelete: 'set null' }),
   sessionId: s.text('session_id').references(() => eventSession.id, { onDelete: 'set null' }),
   subject: s.text('subject').notNull(),
   /** Rendered snapshot. */
@@ -728,6 +823,7 @@ export const emailMessage = s.sqliteTable('email_message', {
 }, (table) => [
   s.index('email_message_event_status_idx').on(table.eventId, table.status),
   s.index('email_message_speaker_idx').on(table.speakerId),
+  s.index('email_message_contact_idx').on(table.contactId),
   s.index('email_message_session_idx').on(table.sessionId),
   s.index('email_message_batch_idx').on(table.batchId),
   s.check('email_message_kind_check', orm.sql`kind IN ('SUBMISSION_CONFIRMATION', 'DECISION_ACCEPTED', 'DECISION_DECLINED', 'TASK_ASSIGNED', 'TASK_REMINDER', 'DRAFT_REMINDER', 'SCHEDULE_INVITE', 'SCHEDULE_UPDATE', 'SCHEDULE_CANCEL', 'REVIEWER_INVITE', 'REVIEW_REMINDER', 'SPEAKER_INVITE', 'CUSTOM')`),
@@ -740,6 +836,7 @@ export const emailMessage = s.sqliteTable('email_message', {
 export const relations = orm.defineRelations(
   {
     user, session, account, verification, org, orgMember, orgInvitation,
+    orgContact, contactTag, contactTagLink, contactSegment, contactActivity,
     event, track, format, room, form, evaluationReviewer, formVersion, speaker, eventSession,
     sessionParticipant, formResponse, formFieldValue, review, taskDefinition,
     taskAssignment, taskComment, sessionRevision, file, emailMessage,
@@ -758,6 +855,7 @@ export const relations = orm.defineRelations(
       evaluationMemberships: r.many.evaluationReviewer(),
       taskComments: r.many.taskComment(),
       sessionRevisions: r.many.sessionRevision(),
+      contactActivities: r.many.contactActivity(),
     },
     session: {
       user: r.one.user({ from: r.session.userId, to: r.user.id }),
@@ -775,10 +873,45 @@ export const relations = orm.defineRelations(
         to: r.user.id.through(r.orgMember.userId),
       }),
       events: r.many.event(),
+      contacts: r.many.orgContact(),
+      contactTags: r.many.contactTag(),
+      contactSegments: r.many.contactSegment(),
     },
     orgMember: {
       org: r.one.org({ from: r.orgMember.orgId, to: r.org.orgId }),
       user: r.one.user({ from: r.orgMember.userId, to: r.user.id }),
+    },
+    orgContact: {
+      org: r.one.org({ from: r.orgContact.orgId, to: r.org.orgId }),
+      speakers: r.many.speaker(),
+      tagLinks: r.many.contactTagLink(),
+      tags: r.many.contactTag({
+        from: r.orgContact.id.through(r.contactTagLink.contactId),
+        to: r.contactTag.id.through(r.contactTagLink.tagId),
+      }),
+      activities: r.many.contactActivity(),
+      emailMessages: r.many.emailMessage(),
+    },
+    contactTag: {
+      org: r.one.org({ from: r.contactTag.orgId, to: r.org.orgId }),
+      links: r.many.contactTagLink(),
+      contacts: r.many.orgContact({
+        from: r.contactTag.id.through(r.contactTagLink.tagId),
+        to: r.orgContact.id.through(r.contactTagLink.contactId),
+      }),
+      segments: r.many.contactSegment(),
+    },
+    contactTagLink: {
+      contact: r.one.orgContact({ from: r.contactTagLink.contactId, to: r.orgContact.id }),
+      tag: r.one.contactTag({ from: r.contactTagLink.tagId, to: r.contactTag.id }),
+    },
+    contactSegment: {
+      org: r.one.org({ from: r.contactSegment.orgId, to: r.org.orgId }),
+      tag: r.one.contactTag({ from: r.contactSegment.tagId, to: r.contactTag.id }),
+    },
+    contactActivity: {
+      contact: r.one.orgContact({ from: r.contactActivity.contactId, to: r.orgContact.id }),
+      actor: r.one.user({ from: r.contactActivity.actorUserId, to: r.user.id }),
     },
     orgInvitation: {
       org: r.one.org({ from: r.orgInvitation.orgId, to: r.org.orgId }),
@@ -834,6 +967,7 @@ export const relations = orm.defineRelations(
     speaker: {
       event: r.one.event({ from: r.speaker.eventId, to: r.event.id }),
       user: r.one.user({ from: r.speaker.userId, to: r.user.id }),
+      contact: r.one.orgContact({ from: r.speaker.contactId, to: r.orgContact.id }),
       headshotFile: r.one.file({ from: r.speaker.headshotFileId, to: r.file.id }),
       participations: r.many.sessionParticipant(),
       submittedSessions: r.many.eventSession({ from: r.speaker.id, to: r.eventSession.submitterSpeakerId }),
@@ -921,6 +1055,7 @@ export const relations = orm.defineRelations(
     emailMessage: {
       event: r.one.event({ from: r.emailMessage.eventId, to: r.event.id }),
       speaker: r.one.speaker({ from: r.emailMessage.speakerId, to: r.speaker.id }),
+      contact: r.one.orgContact({ from: r.emailMessage.contactId, to: r.orgContact.id }),
       session: r.one.eventSession({ from: r.emailMessage.sessionId, to: r.eventSession.id }),
     },
   }),

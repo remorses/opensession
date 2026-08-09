@@ -12,6 +12,7 @@ import { z } from 'zod'
 import * as orm from 'drizzle-orm'
 import * as schema from 'db/schema'
 import { ulid } from 'ulid'
+import type { BatchItem } from 'drizzle-orm/batch'
 import {
   requireSession,
   requireOrgAccess,
@@ -39,6 +40,7 @@ import {
   cfpSubmissionSchema,
   getOrCreateCfpDraft,
   getPublicCfp,
+  linkSpeakerToOrgContact,
   saveCfpDraft,
   submitCfpResponse,
 } from './lib/cfp-server.ts'
@@ -78,6 +80,12 @@ import {
   prepareSpeakerImport,
   type SpeakerCsvRow,
 } from './lib/speaker-operations.ts'
+import {
+  CONTACT_STAGES,
+  planContactMerge,
+  prepareContactImport,
+  type ContactCsvRow,
+} from './lib/contact-crm.ts'
 
 // ── Org actions (multi-org + team access) ───────────────────────────
 //
@@ -1948,9 +1956,11 @@ export async function saveSpeaker(input: z.input<typeof speakerProfileInput>) {
         orm.eq(schema.speaker.id, parsed.speakerId), orm.eq(schema.speaker.eventId, parsed.eventId),
       )).limit(1).returning({ id: schema.speaker.id })
       if (!updated[0]) throw new Error('Speaker not found')
+      await linkSpeakerToOrgContact(db, updated[0].id)
       return { speakerId: updated[0].id, created: false }
     }
     const [created] = await db.insert(schema.speaker).values({ eventId: parsed.eventId, ...values }).returning({ id: schema.speaker.id })
+    await linkSpeakerToOrgContact(db, created!.id)
     return { speakerId: created!.id, created: true }
   } catch (error) {
     if (error instanceof Error && error.message === 'Speaker not found') throw error
@@ -1984,6 +1994,10 @@ export async function importSpeakers(input: { orgId: string; eventId: string; ro
       const results = await db.batch(statements.slice(index, index + 40) as [any, ...any[]])
       inserted += results.reduce((count, rows) => count + (Array.isArray(rows) ? rows.length : 0), 0)
     }
+    const imported = await db.query.speaker.findMany({
+      where: { eventId: parsed.eventId, email: { in: plan.inserted.map((row) => row.email) } },
+    })
+    for (const speaker of imported) await linkSpeakerToOrgContact(db, speaker.id)
   }
   return { inserted, skipped: plan.skipped.length + plan.inserted.length - inserted, errors: [] }
 }
@@ -2119,6 +2133,327 @@ export async function sendCustomSpeakerCommunication(input: z.input<typeof custo
     if (outcome.sent) sent += 1
   }
   return { batchId, queued, sent }
+}
+
+// ── Organization speaker CRM ────────────────────────────────────────
+
+const contactProfileSchema = z.object({
+  orgId: z.string().min(1), contactId: z.string().min(1).optional(),
+  email: z.email().max(320), firstName: z.string().trim().min(1).max(80),
+  lastName: z.string().trim().min(1).max(80),
+  jobTitle: z.string().trim().max(160).nullable().optional(),
+  companyName: z.string().trim().max(160).nullable().optional(),
+  bio: z.string().trim().max(5000).nullable().optional(),
+})
+
+export async function saveContact(input: z.input<typeof contactProfileSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = contactProfileSchema.parse(input)
+  const { session } = await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const now = Date.now()
+  const email = normalizeSpeakerEmail(parsed.email)
+  const values = {
+    email, firstName: parsed.firstName, lastName: parsed.lastName,
+    jobTitle: parsed.jobTitle?.trim() || null,
+    companyName: parsed.companyName?.trim() || null,
+    bio: parsed.bio?.trim() || null, updatedAt: now,
+  }
+  let contactId = parsed.contactId
+  try {
+    if (contactId) {
+      const rows = await db.update(schema.orgContact).set(values).where(orm.and(
+        orm.eq(schema.orgContact.id, contactId), orm.eq(schema.orgContact.orgId, parsed.orgId),
+      )).limit(1).returning({ id: schema.orgContact.id })
+      if (!rows[0]) throw new Error('Contact not found')
+    } else {
+      contactId = ulid()
+      await db.insert(schema.orgContact).values({ id: contactId, orgId: parsed.orgId, ...values, createdAt: now })
+    }
+  } catch (error) {
+    if (error instanceof Error && error.message === 'Contact not found') throw error
+    throw new Error(`A contact with email ${email} already exists in this organization`)
+  }
+  const events = await db.query.event.findMany({ where: { orgId: parsed.orgId } })
+  const eventIds = events.map((event) => event.id)
+  if (eventIds.length > 0) {
+    await db.update(schema.speaker).set({ contactId, updatedAt: now }).where(orm.and(
+      orm.inArray(schema.speaker.eventId, eventIds),
+      orm.eq(schema.speaker.email, email),
+    ))
+  }
+  await db.insert(schema.contactActivity).values({
+    orgId: parsed.orgId, contactId, actorUserId: session.userId,
+    kind: 'NOTE', body: parsed.contactId ? 'Contact profile updated.' : 'Contact created.', createdAt: now,
+  })
+  return { contactId, created: !parsed.contactId }
+}
+
+const importContactsSchema = z.object({
+  orgId: z.string().min(1),
+  rows: z.array(z.object({
+    firstName: z.string(), lastName: z.string(), email: z.string(),
+    jobTitle: z.string().nullable(), companyName: z.string().nullable(), bio: z.string().nullable(),
+  })).min(1).max(1000),
+})
+
+export async function importContacts(input: { orgId: string; rows: ContactCsvRow[] }) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = importContactsSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const [contacts, events] = await db.batch([
+    db.query.orgContact.findMany({ where: { orgId: parsed.orgId } }),
+    db.query.event.findMany({ where: { orgId: parsed.orgId } }),
+  ] as const)
+  const plan = prepareContactImport(parsed.rows, contacts.map((contact) => contact.email))
+  if (plan.errors.length > 0) return { inserted: 0, skipped: plan.skipped.length, errors: plan.errors }
+  const now = Date.now()
+  const created = plan.inserted.map((row) => ({ id: ulid(), orgId: parsed.orgId, ...row, createdAt: now, updatedAt: now }))
+  for (let index = 0; index < created.length; index += 40) {
+    await db.insert(schema.orgContact).values(created.slice(index, index + 40)).onConflictDoNothing()
+  }
+  const eventIds = events.map((event) => event.id)
+  if (eventIds.length > 0) {
+    for (const contact of created) {
+      await db.update(schema.speaker).set({ contactId: contact.id, updatedAt: now }).where(orm.and(
+        orm.inArray(schema.speaker.eventId, eventIds), orm.eq(schema.speaker.email, contact.email),
+      ))
+    }
+  }
+  return { inserted: created.length, skipped: plan.skipped.length, errors: [] }
+}
+
+const contactTagSchema = z.object({
+  orgId: z.string().min(1), contactId: z.string().min(1), name: z.string().trim().min(1).max(80),
+})
+
+export async function addContactTag(input: z.input<typeof contactTagSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = contactTagSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const contact = await db.query.orgContact.findFirst({ where: { id: parsed.contactId, orgId: parsed.orgId } })
+  if (!contact) throw new Error('Contact not found')
+  let tag = await db.query.contactTag.findFirst({ where: { orgId: parsed.orgId, name: parsed.name } })
+  if (!tag) {
+    const [created] = await db.insert(schema.contactTag).values({ orgId: parsed.orgId, name: parsed.name }).returning()
+    tag = created
+  }
+  await db.insert(schema.contactTagLink).values({
+    orgId: parsed.orgId, contactId: parsed.contactId, tagId: tag!.id,
+  }).onConflictDoNothing()
+  return { tagId: tag!.id }
+}
+
+const contactNoteSchema = z.object({
+  orgId: z.string().min(1), contactId: z.string().min(1), body: z.string().trim().min(1).max(5000),
+})
+
+export async function addContactNote(input: z.input<typeof contactNoteSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = contactNoteSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const contact = await db.query.orgContact.findFirst({ where: { id: parsed.contactId, orgId: parsed.orgId } })
+  if (!contact) throw new Error('Contact not found')
+  const activityId = ulid()
+  await db.insert(schema.contactActivity).values({
+    id: activityId, orgId: parsed.orgId, contactId: parsed.contactId,
+    actorUserId: session.userId, kind: 'NOTE', body: parsed.body,
+  })
+  return { activityId }
+}
+
+const contactStageSchema = z.object({
+  orgId: z.string().min(1), contactId: z.string().min(1),
+  stage: z.enum(CONTACT_STAGES), score: z.number().int().min(0).max(100).nullable().optional(),
+  rationale: z.string().trim().max(2000).nullable().optional(),
+})
+
+export async function moveContactStage(input: z.input<typeof contactStageSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = contactStageSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const contact = await db.query.orgContact.findFirst({ where: { id: parsed.contactId, orgId: parsed.orgId } })
+  if (!contact) throw new Error('Contact not found')
+  if (contact.stage === parsed.stage && parsed.score === undefined && parsed.rationale === undefined) {
+    return { contactId: contact.id, stage: contact.stage }
+  }
+  const now = Date.now()
+  await db.batch([
+    db.update(schema.orgContact).set({
+      stage: parsed.stage,
+      score: parsed.score === undefined ? contact.score : parsed.score,
+      rationale: parsed.rationale === undefined ? contact.rationale : (parsed.rationale?.trim() || null),
+      updatedAt: now,
+    }).where(orm.and(orm.eq(schema.orgContact.id, contact.id), orm.eq(schema.orgContact.orgId, parsed.orgId))).limit(1),
+    db.insert(schema.contactActivity).values({
+      orgId: parsed.orgId, contactId: contact.id, actorUserId: session.userId,
+      kind: 'STAGE_TRANSITION', fromStage: contact.stage, toStage: parsed.stage, createdAt: now,
+    }),
+  ] as const)
+  return { contactId: contact.id, stage: parsed.stage }
+}
+
+const contactSegmentSchema = z.object({
+  orgId: z.string().min(1), name: z.string().trim().min(1).max(100),
+  companyName: z.string().trim().max(160).nullable().optional(),
+  jobTitle: z.string().trim().max(160).nullable().optional(),
+  tagId: z.string().min(1).nullable().optional(),
+})
+
+export async function saveContactSegment(input: z.input<typeof contactSegmentSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = contactSegmentSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const companyName = parsed.companyName?.trim() || null
+  const jobTitle = parsed.jobTitle?.trim() || null
+  const tagId = parsed.tagId ?? null
+  if (!companyName && !jobTitle && !tagId) throw new Error('Apply a company, title, or tag filter first')
+  const db = getDb()
+  if (tagId) {
+    const tag = await db.query.contactTag.findFirst({ where: { id: tagId, orgId: parsed.orgId } })
+    if (!tag) throw new Error('Tag not found')
+  }
+  const [segment] = await db.insert(schema.contactSegment).values({
+    orgId: parsed.orgId, name: parsed.name, companyName, jobTitle, tagId,
+  }).returning()
+  return { segmentId: segment!.id }
+}
+
+const addContactToEventSchema = z.object({
+  orgId: z.string().min(1), contactId: z.string().min(1), eventId: z.string().min(1),
+})
+
+export async function addContactToEvent(input: z.input<typeof addContactToEventSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = addContactToEventSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const [contact, event] = await db.batch([
+    db.query.orgContact.findFirst({ where: { id: parsed.contactId, orgId: parsed.orgId } }),
+    db.query.event.findFirst({ where: { id: parsed.eventId, orgId: parsed.orgId } }),
+  ] as const)
+  if (!contact || !event) throw new Error('Contact or event not found')
+  const existing = await db.query.speaker.findFirst({ where: { eventId: event.id, email: contact.email } })
+  const now = Date.now()
+  const speakerId = existing?.id ?? ulid()
+  await db.batch([
+    existing
+      ? db.update(schema.speaker).set({
+        contactId: contact.id, firstName: contact.firstName, lastName: contact.lastName,
+        jobTitle: contact.jobTitle, companyName: contact.companyName, bio: contact.bio, updatedAt: now,
+      }).where(orm.eq(schema.speaker.id, existing.id)).limit(1)
+      : db.insert(schema.speaker).values({
+        id: speakerId, eventId: event.id, contactId: contact.id, email: contact.email,
+        firstName: contact.firstName, lastName: contact.lastName, jobTitle: contact.jobTitle,
+        companyName: contact.companyName, bio: contact.bio, createdAt: now, updatedAt: now,
+      }),
+    db.insert(schema.contactActivity).values({
+      orgId: parsed.orgId, contactId: contact.id, actorUserId: session.userId,
+      kind: 'EVENT_ADDED', body: `Added to ${event.name}.`, createdAt: now,
+    }),
+  ] as const)
+  return { speakerId, eventId: event.id }
+}
+
+const mergeContactsSchema = z.object({
+  orgId: z.string().min(1), primaryId: z.string().min(1), duplicateId: z.string().min(1),
+})
+
+export async function mergeContacts(input: z.input<typeof mergeContactsSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = mergeContactsSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const [primary, duplicate] = await db.batch([
+    db.query.orgContact.findFirst({ where: { id: parsed.primaryId, orgId: parsed.orgId }, with: { tagLinks: true } }),
+    db.query.orgContact.findFirst({ where: { id: parsed.duplicateId, orgId: parsed.orgId }, with: { tagLinks: true } }),
+  ] as const)
+  if (!primary || !duplicate) throw new Error('Contact not found')
+  const plan = planContactMerge({
+    primaryId: primary.id, duplicateId: duplicate.id,
+    primaryTagIds: primary.tagLinks.map((link) => link.tagId),
+    duplicateTagIds: duplicate.tagLinks.map((link) => link.tagId),
+    primary, duplicate,
+  })
+  const now = Date.now()
+  const statements: [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]] = [
+    db.update(schema.orgContact).set({ ...plan.contactPatch, updatedAt: now }).where(orm.eq(schema.orgContact.id, primary.id)).limit(1),
+    db.update(schema.speaker).set({ contactId: primary.id, updatedAt: now }).where(orm.eq(schema.speaker.contactId, duplicate.id)),
+    db.update(schema.emailMessage).set({ contactId: primary.id }).where(orm.eq(schema.emailMessage.contactId, duplicate.id)),
+    db.update(schema.contactActivity).set({ contactId: primary.id, orgId: parsed.orgId }).where(orm.eq(schema.contactActivity.contactId, duplicate.id)),
+    db.delete(schema.contactTagLink).where(orm.eq(schema.contactTagLink.contactId, duplicate.id)),
+    ...plan.tagIds.map((tagId) => db.insert(schema.contactTagLink).values({
+      orgId: parsed.orgId, contactId: primary.id, tagId,
+    }).onConflictDoNothing()),
+    db.insert(schema.contactActivity).values({
+      orgId: parsed.orgId, contactId: primary.id, actorUserId: session.userId,
+      kind: 'MERGE', body: `Merged duplicate ${duplicate.firstName} ${duplicate.lastName} (${duplicate.email}).`, createdAt: now,
+    }),
+    db.delete(schema.orgContact).where(orm.eq(schema.orgContact.id, duplicate.id)).limit(1),
+  ]
+  await db.batch(statements)
+  return { contactId: primary.id }
+}
+
+const contactOutreachSchema = z.object({
+  orgId: z.string().min(1), eventId: z.string().min(1),
+  contactIds: z.array(z.string().min(1)).min(1).max(500),
+  subject: z.string().trim().min(1).max(998), body: z.string().trim().min(1).max(50_000),
+})
+
+export async function sendContactOutreach(input: z.input<typeof contactOutreachSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = contactOutreachSchema.parse(input)
+  await requireOrgAccess(actionRequest, parsed.orgId)
+  const db = getDb()
+  const contactIds = [...new Set(parsed.contactIds)]
+  const [event, contacts] = await db.batch([
+    db.query.event.findFirst({ where: { id: parsed.eventId, orgId: parsed.orgId } }),
+    db.query.orgContact.findMany({ where: { id: { in: contactIds }, orgId: parsed.orgId }, with: { speakers: { with: { participations: { with: { session: true } } } } } }),
+  ] as const)
+  if (!event || contacts.length !== contactIds.length) throw new Error('Event or selected contact not found')
+  const batchId = ulid()
+  const now = Date.now()
+  let queued = 0
+  for (const contact of contacts) {
+    const eventSpeaker = contact.speakers.find((speaker) => speaker.eventId === event.id)
+    const recipient = {
+      firstName: contact.firstName, lastName: contact.lastName, email: contact.email,
+      eventName: event.name, portalUrl: new URL(`/portal/${event.slug}`, env.APP_URL).href,
+      sessionTitles: eventSpeaker?.participations.flatMap((row) => row.session?.title ? [row.session.title] : []) ?? [],
+    }
+    const outcome = await enqueueAndSend({
+      db, eventId: event.id, speakerId: eventSpeaker?.id, contactId: contact.id,
+      batchId, toEmail: contact.email, dedupeKey: `contact-outreach:${batchId}:${contact.id}`,
+      replyTo: replyToFor(event.contactEmail), now,
+      payload: {
+        kind: 'CUSTOM',
+        context: { eventName: event.name, eventSlug: event.slug, appUrl: env.APP_URL, timezone: event.timezone, recipientName: contact.firstName },
+        data: { subject: applySpeakerMergeFields(parsed.subject, recipient), body: applySpeakerMergeFields(parsed.body, recipient) },
+      },
+    })
+    if (outcome.inserted) {
+      queued += 1
+      await db.insert(schema.contactActivity).values({
+        orgId: parsed.orgId, contactId: contact.id, actorUserId: session.userId,
+        kind: 'OUTREACH', body: `Outreach queued for ${event.name}: ${applySpeakerMergeFields(parsed.subject, recipient)}`, createdAt: now,
+      })
+    }
+  }
+  return { batchId, queued }
 }
 
 const assignmentDueSchema = z.object({ orgId: z.string().min(1), eventId: z.string().min(1), assignmentId: z.string().min(1), dueAt: z.number().int().positive().nullable() })

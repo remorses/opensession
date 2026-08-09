@@ -339,6 +339,45 @@ export async function resolveParticipantSpeakers({ eventId, session, primarySpea
   return ids
 }
 
+/** Ensure every event speaker has one canonical organization contact. Existing
+ * canonical profile data wins; event rows only seed a contact on first sight. */
+export async function linkSpeakerToOrgContact(db: ReturnType<typeof getDb>, speakerId: string) {
+  const speaker = await db.query.speaker.findFirst({
+    where: { id: speakerId },
+    with: { event: true },
+  })
+  if (!speaker?.event) throw new Error('Speaker not found')
+  const email = normalizeSpeakerEmail(speaker.email)
+  let contact = await db.query.orgContact.findFirst({
+    where: { orgId: speaker.event.orgId, email },
+  })
+  const now = Date.now()
+  if (!contact) {
+    const contactId = ulid()
+    try {
+      const [created] = await db.insert(schema.orgContact).values({
+        id: contactId,
+        orgId: speaker.event.orgId,
+        email,
+        firstName: speaker.firstName,
+        lastName: speaker.lastName,
+        bio: speaker.bio,
+        jobTitle: speaker.jobTitle,
+        companyName: speaker.companyName,
+        createdAt: now,
+        updatedAt: now,
+      }).returning()
+      contact = created
+    } catch (cause) {
+      contact = await db.query.orgContact.findFirst({ where: { orgId: speaker.event.orgId, email } })
+      if (!contact) throw cause
+    }
+  }
+  await db.update(schema.speaker).set({ contactId: contact!.id, updatedAt: now })
+    .where(orm.eq(schema.speaker.id, speaker.id)).limit(1)
+  return contact!
+}
+
 async function assertOwnedFiles({ eventId, ownerSpeakerId, fileIds }: {
   eventId: string
   ownerSpeakerId: string
@@ -430,6 +469,11 @@ async function persistResponse({ loaded, submission, collected, participantSpeak
     })
   }
   await loaded.db.batch(queries)
+  if (submitted) {
+    for (const speakerId of participantSpeakerIds) {
+      await linkSpeakerToOrgContact(loaded.db, speakerId)
+    }
+  }
   return {
     responseId: loaded.response.id,
     sessionId: loaded.response.session.id,

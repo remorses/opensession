@@ -82,6 +82,7 @@ import {
   type PublicProgramSource,
 } from './lib/public-program.ts'
 import { buildIcsCalendar } from './lib/ics.ts'
+import { contactMetrics } from './lib/contact-crm.ts'
 
 // ── Schemas ─────────────────────────────────────────────────────────
 
@@ -998,6 +999,84 @@ export const app = new Spiceflow()
     if (first) throw redirect(`/org/${params.orgId}/e/${first.id}`)
     const { NoEventsPage } = await import('./components/event-switch.tsx')
     return <NoEventsPage />
+  })
+
+  // ── Organization speaker CRM ─────────────────────────────────────
+
+  .loader('/org/:orgId/crm', async ({ params }) => {
+    const db = getDb()
+    const [contacts, tags, segments, events] = await db.batch([
+      db.query.orgContact.findMany({
+        where: { orgId: params.orgId },
+        with: {
+          tagLinks: { with: { tag: true } },
+          speakers: {
+            with: {
+              event: true,
+              participations: { with: { session: true } },
+            },
+          },
+          activities: { with: { actor: true }, orderBy: { createdAt: 'desc', id: 'desc' }, limit: 100 },
+          emailMessages: { orderBy: { createdAt: 'desc', id: 'desc' }, limit: 100 },
+        },
+        orderBy: { firstName: 'asc', lastName: 'asc' },
+      }),
+      db.query.contactTag.findMany({ where: { orgId: params.orgId }, orderBy: { name: 'asc' } }),
+      db.query.contactSegment.findMany({ where: { orgId: params.orgId }, with: { tag: true }, orderBy: { name: 'asc' } }),
+      db.query.event.findMany({ where: { orgId: params.orgId }, orderBy: { startsAt: 'desc' } }),
+    ] as const)
+    const rows = contacts.map((contact) => ({
+      id: contact.id,
+      email: contact.email,
+      firstName: contact.firstName,
+      lastName: contact.lastName,
+      jobTitle: contact.jobTitle,
+      companyName: contact.companyName,
+      bio: contact.bio,
+      stage: contact.stage,
+      score: contact.score,
+      rationale: contact.rationale,
+      createdAt: contact.createdAt,
+      updatedAt: contact.updatedAt,
+      tags: contact.tagLinks.flatMap((link) => link.tag ? [{ id: link.tag.id, name: link.tag.name }] : []),
+      tagIds: contact.tagLinks.map((link) => link.tagId),
+      eventIds: [...new Set(contact.speakers.map((speaker) => speaker.eventId))],
+      connections: contact.speakers.flatMap((speaker) => speaker.event ? [{
+        speakerId: speaker.id,
+        eventId: speaker.event.id,
+        eventName: speaker.event.name,
+        sessionTitles: speaker.participations.flatMap((part) => part.session?.title ? [part.session.title] : []),
+      }] : []),
+      activities: contact.activities.map((activity) => ({
+        id: activity.id, kind: activity.kind, body: activity.body,
+        fromStage: activity.fromStage, toStage: activity.toStage,
+        createdAt: activity.createdAt, actorName: activity.actor?.name ?? 'Organizer',
+      })),
+      emailMessages: contact.emailMessages.map((message) => ({
+        id: message.id, subject: message.subject, status: message.status,
+        eventId: message.eventId, createdAt: message.createdAt,
+      })),
+    }))
+    return {
+      contacts: rows,
+      tags,
+      segments,
+      events: events.map((event) => ({ id: event.id, name: event.name, slug: event.slug })),
+      metrics: contactMetrics(rows, events.length),
+    }
+  })
+
+  .page({
+    path: '/org/:orgId/crm',
+    query: z.object({
+      view: z.enum(['directory', 'segments', 'pipeline', 'dashboard']).optional(),
+      contact: z.string().optional(),
+      segment: z.string().optional(),
+    }),
+    handler: async ({ query }) => {
+      const { ContactCrmPage } = await import('./components/contact-crm-page.tsx')
+      return <ContactCrmPage view={query.view ?? 'directory'} contactId={query.contact} segmentId={query.segment} />
+    },
   })
 
   // ── Event shell (/org/:orgId/e/:eventId/*) ────────────────────────
@@ -2472,6 +2551,7 @@ function DashboardNavbar({ orgId, orgSlot, eventSlot, userSlot }: {
 function DashboardTabBar({ pathname, orgId }: { pathname: string; orgId: string }) {
   const tabs = [
     { label: 'Overview', href: `/org/${orgId}` },
+    { label: 'Speaker CRM', href: `/org/${orgId}/crm` },
     { label: 'Members', href: `/org/${orgId}/members` },
   ] as const
 

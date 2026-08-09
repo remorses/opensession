@@ -8,8 +8,9 @@
 // Scope: events, form builder (conditional logic + routing), submissions
 // (abstract → session lifecycle), evaluation (rounds/scorecards/reviews),
 // agenda (drafts/placements/rules), speaker portal (tasks, file requests,
-// files and deliverable versions/comments), emails (templates/reminders/log/ICS), embeds.
-// Out of scope per brief: CRM, CMS pages, payments, marketing, sponsors.
+// files and deliverable versions/comments), emails (templates/reminders/log/ICS), embeds,
+// and the optional five-table organization speaker CRM.
+// Out of scope per brief: CMS pages, payments, marketing, sponsors.
 //
 // ── Constraints Prisma cannot express (added in the drizzle/SQL migration) ──
 // Partial unique indexes (SQLite treats each NULL as distinct in UNIQUE):
@@ -91,6 +92,7 @@ model User {
   evaluationMemberships EvaluationReviewer[]
   taskComments       TaskComment[]
   sessionRevisions   SessionRevision[]
+  contactActivities  ContactActivity[]
 
   @@map("user")
 }
@@ -173,6 +175,9 @@ model Org {
   members     OrgMember[]
   invitations OrgInvitation[]
   events      Event[]
+  contacts    OrgContact[]
+  contactTags ContactTag[]
+  contactSegments ContactSegment[]
 
   // + partial unique org_owner_personal_unique ON (ownerUserId)
   //   WHERE kind = 'personal' — one personal org per user; the backbone of
@@ -180,6 +185,118 @@ model Org {
   //   (see header appendix).
   @@index([ownerUserId])
   @@map("org")
+}
+
+enum ContactStage {
+  RESEARCHING
+  IDENTIFIED
+  CONTACTED
+  INTERESTED
+  CONFIRMED
+  DECLINED
+}
+
+enum ContactActivityKind {
+  NOTE
+  STAGE_TRANSITION
+  OUTREACH
+  EVENT_ADDED
+  MERGE
+}
+
+// Canonical cross-event speaker profile. The sourcing pipeline is fixed in
+// application code, so only current card fields live on the contact.
+model OrgContact {
+  id          String @id @default(cuid())
+  orgId       String
+  org         Org @relation(fields: [orgId], references: [orgId], onDelete: Cascade)
+  email       String
+  firstName   String
+  lastName    String
+  jobTitle    String?
+  companyName String?
+  bio         String?
+  stage       ContactStage?
+  score       Int?
+  rationale   String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  speakers Speaker[]
+  tagLinks ContactTagLink[]
+  activities ContactActivity[]
+  emailMessages EmailMessage[]
+
+  @@unique([orgId, email])
+  @@unique([id, orgId])
+  @@index([orgId, lastName, firstName])
+  @@index([orgId, stage])
+  @@map("org_contact")
+}
+
+model ContactTag {
+  id        String @id @default(cuid())
+  orgId     String
+  org       Org @relation(fields: [orgId], references: [orgId], onDelete: Cascade)
+  name      String
+  createdAt DateTime @default(now())
+  links     ContactTagLink[]
+  segments  ContactSegment[]
+
+  @@unique([orgId, name])
+  @@unique([id, orgId])
+  @@index([orgId])
+  @@map("contact_tag")
+}
+
+model ContactTagLink {
+  id        String @id @default(cuid())
+  orgId     String
+  contactId String
+  contact   OrgContact @relation(fields: [contactId, orgId], references: [id, orgId], onDelete: Cascade)
+  tagId     String
+  tag       ContactTag @relation(fields: [tagId, orgId], references: [id, orgId], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([contactId, tagId])
+  @@index([orgId])
+  @@index([tagId])
+  @@map("contact_tag_link")
+}
+
+model ContactSegment {
+  id          String @id @default(cuid())
+  orgId       String
+  org         Org @relation(fields: [orgId], references: [orgId], onDelete: Cascade)
+  name        String
+  companyName String?
+  jobTitle    String?
+  tagId       String?
+  tag         ContactTag? @relation(fields: [tagId, orgId], references: [id, orgId], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([orgId, name])
+  @@index([orgId])
+  @@map("contact_segment")
+}
+
+model ContactActivity {
+  id          String @id @default(cuid())
+  orgId       String
+  contactId   String
+  contact     OrgContact @relation(fields: [contactId, orgId], references: [id, orgId], onDelete: Cascade)
+  actorUserId String
+  actor       User @relation(fields: [actorUserId], references: [id], onDelete: Cascade)
+  kind        ContactActivityKind
+  body        String?
+  fromStage   ContactStage?
+  toStage     ContactStage?
+  createdAt   DateTime @default(now())
+
+  @@index([contactId, createdAt])
+  @@index([orgId, kind])
+  @@map("contact_activity")
 }
 
 // Junction table between users and orgs, akarso/sigillo-style. Admins manage
@@ -489,6 +606,8 @@ model Speaker {
   event   Event   @relation(fields: [eventId], references: [id], onDelete: Cascade)
   userId  String?
   user    User?   @relation(fields: [userId], references: [id], onDelete: SetNull)
+  contactId String?
+  contact   OrgContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
 
   email     String
   status    SpeakerStatus @default(PENDING)
@@ -524,6 +643,7 @@ model Speaker {
   @@unique([eventId, email])
   @@unique([id, eventId])
   @@index([userId])
+  @@index([contactId])
   @@index([eventId])
 }
 
@@ -989,6 +1109,8 @@ model EmailMessage {
   toEmail   String
   speakerId String?
   speaker   Speaker? @relation(fields: [speakerId], references: [id], onDelete: SetNull)
+  contactId String?
+  contact   OrgContact? @relation(fields: [contactId], references: [id], onDelete: SetNull)
   sessionId String?
   session   Session? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
   // Finer provenance (task, response, ...) is encoded in dedupeKey — no FKs.
@@ -1011,6 +1133,7 @@ model EmailMessage {
 
   @@index([eventId, status])
   @@index([speakerId])
+  @@index([contactId])
   @@index([sessionId])
   @@index([batchId])
 }
