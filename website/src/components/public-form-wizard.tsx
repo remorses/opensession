@@ -1,5 +1,5 @@
 // Multistep public/portal form wizard ('use client').
-// Google-Forms-like centered layout with numbered step tabs:
+// Google-Forms-like centered layout with named step tabs:
 // Welcome → Account → MDX <Step>s → Review. Shared values state across
 // steps; Next validates the current content step only; final Submit runs
 // the full validation pipeline in the parent onSubmit handler.
@@ -15,7 +15,6 @@ import {
   buildWizardTabs,
   extractFormSteps,
   validateContentStep,
-  type WizardTab,
 } from '../forms/form-steps.ts'
 import { FormRenderer } from '../forms/form-renderer.tsx'
 import { cn } from '../lib/utils.ts'
@@ -83,7 +82,6 @@ export function PublicFormWizard({
   }, [submission, onChange])
 
   const active = tabs[tabIndex] ?? tabs[0]!
-  const numberedLabel = (tab: WizardTab, index: number) => `${index + 1} ${tab.label}`
 
   const goNext = async () => {
     setStepError(null)
@@ -170,7 +168,7 @@ export function PublicFormWizard({
                 : 'text-muted-foreground hover:text-foreground',
             )}
           >
-            {numberedLabel(tab, index)}
+            {tab.label}
             {index === tabIndex ? (
               <span className="absolute inset-x-2.5 bottom-0 h-0.5 bg-foreground" />
             ) : null}
