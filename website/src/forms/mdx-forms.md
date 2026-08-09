@@ -1,7 +1,4 @@
----
-title: MDX forms
-description: How to author OpenSession CFP and portal forms with MDX components, well-known field names, conditionals, and speakers.
----
+<!-- OpenSession MDX form authoring guide imported as raw text by the form editor. -->
 
 # MDX forms
 

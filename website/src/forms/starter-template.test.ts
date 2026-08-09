@@ -3,6 +3,7 @@
 // that change names/required/limits fail loudly.
 import { describe, expect, test } from 'vitest'
 import { collectFields } from './collect-fields.ts'
+import { buildFormCustomizationPrompt } from './form-customization-prompt.ts'
 import { extractFormSteps } from './form-steps.ts'
 import {
   starterCfpTemplate,
@@ -199,4 +200,19 @@ describe('starterSpeakerProfileTemplate', () => {
     ])
     expect(result.participants).toBeNull()
   })
+})
+
+test('builds a complete ChatGPT customization prompt from the live field registry', () => {
+  const prompt = buildFormCustomizationPrompt({
+    formName: 'Call for Papers',
+    useCase: 'collecting conference talk proposals',
+    fieldNames: ['title', 'track', 'speaker.email'],
+    mdxSource: '# Submit\n\n<TextField name="title" label="Talk title" />',
+  })
+
+  expect(prompt).toContain('Always return the full, valid MDX form')
+  expect(prompt).toContain('How do you want to customize this form?')
+  expect(prompt).toContain('`title` → `eventSession.title`')
+  expect(prompt).toContain('`speaker.email` → `speaker.email`')
+  expect(prompt).toContain('```mdx\n# Submit\n\n<TextField name="title" label="Talk title" />\n```')
 })
