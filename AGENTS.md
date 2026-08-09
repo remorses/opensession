@@ -83,6 +83,11 @@ Context documents (in this repo):
   Read this first when deciding product behavior or prioritization.
 - `docs/implementation-plan.md` — THE plan: routes, sidebar/tabs design, feature matrix
   per page, MDX form engine design, email/ICS design, milestones. Follow it.
+- `docs/customer-workflow-tasks.md` — sequential, review-sized implementation tasks for
+  the customer workflows covered by the Kill My SaaS evaluations. Work on one task at
+  a time and complete its validation gate before starting the next task. For workflows
+  named there, its reuse-first decisions supersede older MVP simplifications in the
+  implementation and database plans.
 - `docs/database-schema-plan.md` — product research + schema rationale (23 models,
   4 simplification rounds; do not re-add removed features).
 - `docs/sessionboard.md` — screenshot-derived reference for the SessionBoard organizer
@@ -97,10 +102,15 @@ Context documents (in this repo):
   View the ones for your feature area (see the brief `$10,0000 Kill My SaaS -
   Competition Brief.md` for the image → feature mapping).
 
-Skills (load with the Skill tool; ALWAYS load the ones relevant to your task):
+Skills (load with the Skill tool):
 
-- `spiceflow` — REQUIRED for any route/page/action work. The skill makes you fetch the
-  FULL README; do it, no truncation.
+- **Before every customer-workflow task**, load `spiceflow`, `cloudflare-workers`,
+  `better-auth`, `drizzle`, and `playwriter`. Read the Drizzle `cloudflare.md`
+  companion and the full Spiceflow README and testing guide. These are mandatory even
+  when the task appears to touch only one layer because each task crosses route, auth,
+  D1, and browser behavior.
+- `spiceflow` — REQUIRED for any route/page/action work. Fetch and read the FULL README
+  and its testing guide, with no truncation.
 - `tailwind` — REQUIRED before writing any styles or components.
 - `drizzle` (+ its cloudflare.md companion) — REQUIRED before touching db code.
 - `better-auth` — for anything auth/session related.
@@ -109,6 +119,12 @@ Skills (load with the Skill tool; ALWAYS load the ones relevant to your task):
 - `sigillo` — for secrets management.
 - `playwriter` — REQUIRED: every UI feature must be validated in the browser (below).
 
+Before adding a table, prove the workflow cannot be represented by the current schema.
+Prefer extending the existing invitation, form/version/response/field-value, review,
+task-assignment, file, email-outbox, lifecycle-status, and visibility models. Every new
+table in `docs/customer-workflow-tasks.md` has a stated reason; do not add more tables
+without updating the plan and explaining why an existing owner cannot hold the data.
+
 Reference implementations (the products we clone; consult when unsure about behavior):
 
 - SessionBoard API docs (full): https://sessionboard.mintlify.app/llms-full.txt
@@ -116,19 +132,27 @@ Reference implementations (the products we clone; consult when unsure about beha
   Useful pages: /playbook/api, /playbook/schedule-builder, /playbook/evaluations,
   /playbook/speaker-dashboard, /playbook/allowing-speakers-to-edit-sessions,
   /playbook/collecting-and-sharing-presentations, /playbook/features-detailed
+- Kill My SaaS evaluation suite: https://forge.smol.ai/swyx/killmysaas-evals
+  Read the matching `specs/*.yaml`, fixtures, and rubric before implementing a workflow.
+  Clone it outside this public repo when needed; never vendor its fixture credentials or
+  generated evaluation artifacts into OpenSession.
 
 ## Validation — required after EVERY feature
 
-1. `pnpm typecheck` in `website/` (and `db/` if you touched it).
-2. `pnpm exec vitest run --config vitest.config.ts` in `website/`.
-3. `bunx lintcn lint` in the package you edited.
-4. **Playwriter browser validation**: the dev server runs in tuistory session
-   `opensession-dev` at http://localhost:8788 (`bunx tuistory read -s opensession-dev`
-   for logs; restart with `bunx tuistory launch "sigillo run -c dev -- pnpm exec vite dev"
-   -s opensession-dev --cwd <repo>/website`). Load the pages you built, click through
-   the flows (observe → act → observe, check `getLatestLogs` after every action), and
-   screenshot the result. A feature is NOT done until it works in the real browser.
-   The user's Chrome is signed into Google; login flows work end to end.
+1. `pnpm typecheck` in `website/` and `pnpm typecheck` in `db/` when schema changed.
+2. `pnpm exec vitest run --config vitest.config.ts` in `website/` for pure behavior.
+3. Run the workerd integration suite for tasks that touch routes, actions, D1, R2, or
+   anonymous feeds. It must use real Miniflare bindings and migrations, not module mocks.
+4. `lintcn lint` in each edited package.
+5. **Playwriter browser validation**: read `playwriter skill` in full, then run the dev
+   server through `kimaki tunnel` in tuistory session `opensession-dev`. Use
+   `http://localhost:8788` for Playwriter and share the tunnel URL with the user. Load
+   every changed page and follow observe → act → observe. Print the URL, snapshot, and
+   `getLatestLogs({ sinceLastCall: true })` after every action. Capture screenshots of
+   the completed workflow. The user's Chrome is signed into Google, so auth must be
+   tested end to end instead of replaced with a fake auth service.
+6. Run or manually follow the matching scenario in `killmysaas-evals/specs/*.yaml`.
+   Record which rubric IDs passed and any remaining blockers.
 
 ## Code patterns (copied from akarso — follow them exactly)
 
