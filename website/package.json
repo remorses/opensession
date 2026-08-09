@@ -7,6 +7,7 @@
     "dev": "tuistory -- sigillo run -c dev -- vite dev",
     "build": "tsc && vite build",
     "typecheck": "tsc",
+    "test:workerd": "vitest run --config vitest.workerd.config.ts",
     "types": "wrangler types",
     "db:migrate:local": "wrangler d1 migrations apply DB --local",
     "db:migrate:preview": "echo \"D1 pre-migration timestamp: $(date +%s)\" && wrangler d1 migrations apply DB --remote --env preview",
@@ -37,6 +38,8 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "^1.42.4",
+    "@cloudflare/vitest-pool-workers": "^0.20.3",
+    "@emotion/is-prop-valid": "^1.4.0",
     "@types/react": "^19.2.7",
     "@types/react-dom": "^19.2.3",
     "class-variance-authority": "^0.7.1",
@@ -44,7 +47,7 @@
     "tailwindcss": "^4.2.4",
     "typescript": "^5.8.3",
     "vite": "^8.1.0",
-    "vitest": "^3.2.4",
+    "vitest": "^4.1.10",
     "wrangler": "^4.106.0"
   }
 }

@@ -9,8 +9,8 @@
     "strict": true,
     "skipLibCheck": true,
     "target": "ESNext",
-    "types": []
+    "types": ["@cloudflare/vitest-pool-workers/types"]
   },
-  "include": ["src", "worker-configuration.d.ts", "vite.config.ts"],
+  "include": ["src", "test", "worker-configuration.d.ts", "vite.config.ts", "vitest.workerd.config.ts"],
   "exclude": ["src/pages"]
 }

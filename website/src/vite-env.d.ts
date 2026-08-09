@@ -13,3 +13,16 @@ interface ImportMeta {
   readonly hot?: unknown
   readonly env?: { readonly DEV?: boolean }
 }
+
+// TEST_MIGRATIONS exists only in the Miniflare workerd suite. Keep this
+// augmentation separate from Wrangler's generated worker-configuration.d.ts.
+declare namespace Cloudflare {
+  interface Env {
+    TEST_MIGRATIONS: D1Migration[]
+  }
+}
+
+interface D1Migration {
+  name: string
+  queries: string[]
+}

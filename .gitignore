@@ -5,6 +5,9 @@ dist
 .DS_Store
 tmp
 
+# Holocron writes its in-memory Vitest page cache through this fallback path.
+website/dummy-non-existing-folder
+
 # Secrets — this repo is public. Never commit any of these.
 .env
 .env.*
