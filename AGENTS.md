@@ -87,7 +87,8 @@ Context documents (in this repo):
   the customer workflows covered by the Kill My SaaS evaluations. Work on one task at
   a time and complete its validation gate before starting the next task. For workflows
   named there, its reuse-first decisions supersede older MVP simplifications in the
-  implementation and database plans.
+  implementation and database plans. Each implementation task commits its own validated
+  changes before the next task starts. A review task commits only when it makes fixes.
 - `docs/database-schema-plan.md` — product research + schema rationale (23 models,
   4 simplification rounds; do not re-add removed features).
 - `docs/sessionboard.md` — screenshot-derived reference for the SessionBoard organizer

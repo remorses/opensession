@@ -72,8 +72,10 @@ The required workflows extend existing tables with a small number of columns:
 > mandatory skills. Read the matching Kill My SaaS specification and fixture data.
 > Inspect the current implementation, dependencies, and dependents. Reuse existing
 > schema models first. Implement the complete vertical workflow. Add only meaningful
-> tests. Run the validation gate and the real Playwriter journey. Do not commit. Return
-> test results, browser evidence, rubric IDs, edited files, and a critique diff URL.
+> tests. Run the validation gate and the real Playwriter journey. Review the final diff,
+> then commit only this task's changes with a detailed message and the current session ID
+> as the final line. Return the commit hash, test results, browser evidence, rubric IDs,
+> edited files, and a critique diff URL for the commit.
 
 # Validation strategy
 
