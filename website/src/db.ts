@@ -58,6 +58,9 @@ export function getAuth() {
     baseURL: getBaseUrl(),
     secret: env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, { provider: 'sqlite' }),
+    emailAndPassword: {
+      enabled: env.TEST_AUTH_ENABLED === 'true',
+    },
     session: {
       expiresIn: 60 * 60 * 24 * 365, // 1 year
       updateAge: 60 * 60 * 24, // refresh expiry every 1 day of activity

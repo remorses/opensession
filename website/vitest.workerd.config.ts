@@ -35,7 +35,15 @@ export default defineConfig({
       remoteBindings: false,
       wrangler: { configPath: './wrangler.jsonc' },
       miniflare: {
-        bindings: { TEST_MIGRATIONS: migrations },
+        bindings: {
+          TEST_MIGRATIONS: migrations,
+          TEST_AUTH_ENABLED: 'true',
+          EMAIL_DELIVERY_DISABLED: 'true',
+          BETTER_AUTH_SECRET: 'test-only-better-auth-secret-at-least-32-characters',
+          BETTER_AUTH_URL: 'http://localhost',
+          GOOGLE_CLIENT_ID: 'test-google-client-id',
+          GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
+        },
       },
     }),
     holocron({ entry: './src/app.tsx', pagesDir: 'src/pages' }),

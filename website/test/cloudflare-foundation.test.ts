@@ -3,6 +3,8 @@ import { env } from 'cloudflare:workers'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
 import { app } from '../src/app.tsx'
+import { getDb } from '../src/db.ts'
+import { enqueueAndSend } from '../src/lib/emails/send.ts'
 
 const fixture = {
   userId: 'workerd-fixture-user',
@@ -96,5 +98,39 @@ describe('Cloudflare integration foundation', () => {
       body: await object?.text(),
       contentType: object?.httpMetadata?.contentType,
     }).toEqual({ body: 'workerd-r2-body', contentType: 'text/plain' })
+  })
+
+  test('queues email without contacting the delivery service', async () => {
+    const result = await enqueueAndSend({
+      db: getDb(),
+      eventId: fixture.eventId,
+      toEmail: 'speaker@example.test',
+      dedupeKey: 'workerd:no-delivery',
+      replyTo: 'organizer@example.test',
+      now: Date.UTC(2026, 7, 9),
+      payload: {
+        kind: 'SUBMISSION_CONFIRMATION',
+        context: {
+          eventName: 'Integration Summit',
+          eventSlug: fixture.eventSlug,
+          appUrl: 'http://localhost',
+          timezone: 'UTC',
+          recipientName: 'Speaker',
+        },
+        data: {
+          sessionId: 'workerd-session',
+          sessionTitle: 'A queued talk',
+        },
+      },
+    })
+    const row = await env.DB.prepare(dedent`
+      SELECT status, attempt_count AS attemptCount, last_attempt_at AS lastAttemptAt
+      FROM email_message WHERE dedupe_key = 'workerd:no-delivery'
+    `).first()
+
+    expect({ result, row }).toEqual({
+      result: { inserted: true, sent: false },
+      row: { status: 'QUEUED', attemptCount: 0, lastAttemptAt: null },
+    })
   })
 })

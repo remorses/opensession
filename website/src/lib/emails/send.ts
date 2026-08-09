@@ -126,6 +126,7 @@ function truncateError(error: unknown): string {
 export type SendOutcome =
   | { status: 'SENT'; messageId: string | null }
   | { status: 'FAILED'; error: string }
+  | { status: 'SKIPPED' }
 
 /**
  * Send ONE outbox row and write the result back. Never throws: a broken email
@@ -142,6 +143,10 @@ export async function sendEmailMessage({
   replyTo: string
   now: number
 }): Promise<SendOutcome> {
+  // Local Workerd tests exercise the real outbox and every caller, but must
+  // never deliver mail to the outside world. Keep the row QUEUED so tests do
+  // not claim a message was sent when transport was intentionally disabled.
+  if (env.EMAIL_DELIVERY_DISABLED === 'true') return { status: 'SKIPPED' }
   try {
     const result = await env.EMAIL.send({
       from: EMAIL_SENDER,
@@ -220,6 +225,9 @@ export async function drainOutbox({
   /** Restrict to one event (used by the admin retry action). */
   eventId?: string
 }): Promise<DrainSummary> {
+  if (env.EMAIL_DELIVERY_DISABLED === 'true') {
+    return { attempted: 0, sent: 0, failed: 0 }
+  }
   const candidates = await db.query.emailMessage.findMany({
     where: {
       status: { in: ['QUEUED', 'FAILED'] },
@@ -279,6 +287,7 @@ export async function enqueueAndSend(
 ): Promise<{ inserted: boolean; sent: boolean }> {
   const { inserted, row } = await enqueueEmail(input)
   if (!row) return { inserted, sent: false }
+  if (env.EMAIL_DELIVERY_DISABLED === 'true') return { inserted, sent: false }
   const outcome = await sendEmailMessage({
     db: input.db,
     row,
