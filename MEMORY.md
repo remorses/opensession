@@ -42,7 +42,7 @@ the kimaki project mapping) and the sigillo org `opensessions` (the CLI has no
 
 ## safe-mdx supports JSX inside expressions after 1.11.5
 
-The upstream fix supports `{cond && <TextField />}` and ternary JSX expressions. The website still uses `safe-mdx@1.11.5`, so use `<Show when={expr}>` until its dependency includes the fix. After that update, `<Show>` remains available but is not required.
+The upstream fix supports `{cond && <TextField />}`, ternary JSX expressions, and callbacks such as `items.map(item => <TextField label={item.label} />)`. The website still uses `safe-mdx@1.11.5`, so use `<Show when={expr}>` until its dependency includes the fix. After that update, `<Show>` remains available but is not required.
 
 ## Cloudflare send_email builder supports attachments
 
