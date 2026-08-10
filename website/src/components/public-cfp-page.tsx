@@ -11,7 +11,7 @@ import { formatDateRange, formatDateTimeUTC } from '../lib/utils.ts'
 import { OpenSessionLogo } from './auth-page.tsx'
 import { PublicFormWizard, SubmittedSuccess } from './public-form-wizard.tsx'
 import { Button } from './ui/button.tsx'
-import { Toaster, toastActionError } from './ui/toast.tsx'
+import { toastActionError } from './ui/toast.tsx'
 import { Badge } from './ui/primitives.tsx'
 
 type DraftData = {
@@ -124,7 +124,6 @@ export function PublicCfpPage({
 
   return (
     <main className="min-h-screen bg-background px-4 py-8 sm:px-6 sm:py-12">
-      <Toaster />
       <div className="mx-auto flex w-full max-w-2xl flex-col gap-8">
         {submitted ? (
           <>

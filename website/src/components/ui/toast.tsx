@@ -1,6 +1,6 @@
 // Global toast notifications for server-action failures (and light success).
 // No third-party toast lib: a tiny pub/sub store + fixed viewport. Mount
-// <Toaster /> once in each top-level shell (dashboard, portal, public forms).
+// <Toaster /> is mounted once by the root application layout.
 'use client'
 
 import * as React from 'react'

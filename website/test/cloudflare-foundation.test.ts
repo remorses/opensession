@@ -1,5 +1,7 @@
 // Workerd smoke tests for the real anonymous app, D1 migrations, and R2 binding.
 import { env } from 'cloudflare:workers'
+import { createSpiceflowFetch } from 'spiceflow/client'
+import { SpiceflowTestResponse } from 'spiceflow/testing'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
 import { app } from '../src/app.tsx'
@@ -59,6 +61,15 @@ beforeAll(async () => {
 })
 
 describe('Cloudflare integration foundation', () => {
+  test('the Holocron homepage has one document shell and progress bar', async () => {
+    const response = await createSpiceflowFetch(app)('/')
+    if (!(response instanceof SpiceflowTestResponse)) throw new Error('expected homepage')
+    const html = await response.text()
+
+    expect(html.match(/<html/g)).toHaveLength(1)
+    expect(html.match(/spiceflow-progress-fade-in/g)).toHaveLength(1)
+  })
+
   test('every discovered nested D1 migration was applied', async () => {
     const applied = await env.DB.prepare(
       'SELECT name FROM d1_migrations ORDER BY name',
@@ -72,9 +83,11 @@ describe('Cloudflare integration foundation', () => {
   })
 
   test('the anonymous CFP loader and page render D1 fixture data', async () => {
-    const response = await app.handle(new Request(
-      `http://localhost/submit/${fixture.eventSlug}/${fixture.formSlug}`,
-    ))
+    const response = await createSpiceflowFetch(app)(
+      '/submit/:eventSlug/:formSlug',
+      { params: { eventSlug: fixture.eventSlug, formSlug: fixture.formSlug } },
+    )
+    if (!(response instanceof SpiceflowTestResponse)) throw new Error('expected CFP page')
     const html = await response.text()
 
     expect({
@@ -86,6 +99,7 @@ describe('Cloudflare integration foundation', () => {
     })
     expect(html).toContain('Call for Speakers')
     expect(html).toContain('Tell us about your session')
+    expect(html.match(/spiceflow-progress-fade-in/g)).toHaveLength(1)
   })
 
   test('the Miniflare R2 binding stores and returns bytes and metadata', async () => {

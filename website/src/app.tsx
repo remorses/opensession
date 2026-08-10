@@ -71,6 +71,7 @@ import {
 } from './lib/content-management.ts'
 import { cn, formatDateRange } from './lib/utils.ts'
 import { Badge } from './components/ui/primitives.tsx'
+import { Toaster } from './components/ui/toast.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
 import { OpenSessionLogo } from './components/auth-page.tsx'
 import {
@@ -222,6 +223,15 @@ export const app = new Spiceflow()
     }
     return next()
   })
+
+  .layout('/login/*', rootLayout)
+  .layout('/invite/*', rootLayout)
+  .layout('/review/*', rootLayout)
+  .layout('/submit/*', rootLayout)
+  .layout('/portal/*', rootLayout)
+  .layout('/embed/*', rootLayout)
+  .layout('/public/*', rootLayout)
+  .layout('/org/*', rootLayout)
 
   // ── Login page ────────────────────────────────────────────────────
 
@@ -950,7 +960,7 @@ export const app = new Spiceflow()
     }
   })
 
-  .layout('/org/:orgId/*', async ({ children, request, loaderData }) => {
+  .layout('/org/:orgId/*', async ({ children, loaderData }) => {
     const { OrgSwitch, UserMenu, ThemeSelect } = await import('./components/dashboard-shell.tsx')
     const { EventSwitch } = await import('./components/event-switch.tsx')
     // Event pages get the EventSidebar (nested event layout) instead of the
@@ -958,7 +968,7 @@ export const app = new Spiceflow()
     // span full height — the event layout pads its own content.
     const isEventPage = loaderData.pathname.includes('/e/')
     return (
-      <AppShell request={request}>
+      <>
         <DashboardNavbar
           orgId={loaderData.currentOrgId}
           orgSlot={<OrgSwitch />}
@@ -985,7 +995,7 @@ export const app = new Spiceflow()
           </main>
         </ContentFrame>
         <DashboardFooter themeSlot={<ThemeSelect />} />
-      </AppShell>
+      </>
     )
   })
 
@@ -2457,8 +2467,7 @@ function getInitialThemeClass(request: Request) {
   return /(?:^|;\s*)color-theme=dark(?:;|$)/.test(cookie) ? 'dark' : undefined
 }
 
-async function AppShell({ children, request }: { children: React.ReactNode; request: Request }) {
-  const { Toaster } = await import('./components/ui/toast.tsx')
+function RootLayout({ children, request }: { children: React.ReactNode; request: Request }) {
   return (
     <html lang="en" className={getInitialThemeClass(request)} data-default-theme="system" suppressHydrationWarning>
       <Head>
@@ -2474,6 +2483,10 @@ async function AppShell({ children, request }: { children: React.ReactNode; requ
       </body>
     </html>
   )
+}
+
+function rootLayout({ children, request }: { children?: React.ReactNode; request: Request }) {
+  return <RootLayout request={request}>{children}</RootLayout>
 }
 
 /** Decorative dot placed at border intersections. Must be inside a relative container.
@@ -2605,6 +2618,7 @@ export type App = typeof app
 declare module 'spiceflow/react' {
   interface SpiceflowRegister {
     app: typeof app
+    knownPaths: '/' | '/#features'
   }
 }
 

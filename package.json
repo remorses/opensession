@@ -2,7 +2,7 @@
   "private": true,
   "pnpm": {
     "overrides": {
-      "spiceflow": "1.26.0-rsc.15"
+      "spiceflow": "1.26.0-rsc.18"
     }
   },
   "devDependencies": {

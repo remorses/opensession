@@ -39,7 +39,7 @@ import { Frame } from './ui/frame.tsx'
 import { Badge, EmptyState, Textarea } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
 import { SessionStatusBadge } from './abstracts-page.tsx'
-import { toast, toastActionError, Toaster } from './ui/toast.tsx'
+import { toast, toastActionError } from './ui/toast.tsx'
 
 type PortalShellData = {
   portalMissing: boolean
@@ -186,7 +186,6 @@ export function PortalShell({
           {children}
         </ErrorBoundary>
       </main>
-      <Toaster />
     </div>
   )
 }
