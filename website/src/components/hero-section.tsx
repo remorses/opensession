@@ -39,7 +39,7 @@ export function HeroSection() {
         }}
       >
         <h1
-          className='flex flex-col items-center leading-none text-[32px] sm:text-[44px] md:text-[54px] text-foreground'
+          className='flex flex-col items-center leading-tight text-[32px] sm:text-[44px] md:text-[54px] text-foreground'
           style={{ fontFamily: HERO_FONT }}
         >
           <span>run your conference program</span>
