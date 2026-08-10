@@ -56,8 +56,8 @@ export function NativeSelect({
   ...props
 }: React.SelectHTMLAttributes<HTMLSelectElement>): React.ReactElement {
   return (
-    <div className="relative w-full">
-      <select className={cn(nativeSelectVariants(), 'appearance-none rounded-md', className)} {...props}>
+    <div className={cn('relative w-full', className)}>
+      <select className={cn(nativeSelectVariants(), 'appearance-none rounded-md')} {...props}>
         {children}
       </select>
       <ChevronsUpDownIcon className="pointer-events-none absolute right-2 top-1/2 size-4 -translate-y-1/2 opacity-80 sm:size-4" />
