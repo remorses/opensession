@@ -47,6 +47,10 @@ Replies must reach the organizer, never a black hole. Every outbound email sets
 from a per-user address; the envelope sender is always `notifications@opensession.dev`
 so SPF/DKIM stay aligned with the onboarded sending domain.
 
+Use `example.com` or one of its subdomains for placeholder email addresses in tests
+and sample data. The outbox rejects these recipients before queueing and the transport
+also skips any existing placeholder rows, so test data can never reach Cloudflare Email.
+
 ## NEVER hardcode secrets — this repo is public
 
 `remorses/opensession` is a **public open-source repository**. Anything committed here

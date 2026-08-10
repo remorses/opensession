@@ -36,6 +36,12 @@ export const MAX_SEND_ATTEMPTS = 5
  *  blow the worker CPU limit on a large backlog. */
 export const OUTBOX_BATCH_SIZE = 25
 
+/** example.com and its subdomains are reserved test data, never real recipients. */
+export function isPlaceholderEmail(email: string): boolean {
+  const domain = email.trim().toLowerCase().split('@').at(-1)
+  return domain === 'example.com' || domain?.endsWith('.example.com') === true
+}
+
 /**
  * Dedupe keys live here and nowhere else. Every caller must build its key
  * through this map so the formats cannot drift between the enqueue site and
@@ -95,6 +101,7 @@ export type EnqueueResult = { inserted: boolean; row: EmailRow | null }
 /** Insert the outbox row. `inserted: false` means an identical message was
  *  already queued or sent — that is success, not an error. */
 export async function enqueueEmail(input: EnqueueInput): Promise<EnqueueResult> {
+  if (isPlaceholderEmail(input.toEmail)) return { inserted: false, row: null }
   const built = buildEmail(input.payload)
   const inserted = await input.db
     .insert(schema.emailMessage)
@@ -144,6 +151,7 @@ export async function sendEmailMessage({
   replyTo: string
   now: number
 }): Promise<SendOutcome> {
+  if (isPlaceholderEmail(row.toEmail)) return { status: 'SKIPPED' }
   // Local Workerd tests exercise the real outbox and every caller, but must
   // never deliver mail to the outside world. Keep the row QUEUED so tests do
   // not claim a message was sent when transport was intentionally disabled.
@@ -260,15 +268,16 @@ export async function drainOutbox({
 
   const summary: DrainSummary = { attempted: 0, sent: 0, failed: 0 }
   for (const row of due) {
-    summary.attempted += 1
     const outcome = await sendEmailMessage({
       db,
       row,
       replyTo: replyToByEvent.get(row.eventId) ?? EMAIL_SENDER.email,
       now,
     })
+    if (outcome.status === 'SKIPPED') continue
+    summary.attempted += 1
     if (outcome.status === 'SENT') summary.sent += 1
-    else summary.failed += 1
+    if (outcome.status === 'FAILED') summary.failed += 1
   }
   return summary
 }

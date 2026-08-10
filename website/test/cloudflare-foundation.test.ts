@@ -9,7 +9,7 @@ import { beforeAll, describe, expect, test } from 'vitest'
 import worker, { app } from '../src/app.tsx'
 import { getDb } from '../src/db.ts'
 import { runCron } from '../src/lib/emails/cron.ts'
-import { enqueueAndSend } from '../src/lib/emails/send.ts'
+import { enqueueAndSend, isPlaceholderEmail } from '../src/lib/emails/send.ts'
 
 const fixture = {
   userId: 'workerd-fixture-user',
@@ -148,6 +148,45 @@ describe('Cloudflare integration foundation', () => {
     expect({ result, row }).toEqual({
       result: { inserted: true, sent: false },
       row: { status: 'QUEUED', attemptCount: 0, lastAttemptAt: null },
+    })
+  })
+
+  test('does not queue placeholder email recipients', async () => {
+    expect([
+      'speaker@example.com',
+      'speaker@sbek-test.example.com',
+      'speaker@real-example.com',
+    ].map(isPlaceholderEmail)).toEqual([true, true, false])
+
+    const result = await enqueueAndSend({
+      db: getDb(),
+      eventId: fixture.eventId,
+      toEmail: 'speaker@sbek-test.example.com',
+      dedupeKey: 'workerd:placeholder-email',
+      replyTo: 'organizer@example.test',
+      now: Date.UTC(2026, 7, 9),
+      payload: {
+        kind: 'SUBMISSION_CONFIRMATION',
+        context: {
+          eventName: 'Integration Summit',
+          eventSlug: fixture.eventSlug,
+          appUrl: 'http://localhost',
+          timezone: 'UTC',
+          recipientName: 'Speaker',
+        },
+        data: {
+          sessionId: 'workerd-placeholder-session',
+          sessionTitle: 'A placeholder talk',
+        },
+      },
+    })
+    const row = await env.DB.prepare(
+      "SELECT id FROM email_message WHERE dedupe_key = 'workerd:placeholder-email'",
+    ).first()
+
+    expect({ result, row }).toEqual({
+      result: { inserted: false, sent: false },
+      row: null,
     })
   })
 
