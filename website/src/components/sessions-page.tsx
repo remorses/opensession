@@ -16,7 +16,7 @@ import {
 } from '../actions.tsx'
 import type { AgendaSessionRow } from '../lib/conflicts.ts'
 import { cn } from '../lib/utils.ts'
-import { runAction } from './ui/toast.tsx'
+import { runAction, toast } from './ui/toast.tsx'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
 import {
@@ -66,20 +66,39 @@ export function SessionsPage({ tab }: { tab: SessionsTab }) {
             public schedule shows.
           </p>
         </div>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="outline"
-            render={
-              <Link href={router.href(`/org/${currentOrgId}/e/${event.id}/agenda`, { view: 'day' })} />
-            }
-          >
-            <CalendarPlusIcon />
-            Open agenda
-          </Button>
-          <Button onClick={() => setCreateOpen(true)}>
-            <PlusIcon />
-            Add service session
-          </Button>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2" aria-label="Schedule actions">
+            <Button
+              variant="outline"
+              render={
+                <Link href={router.href(`/org/${currentOrgId}/e/${event.id}/agenda`, { view: 'day' })} />
+              }
+            >
+              <CalendarPlusIcon />
+              Build agenda
+            </Button>
+          </div>
+          <div className="border-l border-border pl-3">
+            <Button onClick={() => setCreateOpen(true)}>
+              <PlusIcon />
+              Add service block
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="grid gap-3 border-y border-border py-3 text-sm md:grid-cols-2">
+        <div className="flex flex-col gap-1">
+          <strong>Accepted content</strong>
+          <p className="text-muted-foreground">
+            Talks arrive here after acceptance. Approve them for public view and schedule them before they can appear to attendees.
+          </p>
+        </div>
+        <div className="flex flex-col gap-1">
+          <strong>Service blocks</strong>
+          <p className="text-muted-foreground">
+            Breaks, lunch, and registration can be Public or Private. A Public service block still appears only after it is scheduled and the program is published.
+          </p>
         </div>
       </div>
 
@@ -135,7 +154,7 @@ export function SessionsPage({ tab }: { tab: SessionsTab }) {
                 <TableHead>Format</TableHead>
                 <TableHead>Room</TableHead>
                 <TableHead>When</TableHead>
-                <TableHead>Visibility</TableHead>
+                <TableHead>Public visibility</TableHead>
                 <TableHead className="w-28" />
               </TableRow>
             </TableHeader>
@@ -209,18 +228,34 @@ function SessionsRow({
           disabled={pending}
           value={row.visibility}
           onChange={(e) => {
-            const visibility = e.target.value as 'PUBLIC' | 'PRIVATE'
+            const visibility = e.target.value
+            if (visibility !== 'PUBLIC' && visibility !== 'PRIVATE') return
             if (visibility === row.visibility) return
             startTransition(async () => {
-              await runAction(
+              const result = await runAction(
                 () => setSessionVisibility({ orgId, eventId, sessionId: row.id, visibility }),
                 { fallbackError: 'Could not change visibility' },
               )
+              if (result) {
+                const label = row.kind === 'CONTENT'
+                  ? visibility === 'PUBLIC' ? 'Approved for public view' : 'Not approved for public view'
+                  : visibility === 'PUBLIC' ? 'Public' : 'Private'
+                toast.success(`${row.title} is now ${label.toLowerCase()}.`, 'Visibility updated')
+              }
             })
           }}
         >
-          <option value="PUBLIC">Approved</option>
-          <option value="PRIVATE">Not approved</option>
+          {row.kind === 'CONTENT' ? (
+            <>
+              <option value="PUBLIC">Approved for public</option>
+              <option value="PRIVATE">Not approved</option>
+            </>
+          ) : (
+            <>
+              <option value="PUBLIC">Public</option>
+              <option value="PRIVATE">Private</option>
+            </>
+          )}
         </NativeSelect>
       </TableCell>
       <TableCell>
@@ -232,10 +267,11 @@ function SessionsRow({
               disabled={pending}
               onClick={() => {
                 startTransition(async () => {
-                  await runAction(
+                  const result = await runAction(
                     () => unscheduleSession({ orgId, eventId, sessionId: row.id }),
                     { fallbackError: 'Could not unschedule' },
                   )
+                  if (result) toast.success(`${row.title} was removed from the agenda.`, 'Session unscheduled')
                 })
               }}
             >
@@ -299,7 +335,7 @@ function ServiceSessionDialog({
           <DialogTitle>Add service session</DialogTitle>
           <DialogDescription>
             Breaks, lunch, and registration. No speakers, no CFP — place it on the agenda like any
-            other block.
+            other block. Public blocks still require a schedule slot and a published program.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -343,7 +379,10 @@ function ServiceSessionDialog({
               Visibility
               <NativeSelect
                 value={visibility}
-                onChange={(e) => setVisibility(e.target.value as 'PUBLIC' | 'PRIVATE')}
+                onChange={(e) => {
+                  const next = e.target.value
+                  if (next === 'PUBLIC' || next === 'PRIVATE') setVisibility(next)
+                }}
               >
                 <option value="PUBLIC">Public</option>
                 <option value="PRIVATE">Private</option>

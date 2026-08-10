@@ -1,7 +1,7 @@
 // Reusable centered auth layout used by login, device, and dashboard pages.
 
 import type { ReactNode } from 'react'
-import { Head } from 'spiceflow/react'
+import { Head, Link, router } from 'spiceflow/react'
 import { cn } from '../lib/utils.ts'
 
 /**
@@ -53,11 +53,10 @@ export function AuthPage({
       <div className="flex w-full max-w-sm flex-col items-center gap-6 text-center">
         {/* Landing page, not /dashboard: these pages are mostly viewed
             signed-out, where /dashboard would chain a second redirect
-            to /login. Plain <a> — '/' is served by the mounted holocron
-            docs app, so the typed router can't link it. */}
-        <a href="/">
+            to /login. */}
+        <Link href={router.href('/')}>
           <OpenSessionLogo imageClassName="h-8" />
-        </a>
+        </Link>
         <div className="flex flex-col gap-2">
           {title && <h1 className="text-2xl font-semibold tracking-tight">{title}</h1>}
           <p className="text-sm text-muted-foreground text-balance">{description}</p>

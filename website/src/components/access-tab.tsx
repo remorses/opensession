@@ -16,6 +16,7 @@ import {
   Dialog, DialogDescription, DialogFooter, DialogHeader,
   DialogPanel, DialogPopup, DialogTitle,
 } from './ui/dialog.tsx'
+import { toastActionError } from './ui/toast.tsx'
 
 type Member = {
   memberId: string
@@ -80,7 +81,7 @@ function AccessTable({ members }: { members: Member[] }) {
         await updateMemberRole({ memberId: member.memberId, role: nextRole })
       } catch (err) {
         setRoleOverrides((current) => ({ ...current, [member.memberId]: previousRole }))
-        setError(err instanceof Error ? err.message : 'Failed to update role')
+        setError(toastActionError(err, 'Failed to update role'))
       } finally {
         setPendingRoleId((current) => (current === member.memberId ? null : current))
       }
@@ -97,7 +98,7 @@ function AccessTable({ members }: { members: Member[] }) {
         // loader data, so the members table updates without a reload.
         await removeMember({ memberId: member.memberId })
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to remove member')
+        setError(toastActionError(err, 'Failed to remove member'))
       } finally {
         setPendingDeleteId(null)
       }
@@ -338,7 +339,11 @@ export function AcceptInviteButton({
           if (alreadyMember) {
             // Fire-and-forget navigation (awaiting a navigation commit
             // inside a form action can deadlock the transition).
-            router.push(reviewFormId ? `/review/${reviewFormId}` : `/org/${orgId}`)
+            router.push(
+              reviewFormId
+                ? router.href('/review/:formId', { formId: reviewFormId })
+                : router.href('/org/:orgId', { orgId }),
+            )
             return
           }
           await acceptInvite({ invitationId })

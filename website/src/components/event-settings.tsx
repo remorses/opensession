@@ -17,12 +17,14 @@ import {
   deleteTrack,
   updateEvent,
 } from '../actions.tsx'
+import { nextTrackColor } from '../lib/utils.ts'
 import { cn } from '../lib/utils.ts'
 import { toZonedSlot } from '../lib/conflicts.ts'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
 import { Input, NativeSelect, Textarea, TimezoneSelect } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
+import { toastActionError } from './ui/toast.tsx'
 
 export type SettingsTab = 'details' | 'tracks' | 'formats' | 'rooms' | 'team'
 
@@ -214,7 +216,7 @@ function useRowDelete() {
       try {
         await action()
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to delete')
+        setError(toastActionError(err, 'Failed to delete'))
       } finally {
         setPendingId((current) => (current === id ? null : current))
       }
@@ -249,6 +251,7 @@ function TracksTab({ orgId, eventId, tracks }: {
   tracks: { id: string; name: string; color: string; sortOrder: number }[]
 }) {
   const { pendingId, error, run } = useRowDelete()
+  const defaultColor = nextTrackColor(tracks.map((track) => track.color))
 
   return (
     <div className="flex flex-col gap-3">
@@ -260,7 +263,7 @@ function TracksTab({ orgId, eventId, tracks }: {
               orgId,
               eventId,
               name: String(formData.get('name') ?? '').trim(),
-              color: String(formData.get('color') ?? '#6366f1'),
+               color: String(formData.get('color') ?? defaultColor),
             })
           }}
         >
@@ -269,7 +272,8 @@ function TracksTab({ orgId, eventId, tracks }: {
             aria-label="Track color"
             name="color"
             type="color"
-            defaultValue="#6366f1"
+            key={defaultColor}
+            defaultValue={defaultColor}
             className="h-9 w-12 shrink-0 cursor-pointer rounded-md border border-input bg-background p-1"
           />
           <Button type="submit" variant="outline">Add track</Button>
@@ -470,7 +474,7 @@ function TeamTab({ orgId }: { orgId: string }) {
         Team access is managed at the organization level. Every organization member can
         manage and review all of its events.
       </p>
-      <Button variant="outline" render={<Link href={`/org/${orgId}/members`} />}>
+      <Button variant="outline" render={<Link href={router.href('/org/:orgId/members', { orgId })} />}>
         <UsersIcon />
         Manage members
       </Button>

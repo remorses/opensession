@@ -10,6 +10,7 @@
 import {
   CalendarDaysIcon,
   CodeXmlIcon,
+  ExternalLinkIcon,
   FileIcon,
   FileTextIcon,
   InboxIcon,
@@ -17,19 +18,20 @@ import {
   ListChecksIcon,
   MailIcon,
   MicIcon,
-  NotebookPenIcon,
   SettingsIcon,
   StarIcon,
   UsersIcon,
   type LucideIcon,
 } from 'lucide-react'
-import { Link, useLoaderData, useRouterState } from 'spiceflow/react'
+import { Link, router, useLoaderData, useRouterState } from 'spiceflow/react'
 import { cn, formatDateRange } from '../lib/utils.ts'
+
+type NavSegment = '' | 'abstracts' | 'sessions' | 'files' | 'forms' | 'evaluation' | 'agenda' | 'tasks' | 'speakers' | 'emails' | 'embeds' | 'settings'
 
 type NavItem = {
   label: string
   /** Path segment under /org/:orgId/e/:eventId — '' is the dashboard. */
-  segment: string
+  segment: NavSegment
   icon: LucideIcon
 }
 
@@ -64,7 +66,6 @@ const navGroups: NavGroup[] = [
     label: 'Portal',
     items: [
       { label: 'Tasks', segment: 'tasks', icon: ListChecksIcon },
-      { label: 'Portal Forms', segment: 'portal-forms', icon: NotebookPenIcon },
       { label: 'Speakers', segment: 'speakers', icon: UsersIcon },
     ],
   },
@@ -81,11 +82,29 @@ const navGroups: NavGroup[] = [
   },
 ]
 
+function eventHref({ orgId, eventId, segment }: { orgId: string; eventId: string; segment: NavSegment }) {
+  const params = { orgId, eventId }
+  switch (segment) {
+    case 'abstracts': return router.href(`/org/${orgId}/e/${eventId}/abstracts`)
+    case 'sessions': return router.href(`/org/${orgId}/e/${eventId}/sessions`)
+    case 'files': return router.href(`/org/${orgId}/e/${eventId}/files`)
+    case 'forms': return router.href('/org/:orgId/e/:eventId/forms', params)
+    case 'evaluation': return router.href(`/org/${orgId}/e/${eventId}/evaluation`)
+    case 'agenda': return router.href(`/org/${orgId}/e/${eventId}/agenda`)
+    case 'tasks': return router.href(`/org/${orgId}/e/${eventId}/tasks`)
+    case 'speakers': return router.href(`/org/${orgId}/e/${eventId}/speakers`)
+    case 'emails': return router.href(`/org/${orgId}/e/${eventId}/emails`)
+    case 'embeds': return router.href('/org/:orgId/e/:eventId/embeds', params)
+    case 'settings': return router.href(`/org/${orgId}/e/${eventId}/settings`)
+    default: return router.href('/org/:orgId/e/:eventId', params)
+  }
+}
+
 export function EventSidebar() {
   const { currentOrgId } = useLoaderData('/org/:orgId/*')
   const { event } = useLoaderData('/org/:orgId/e/:eventId/*')
   const { pathname } = useRouterState()
-  const base = `/org/${currentOrgId}/e/${event.id}`
+  const base = router.href('/org/:orgId/e/:eventId', { orgId: currentOrgId, eventId: event.id })
 
   return (
     <aside className="flex w-56 shrink-0 flex-col gap-1 border-r border-border px-3 py-4">
@@ -94,6 +113,15 @@ export function EventSidebar() {
         <span className="text-xs text-muted-foreground tabular-nums">
           {formatDateRange({ startMs: event.startsAt, endMs: event.endsAt, timezone: event.timezone })}
         </span>
+        <Link
+          href={router.href('/portal/:eventSlug', { eventSlug: event.slug })}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-2 flex w-fit items-center gap-1.5 text-xs font-medium text-foreground no-underline hover:underline"
+        >
+          View speaker portal
+          <ExternalLinkIcon className="size-3" />
+        </Link>
       </div>
       <nav className="flex flex-col gap-0.5">
         {navGroups.map((group) => (
@@ -104,7 +132,7 @@ export function EventSidebar() {
               </span>
             ) : null}
             {group.items.map((item) => {
-              const href = item.segment ? `${base}/${item.segment}` : base
+              const href = eventHref({ orgId: currentOrgId, eventId: event.id, segment: item.segment })
               const active = item.segment
                 ? pathname === href || pathname.startsWith(`${href}/`)
                 : pathname === base

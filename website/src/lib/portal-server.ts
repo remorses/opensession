@@ -1,6 +1,7 @@
 // Server-side speaker portal workflows: load owned data, edit PENDING
-// submissions, withdraw, profile form, and task completion. Every entry
-// point receives an authenticated session and enforces speaker ownership.
+// submissions, shared speaker-profile form persistence, and task completion.
+// Portal entry points enforce speaker ownership; organizer profile updates
+// are called only after the action has enforced event membership.
 
 import * as orm from 'drizzle-orm'
 import type { BatchItem } from 'drizzle-orm/batch'
@@ -8,10 +9,12 @@ import * as schema from 'db/schema'
 import { ulid } from 'ulid'
 import { getDb, lookupOrgMember, type Session } from '../db.ts'
 import { collectFields, libraryOptions, type FormSubmission } from '../forms/collect-fields.ts'
-import { extractWellKnown } from '../forms/well-known-names.ts'
+import { extractWellKnown, speakerWellKnown } from '../forms/well-known-names.ts'
 import { validateSubmission } from '../forms/validate.ts'
 import {
   flattenSubmissionValues,
+  formScheduleBlock,
+  formScheduleBlockMessage,
   getFileFieldNames,
   restoreSubmissionValues,
 } from './cfp-submission.ts'
@@ -131,10 +134,17 @@ export async function getPortalSession(eventId: string, speakerId: string, sessi
   if (!row) return null
   const portalRow = toPortalSessionRow(row)
   if (!canViewSession(speakerId, portalRow)) return null
+  const cfpResponse = row.formResponses.find((response) => response.form?.purpose === 'CFP')
+    ?? row.formResponses[0]
+  const scheduleBlock = cfpResponse?.form ? formScheduleBlock(cfpResponse.form) : 'status_closed'
+  const statusAllowsEdit = canEditSession({ speakerId, session: portalRow })
   return {
     session: row,
     portalRow,
-    canEdit: canEditSession(speakerId, portalRow),
+    canEdit: canEditSession({ speakerId, session: portalRow, formIsOpen: scheduleBlock == null }),
+    editBlockMessage: statusAllowsEdit && scheduleBlock
+      ? `Editing is closed. ${formScheduleBlockMessage(scheduleBlock)}`
+      : null,
     canWithdraw: canWithdrawSession(speakerId, portalRow),
   }
 }
@@ -219,6 +229,86 @@ export async function getPortalProfileForm(eventId: string) {
   })
 }
 
+export async function loadSpeakerProfileForm(
+  eventId: string,
+  speaker: typeof schema.speaker.$inferSelect,
+) {
+  const form = await getPortalProfileForm(eventId)
+  if (!form) return null
+  const db = getDb()
+  const [version, response] = await db.batch([
+    db.query.formVersion.findFirst({
+      where: { formId: form.id },
+      orderBy: { createdAt: 'desc', id: 'desc' },
+    }),
+    db.query.formResponse.findFirst({
+      where: { formId: form.id, speakerId: speaker.id, status: 'SUBMITTED' },
+      with: { fieldValues: true },
+      orderBy: { submittedAt: 'desc', createdAt: 'desc', id: 'desc' },
+    }),
+  ] as const)
+  const savedValues: FormSubmission['values'] = {}
+  for (const row of response?.fieldValues ?? []) {
+    const current = savedValues[row.name]
+    savedValues[row.name] = current == null
+      ? row.value
+      : Array.isArray(current)
+        ? [...current, row.value]
+        : [current, row.value]
+  }
+  const initialValues = {
+    ...savedValues,
+    ...draftValuesFromSpeaker(speaker).values,
+  }
+  const customFieldNames = version
+    ? collectFields({ mdxSource: version.mdxSource, scope: { values: initialValues } }).fields
+      .map((field) => field.name)
+      .filter((name) => !Object.hasOwn(speakerWellKnown, name))
+    : []
+  return {
+    form,
+    version: version ?? null,
+    initialValues,
+    customFields: customFieldNames.map((name) => ({ name, value: initialValues[name] ?? '' })),
+  }
+}
+
+export async function loadOrganizerSpeakerDetail(eventId: string, speakerId: string) {
+  const db = getDb()
+  const [speaker, sessions] = await db.batch([
+    db.query.speaker.findFirst({
+      where: { id: speakerId, eventId },
+      with: {
+        headshotFile: true,
+        participations: { orderBy: { sortOrder: 'asc' }, with: { session: true } },
+        taskAssignments: { with: { taskDefinition: true, session: true }, orderBy: { createdAt: 'asc' } },
+        uploadedFiles: { orderBy: { createdAt: 'desc' } },
+        emailMessages: { orderBy: { createdAt: 'desc' }, limit: 100 },
+      },
+    }),
+    db.query.eventSession.findMany({
+      where: { eventId, kind: 'CONTENT' },
+      with: { participants: { orderBy: { sortOrder: 'asc' }, with: { speaker: true } } },
+      orderBy: { title: 'asc' },
+    }),
+  ] as const)
+  if (!speaker) return { speaker, sessions, profileForm: null }
+  const profile = await loadSpeakerProfileForm(eventId, speaker)
+  return {
+    speaker,
+    sessions,
+    profileForm: profile?.version ? {
+      id: profile.form.id,
+      name: profile.form.name,
+      mdxSource: profile.version.mdxSource,
+      initialValues: profile.initialValues,
+      customFields: profile.customFields,
+    } : null,
+  }
+}
+
+export type OrganizerSpeakerDetail = Awaited<ReturnType<typeof loadOrganizerSpeakerDetail>>
+
 async function assertOwnedFiles({ eventId, ownerSpeakerId, fileIds }: {
   eventId: string
   ownerSpeakerId: string
@@ -293,11 +383,14 @@ export async function savePortalSubmission({
   const submission = cfpSubmissionSchema.parse(raw)
   const ctx = await loadPortalContextByEventId(eventId, session)
   const loaded = await getPortalSession(eventId, ctx.speaker.id, sessionId)
-  if (!loaded?.canEdit) throw new Error('You cannot edit this submission')
+  if (!loaded) throw new Error('You cannot edit this submission')
 
   const cfpResponse = loaded.session.formResponses.find((row) => row.form?.purpose === 'CFP')
     ?? loaded.session.formResponses[0]
-  if (!cfpResponse?.formVersion) throw new Error('No editable form response for this submission')
+  if (!cfpResponse?.formVersion || !cfpResponse.form) throw new Error('No editable form response for this submission')
+  const scheduleBlock = formScheduleBlock(cfpResponse.form)
+  if (scheduleBlock) throw new Error(`Editing is closed. ${formScheduleBlockMessage(scheduleBlock)}`)
+  if (!loaded.canEdit) throw new Error('You cannot edit this submission')
 
   const db = getDb()
   const [tracks, formats] = await db.batch([
@@ -382,11 +475,60 @@ export async function savePortalProfile({
 }) {
   const submission = cfpSubmissionSchema.parse(raw)
   const ctx = await loadPortalContextByEventId(eventId, session)
+  return persistSpeakerProfile({
+    eventId,
+    formId,
+    submission,
+    speaker: ctx.speaker,
+    requiredFileOwnerSpeakerId: ctx.speaker.id,
+  })
+}
+
+export async function saveOrganizerSpeakerProfile({
+  eventId,
+  formId,
+  speakerId,
+  submission: raw,
+}: {
+  eventId: string
+  formId: string
+  speakerId: string
+  submission: FormSubmission
+}) {
+  const submission = cfpSubmissionSchema.parse(raw)
+  const db = getDb()
+  const speaker = await db.query.speaker.findFirst({ where: { id: speakerId, eventId } })
+  if (!speaker) throw new Error('Speaker not found')
+  return persistSpeakerProfile({
+    eventId,
+    formId,
+    submission,
+    speaker,
+    requiredFileOwnerSpeakerId: null,
+  })
+}
+
+async function persistSpeakerProfile({
+  eventId,
+  formId,
+  submission,
+  speaker,
+  requiredFileOwnerSpeakerId,
+}: {
+  eventId: string
+  formId: string
+  submission: FormSubmission
+  speaker: typeof schema.speaker.$inferSelect
+  /** null lets an organizer use any upload from this event. */
+  requiredFileOwnerSpeakerId: string | null
+}) {
   const db = getDb()
   const form = await db.query.form.findFirst({
-    where: { id: formId, eventId, purpose: 'PORTAL', target: 'SPEAKER', status: 'OPEN' },
+    where: { id: formId, eventId, purpose: 'PORTAL', target: 'SPEAKER' },
   })
   if (!form) throw new Error('Profile form not found')
+  const profileSchedule = formScheduleBlock(form)
+  if (profileSchedule != null) throw new Error(formScheduleBlockMessage(profileSchedule))
   const version = await db.query.formVersion.findFirst({
     where: { formId: form.id },
     orderBy: { createdAt: 'desc', id: 'desc' },
@@ -410,30 +552,32 @@ export async function savePortalProfile({
       values: submission.values,
       participants: submission.participants.length > 0 ? submission.participants : [],
     },
-    participantSpeakerIds: submission.participants.map(() => ctx.speaker.id),
+    participantSpeakerIds: submission.participants.map(() => speaker.id),
     fileFieldNames,
   }).map((row) =>
     row.name.startsWith('speaker.')
-      ? { ...row, subjectSpeakerId: ctx.speaker.id }
+      ? { ...row, subjectSpeakerId: speaker.id }
       : row,
   )
   // Top-level speaker.* values need subjectSpeakerId even without participants.
   for (const row of fieldRows) {
     if (row.name.startsWith('speaker.') && !row.subjectSpeakerId) {
-      row.subjectSpeakerId = ctx.speaker.id
+      row.subjectSpeakerId = speaker.id
     }
   }
-  await assertOwnedFiles({
-    eventId,
-    ownerSpeakerId: ctx.speaker.id,
-    fileIds: fieldRows.flatMap((row) => (row.fileId ? [row.fileId] : [])),
-  })
+  const fileIds = [...new Set(fieldRows.flatMap((row) => (row.fileId ? [row.fileId] : [])))]
+  if (requiredFileOwnerSpeakerId) {
+    await assertOwnedFiles({ eventId, ownerSpeakerId: requiredFileOwnerSpeakerId, fileIds })
+  } else if (fileIds.length > 0) {
+    const files = await db.query.file.findMany({ where: { id: { in: fileIds }, eventId } })
+    if (files.length !== fileIds.length) throw new Error('A submitted file is missing from this event')
+  }
 
   const now = Date.now()
   const openAssignments = await db.query.taskAssignment.findMany({
     where: {
       eventId,
-      speakerId: ctx.speaker.id,
+      speakerId: speaker.id,
       status: { in: ['NOT_STARTED', 'IN_PROGRESS'] },
     },
     with: { taskDefinition: true },
@@ -451,7 +595,7 @@ export async function savePortalProfile({
       eventId,
       formId: form.id,
       formVersionId: version.id,
-      speakerId: ctx.speaker.id,
+      speakerId: speaker.id,
       sessionId: null,
       taskAssignmentId: openProfileTask?.id ?? null,
       status: 'SUBMITTED',
@@ -459,19 +603,19 @@ export async function savePortalProfile({
     }),
     db.update(schema.speaker)
       .set({
-        firstName: profile.firstName || ctx.speaker.firstName,
-        lastName: profile.lastName || ctx.speaker.lastName,
-        bio: profile.bio ?? ctx.speaker.bio,
-        jobTitle: profile.jobTitle ?? ctx.speaker.jobTitle,
-        companyName: profile.companyName ?? ctx.speaker.companyName,
-        pronouns: profile.pronouns ?? ctx.speaker.pronouns,
-        websiteUrl: profile.websiteUrl ?? ctx.speaker.websiteUrl,
-        linkedinUrl: profile.linkedinUrl ?? ctx.speaker.linkedinUrl,
-        twitterUrl: profile.twitterUrl ?? ctx.speaker.twitterUrl,
-        headshotFileId: profile.headshotFileId || ctx.speaker.headshotFileId,
+        firstName: profile.firstName || speaker.firstName,
+        lastName: profile.lastName || speaker.lastName,
+        bio: profile.bio ?? speaker.bio,
+        jobTitle: profile.jobTitle ?? speaker.jobTitle,
+        companyName: profile.companyName ?? speaker.companyName,
+        pronouns: profile.pronouns ?? speaker.pronouns,
+        websiteUrl: profile.websiteUrl ?? speaker.websiteUrl,
+        linkedinUrl: profile.linkedinUrl ?? speaker.linkedinUrl,
+        twitterUrl: profile.twitterUrl ?? speaker.twitterUrl,
+        headshotFileId: profile.headshotFileId || speaker.headshotFileId,
         updatedAt: now,
       })
-      .where(orm.eq(schema.speaker.id, ctx.speaker.id))
+      .where(orm.eq(schema.speaker.id, speaker.id))
       .limit(1),
     ...fieldRows.map((row) => db.insert(schema.formFieldValue).values(row)),
   ]
@@ -484,7 +628,7 @@ export async function savePortalProfile({
     )
   }
   await db.batch(queries)
-  return { responseId, speakerId: ctx.speaker.id }
+  return { responseId, speakerId: speaker.id }
 }
 
 export async function completeManualTaskAssignment({
@@ -531,9 +675,12 @@ export async function submitPortalFormTask({
     throw new Error('This form task cannot be submitted')
   }
   const form = taskDefinition.form
-  if (form.status !== 'OPEN' || form.purpose !== 'PORTAL') {
+  if (form.purpose !== 'PORTAL') {
     throw new Error('This portal form is not open')
   }
+  // null opensAt/closesAt = no schedule bound; status OPEN + window only.
+  const schedule = formScheduleBlock(form)
+  if (schedule != null) throw new Error(formScheduleBlockMessage(schedule))
   if (form.target === 'SUBMISSION' && !loaded.assignment.sessionId) {
     throw new Error('This task is missing its session')
   }
@@ -589,7 +736,11 @@ export async function submitPortalFormTask({
       submittedAt: now,
     }),
     db.update(schema.taskAssignment)
-      .set({ status: 'COMPLETED', completedAt: now, updatedAt: now })
+      .set({
+        status: 'COMPLETED',
+        completedAt: loaded.assignment.completedAt ?? now,
+        updatedAt: now,
+      })
       .where(orm.eq(schema.taskAssignment.id, assignmentId))
       .limit(1),
     ...fieldRows.map((row) => db.insert(schema.formFieldValue).values(row)),

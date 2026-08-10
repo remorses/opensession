@@ -1,11 +1,13 @@
 // Workerd integration tests for Phase 5 publication, anonymous feeds, iframe
 // headers, migration state, and agenda writes on real Miniflare D1.
 import { env } from 'cloudflare:workers'
+import { createSpiceflowFetch } from 'spiceflow/client'
+import { SpiceflowTestResponse } from 'spiceflow/testing'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
 import { app, loadPublicProgram } from '../src/app.tsx'
 import { getDb } from '../src/db.ts'
-import { scheduleSessionSlot } from '../src/lib/agenda-server.ts'
+import { applyAutoPlacementPlan, scheduleSessionSlot } from '../src/lib/agenda-server.ts'
 
 const now = Date.UTC(2027, 4, 12, 16)
 const ids = {
@@ -19,6 +21,7 @@ const ids = {
   visible: 'public-program-visible',
   private: 'public-program-private',
   waiting: 'public-program-waiting',
+  short: 'public-program-short',
 }
 
 beforeAll(async () => {
@@ -46,6 +49,7 @@ beforeAll(async () => {
       [ids.visible, 'Published talk', 'PUBLIC', now, now + 30 * 60_000],
       [ids.private, 'Private talk', 'PRIVATE', now + 60 * 60_000, now + 90 * 60_000],
       [ids.waiting, 'Waiting talk', 'PUBLIC', null, null],
+      [ids.short, 'Ten minute briefing', 'PUBLIC', now + 2 * 60 * 60_000, now + 130 * 60_000],
     ].map(([id, title, visibility, startsAt, endsAt]) => env.DB.prepare(dedent`
       INSERT INTO event_session (id, event_id, kind, status, title, description, visibility, track_id, format_id, room_id, starts_at, ends_at, created_at, updated_at)
       VALUES (?, ?, 'CONTENT', 'ACCEPTED', ?, 'Program description', ?, ?, ?, ?, ?, ?, ?, ?)
@@ -72,7 +76,7 @@ describe('published anonymous program', () => {
     const body = await response.json<any>()
     expect({ status: response.status, ids: body.sessions.map((row: any) => row.id) }).toEqual({
       status: 200,
-      ids: [ids.visible],
+      ids: [ids.visible, ids.short],
     })
     expect(JSON.stringify(body)).not.toContain('Private talk')
     expect(JSON.stringify(body)).not.toContain('Waiting talk')
@@ -118,8 +122,76 @@ describe('published anonymous program', () => {
     expect(icsResponse.headers.get('access-control-allow-origin')).toBe('*')
   })
 
+  test('renders a title-only agenda block for a ten-minute session', async () => {
+    const response = await createSpiceflowFetch(app)('/public/:eventSlug/agenda', {
+      params: { eventSlug: 'public-program' },
+    })
+    if (!(response instanceof SpiceflowTestResponse)) throw new Error('expected public agenda page')
+    const html = await response.text()
+    expect(html).toContain('Ten minute briefing')
+    expect(html).toContain('data-agenda-density="title-only"')
+  })
+
+  test('validates every automatic placement before writing the atomic batch', async () => {
+    const db = getDb()
+    const event = await db.query.event.findFirst({ where: { id: ids.event } })
+    if (!event) throw new Error('fixture event missing')
+    await env.DB.batch([
+      env.DB.prepare(dedent`
+        INSERT INTO event_session (id, event_id, kind, status, title, visibility, format_id, created_at, updated_at)
+        VALUES ('atomic-auto-a', ?, 'CONTENT', 'ACCEPTED', 'Atomic A', 'PUBLIC', ?, ?, ?)
+      `).bind(ids.event, ids.format, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO event_session (id, event_id, kind, status, title, visibility, format_id, created_at, updated_at)
+        VALUES ('atomic-auto-b', ?, 'CONTENT', 'ACCEPTED', 'Atomic B', 'PUBLIC', ?, ?, ?)
+      `).bind(ids.event, ids.format, now, now),
+    ])
+
+    await expect(applyAutoPlacementPlan({
+      db,
+      event,
+      now: now + 3,
+      placements: [
+        { sessionId: 'atomic-auto-a', roomId: ids.room, dayKey: '2027-05-13', startMinute: 12 * 60, durationMinutes: 30 },
+        { sessionId: 'missing-session', roomId: ids.room, dayKey: '2027-05-13', startMinute: 13 * 60, durationMinutes: 30 },
+      ],
+    })).rejects.toThrow('Automatic placement session not found')
+
+    const untouched = await db.query.eventSession.findMany({
+      where: { id: { in: ['atomic-auto-a', 'atomic-auto-b'] } },
+      orderBy: { id: 'asc' },
+    })
+    expect(untouched.map((row) => ({ id: row.id, roomId: row.roomId, startsAt: row.startsAt }))).toEqual([
+      { id: 'atomic-auto-a', roomId: null, startsAt: null },
+      { id: 'atomic-auto-b', roomId: null, startsAt: null },
+    ])
+
+    const applied = await applyAutoPlacementPlan({
+      db,
+      event,
+      now: now + 4,
+      placements: [
+        { sessionId: 'atomic-auto-a', roomId: ids.room, dayKey: '2027-05-13', startMinute: 12 * 60, durationMinutes: 30 },
+        { sessionId: 'atomic-auto-b', roomId: ids.room, dayKey: '2027-05-13', startMinute: 13 * 60, durationMinutes: 30 },
+      ],
+    })
+    expect(applied).toMatchObject({ applied: 2 })
+    const written = await db.query.eventSession.findMany({
+      where: { id: { in: ['atomic-auto-a', 'atomic-auto-b'] } },
+      orderBy: { id: 'asc' },
+    })
+    expect(written.map((row) => ({ id: row.id, roomId: row.roomId, startsAt: row.startsAt }))).toEqual([
+      { id: 'atomic-auto-a', roomId: ids.room, startsAt: Date.UTC(2027, 4, 13, 12) },
+      { id: 'atomic-auto-b', roomId: ids.room, startsAt: Date.UTC(2027, 4, 13, 13) },
+    ])
+  })
+
   test('iframe routes accept safe options, reject unsafe values, and allow framing', async () => {
-    const response = await app.handle(new Request('http://localhost/embed/public-program/sessions?accent=%23123456&compact=1'))
+    const response = await createSpiceflowFetch(app)('/embed/:eventSlug/sessions', {
+      params: { eventSlug: 'public-program' },
+      query: { accent: '#123456', compact: '1' },
+    })
+    if (!(response instanceof SpiceflowTestResponse)) throw new Error('expected embed page')
     expect(response.status).toBe(200)
     expect(response.headers.get('content-security-policy')).toBe('frame-ancestors *')
     expect(response.headers.get('x-frame-options')).toBeNull()
@@ -127,5 +199,52 @@ describe('published anonymous program', () => {
 
     const invalid = await app.handle(new Request('http://localhost/embed/public-program/sessions?accent=javascript%3Aalert(1)'))
     expect(invalid.status).toBe(400)
+  })
+
+  test('offers live basic HTML, JSON, XML, iCal, and script outputs without stale caching', async () => {
+    const paths = [
+      '/public/public-program/widget.html?widget=sessions&fields=time,room',
+      '/public/public-program/widget.json?widget=sessions',
+      '/public/public-program/widget.xml?widget=sessions',
+      '/public/public-program/schedule.ics',
+      '/public/public-program/widget.js?widget=sessions',
+    ]
+    for (const path of paths) {
+      const response = await app.handle(new Request(`http://localhost${path}`))
+      expect({ path, status: response.status, cache: response.headers.get('cache-control') }).toEqual({
+        path,
+        status: 200,
+        cache: 'no-store',
+      })
+      const body = await response.text()
+      expect(body.length).toBeGreaterThan(20)
+      if (!path.endsWith('widget.js?widget=sessions')) expect(body).toContain('Published talk')
+    }
+  })
+
+  test('applies visible fields to every iframe widget type', async () => {
+    for (const view of ['sessions', 'speakers', 'agenda', 'itinerary', 'gallery']) {
+      const response = await app.handle(new Request(`http://localhost/embed/public-program/${view}?fields=track`))
+      const html = await response.text()
+      expect({ view, status: response.status }).toEqual({ view, status: 200 })
+      expect(html).not.toContain('Principal Engineer')
+      expect(html).not.toContain('Latticework Systems')
+      expect(html).not.toContain('Program description')
+    }
+  })
+
+  test('serves organizer edits on the next request without republishing or a stale window', async () => {
+    const before = await app.handle(new Request('http://localhost/public/public-program/schedule.json'))
+    expect(await before.text()).toContain('Published talk')
+
+    await env.DB.prepare('UPDATE event_session SET title = ?, updated_at = ? WHERE id = ?')
+      .bind('Published talk updated live', now + 10, ids.visible)
+      .run()
+
+    const after = await app.handle(new Request('http://localhost/public/public-program/schedule.json'))
+    const body = await after.text()
+    expect(after.headers.get('cache-control')).toBe('no-store')
+    expect(body).toContain('Published talk updated live')
+    expect(body).not.toContain('"title":"Published talk"')
   })
 })

@@ -5,6 +5,15 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs))
 }
 
+const TRACK_PALETTE = ['#2563eb', '#7c3aed', '#db2777', '#dc2626', '#ea580c', '#16a34a', '#0891b2'] as const
+
+/** Prefer an unused event-track color, then cycle the stable palette. */
+export function nextTrackColor(colors: string[]): string {
+  const used = new Set(colors.map((color) => color.toLowerCase()))
+  return TRACK_PALETTE.find((color) => !used.has(color))
+    ?? TRACK_PALETTE[colors.length % TRACK_PALETTE.length]
+}
+
 // ── Deterministic date formatting ───────────────────────────────────
 
 const MONTHS_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'] as const

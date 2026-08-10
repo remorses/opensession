@@ -1,10 +1,22 @@
 // Workerd integration tests for Phase 4 using real Miniflare D1 and R2 bindings.
 import { env } from 'cloudflare:workers'
+import * as schema from 'db/schema'
 import { unzipSync } from 'fflate'
+import { runAction } from 'spiceflow/testing'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
-import { loadFilesWorkspace, loadZipFiles, streamZip } from '../src/app.tsx'
-import { isPublicContentEligible, latestTaskFileVersions } from '../src/lib/content-management.ts'
+import {
+  restoreSessionRevision,
+  saveSessionContent,
+  setSessionVisibility,
+  submitPortalFormTask,
+} from '../src/actions.tsx'
+import { app, loadFilesWorkspace, loadZipFiles, streamZip } from '../src/app.tsx'
+import {
+  isPublicContentEligible,
+  latestTaskFileVersions,
+  type TaskFileVersion,
+} from '../src/lib/content-management.ts'
 import { getDb } from '../src/db.ts'
 import { assertTaskSlotFiles } from '../src/lib/portal-server.ts'
 
@@ -16,7 +28,46 @@ const ids = {
   task: 'content-task', assignment: 'content-assignment', file1: 'content-file-1', file2: 'content-file-2',
 }
 
+let speakerCookie = ''
+let organizerCookie = ''
+let replacementSpeakerId = ''
+let actionOrganizerId = ''
+
+async function signUp(name: string, email: string) {
+  const password = 'content-workflow-password'
+  const response = await app.handle(new Request('http://localhost/api/auth/sign-up/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ name, email, password }),
+  }))
+  expect(response.status).toBe(200)
+  await env.DB.prepare('UPDATE user SET email_verified = 1 WHERE email = ?').bind(email).run()
+  const signIn = await app.handle(new Request('http://localhost/api/auth/sign-in/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  }))
+  expect(signIn.status).toBe(200)
+  const setCookie = signIn.headers.get('set-cookie')
+  if (!setCookie) throw new Error('sign-in did not set a session cookie')
+  const user = await env.DB.prepare('SELECT id FROM user WHERE email = ?').bind(email).first<{ id: string }>()
+  if (!user) throw new Error('sign-up did not create a user')
+  return { cookie: setCookie.split(';', 1)[0]!, userId: user.id }
+}
+
+function runWithCookie<T>(cookie: string, action: () => Promise<T>) {
+  return runAction(action, {
+    request: new Request('http://localhost/action', { method: 'POST', headers: { cookie } }),
+  })
+}
+
 beforeAll(async () => {
+  const speakerAuth = await signUp('Replacement Speaker', 'replacement-content@example.test')
+  const organizerAuth = await signUp('Content Action Organizer', 'action-organizer-content@example.test')
+  speakerCookie = speakerAuth.cookie
+  organizerCookie = organizerAuth.cookie
+  actionOrganizerId = organizerAuth.userId
+  replacementSpeakerId = 'content-replacement-speaker'
   await env.DB.batch([
     ...[
       [ids.organizer, 'Jordan Alvarez', 'jordan-content@example.test'],
@@ -66,6 +117,18 @@ beforeAll(async () => {
       INSERT INTO task_assignment (id, event_id, task_definition_id, speaker_id, session_id, status, created_at, updated_at)
       VALUES (?, ?, ?, ?, ?, 'IN_PROGRESS', ?, ?)
     `).bind(ids.assignment, ids.event, ids.task, ids.speaker, ids.session, now, now),
+    env.DB.prepare(dedent`
+      INSERT INTO org_member (member_id, org_id, user_id, role, created_at)
+      VALUES ('content-action-member', ?, ?, 'admin', ?)
+    `).bind(ids.org, actionOrganizerId, now),
+    env.DB.prepare(dedent`
+      INSERT INTO speaker (id, event_id, user_id, email, first_name, last_name, status, created_at, updated_at)
+      VALUES (?, ?, ?, 'replacement-content@example.test', 'Replacement', 'Speaker', 'CONFIRMED', ?, ?)
+    `).bind(replacementSpeakerId, ids.event, speakerAuth.userId, now, now),
+    env.DB.prepare(dedent`
+      INSERT INTO task_assignment (id, event_id, task_definition_id, speaker_id, session_id, status, completed_at, created_at, updated_at)
+      VALUES ('content-replacement-assignment', ?, ?, ?, ?, 'COMPLETED', ?, ?, ?)
+    `).bind(ids.event, ids.task, replacementSpeakerId, ids.session, now - 100, now - 200, now - 100),
   ])
   await env.FILES.put('content/v1', 'version one')
   await env.FILES.put('content/v2', 'version two')
@@ -90,13 +153,78 @@ beforeAll(async () => {
 })
 
 describe('immutable file slots and role-safe threads', () => {
+  test('allows a completed form task to receive and submit a replacement without reopening it', async () => {
+    const upload = async (bodyText: string) => {
+      const body = new FormData()
+      body.set('file', new File([bodyText], 'slides.pdf', { type: 'application/pdf' }))
+      body.set('eventId', ids.event)
+      body.set('kind', 'SLIDES')
+      body.set('taskAssignmentId', 'content-replacement-assignment')
+      body.set('fieldName', 'slides')
+      const response = await app.handle(new Request('http://localhost/api/upload', {
+        method: 'POST',
+        headers: { cookie: speakerCookie },
+        body,
+      }))
+      expect(response.status).toBe(200)
+      return response.json<{ fileId: string; versions: Array<{ id: string }> }>()
+    }
+
+    const first = await upload('replacement one')
+    const second = await upload('replacement two')
+    expect(second.versions.map((file) => file.id)).toEqual([second.fileId, first.fileId])
+
+    const beforeSubmit = await env.DB.prepare(dedent`
+      SELECT status, completed_at AS completedAt
+      FROM task_assignment WHERE id = 'content-replacement-assignment'
+    `).first()
+    expect(beforeSubmit).toEqual({ status: 'COMPLETED', completedAt: now - 100 })
+
+    await runWithCookie(speakerCookie, () => submitPortalFormTask({
+      eventId: ids.event,
+      assignmentId: 'content-replacement-assignment',
+      submission: { values: { slides: second.fileId }, participants: [] },
+    }))
+    const afterSubmit = await env.DB.prepare(dedent`
+      SELECT status, completed_at AS completedAt
+      FROM task_assignment WHERE id = 'content-replacement-assignment'
+    `).first()
+    expect(afterSubmit).toEqual(beforeSubmit)
+
+    const files = await getDb().query.file.findMany({
+      where: { taskAssignmentId: 'content-replacement-assignment', fieldName: 'slides' },
+      orderBy: { createdAt: 'desc', id: 'desc' },
+    })
+    expect(latestTaskFileVersions(files)[0]).toMatchObject({
+      currentFileId: second.fileId,
+      versions: [{ id: second.fileId }, { id: first.fileId }],
+    })
+
+    const selected = new Set([
+      `${ids.assignment}:slides`,
+      'content-replacement-assignment:slides',
+    ])
+    const archive = streamZip(await loadZipFiles({ db: getDb(), eventId: ids.event, selectedSlots: selected }))
+    const [bytes] = await Promise.all([
+      new Response(archive.readable).arrayBuffer(),
+      archive.done,
+    ])
+    expect(Object.fromEntries(
+      Object.entries(unzipSync(new Uint8Array(bytes)))
+        .map(([path, value]) => [path, new TextDecoder().decode(value)]),
+    )).toEqual({
+      'Taming CI/Priya Raman/slides/slides.pdf': 'version two',
+      'Taming CI/Replacement Speaker/slides/slides.pdf': 'replacement two',
+    })
+  })
+
   test('keeps both R2 versions downloadable and identifies the latest', async () => {
     const rows = await env.DB.prepare(dedent`
       SELECT id, task_assignment_id AS taskAssignmentId, field_name AS fieldName,
         file_name AS fileName, created_at AS createdAt
       FROM file WHERE event_id = ? ORDER BY created_at
-    `).bind(ids.event).all()
-    expect(latestTaskFileVersions(rows.results as any)[0]?.currentFileId).toBe(ids.file2)
+    `).bind(ids.event).all<TaskFileVersion>()
+    expect(latestTaskFileVersions(rows.results)[0]?.currentFileId).toBe(ids.file2)
     expect(await (await env.FILES.get('content/v1'))?.text()).toBe('version one')
     expect(await (await env.FILES.get('content/v2'))?.text()).toBe('version two')
   })
@@ -145,7 +273,7 @@ describe('immutable file slots and role-safe threads', () => {
   test('loads tenant-safe Files rows and streams only current selected versions into ZIP', async () => {
     const db = getDb()
     const workspace = await loadFilesWorkspace(db, ids.event)
-    expect(workspace.fileSlots).toMatchObject([{
+    expect(workspace.fileSlots.find((slot) => slot.slotKey === `${ids.assignment}:slides`)).toMatchObject({
       slotKey: `${ids.assignment}:slides`,
       versions: [
         { id: ids.file2, current: true },
@@ -155,7 +283,7 @@ describe('immutable file slots and role-safe threads', () => {
         { authorName: 'Priya Raman' },
         { authorName: 'Jordan Alvarez' },
       ],
-    }])
+    })
     expect((await loadFilesWorkspace(db, ids.otherEvent)).fileSlots).toEqual([])
 
     const selected = new Set([`${ids.assignment}:slides`])
@@ -178,33 +306,72 @@ describe('immutable file slots and role-safe threads', () => {
 })
 
 describe('session revisions and approval', () => {
-  test('restores a typed snapshot and records the restore source', async () => {
-    await env.DB.prepare(dedent`
-      INSERT INTO session_revision (id, event_id, session_id, title, description, editor_user_id, created_at)
-      VALUES ('content-revision-1', ?, ?, 'UPDATED: Taming CI', 'First edit', ?, ?)
-    `).bind(ids.event, ids.session, ids.organizer, now + 2).run()
-    await env.DB.prepare("UPDATE event_session SET title = 'Second edit', description = 'Second edit' WHERE id = ?").bind(ids.session).run()
-    const revision = await env.DB.prepare("SELECT * FROM session_revision WHERE id = 'content-revision-1'").first<any>()
-    await env.DB.batch([
-      env.DB.prepare('UPDATE event_session SET title = ?, description = ?, updated_at = ? WHERE id = ? AND event_id = ?')
-        .bind(revision.title, revision.description, now + 3, ids.session, ids.event),
-      env.DB.prepare(dedent`
-        INSERT INTO session_revision (id, event_id, session_id, title, description, editor_user_id, restored_from_revision_id, created_at)
-        VALUES ('content-revision-restored', ?, ?, ?, ?, ?, ?, ?)
-      `).bind(ids.event, ids.session, revision.title, revision.description, ids.organizer, revision.id, now + 3),
-    ])
+  test('saves two attributed revisions and restores the first through organizer actions', async () => {
+    const first = await runWithCookie(organizerCookie, () => saveSessionContent({
+      orgId: ids.org,
+      eventId: ids.event,
+      sessionId: ids.session,
+      title: 'UPDATED: Taming CI',
+      description: 'This session now includes a live demo of remote build caching.',
+      trackId: null,
+      formatId: null,
+      coverImageFileId: null,
+    }))
+    await runWithCookie(organizerCookie, () => saveSessionContent({
+      orgId: ids.org,
+      eventId: ids.event,
+      sessionId: ids.session,
+      title: 'UPDATED: Taming CI',
+      description: 'This session now includes a live demo of remote build caching. Attendees should bring a laptop.',
+      trackId: null,
+      formatId: null,
+      coverImageFileId: null,
+    }))
+    await runWithCookie(organizerCookie, () => restoreSessionRevision({
+      orgId: ids.org,
+      eventId: ids.event,
+      sessionId: ids.session,
+      revisionId: first.revisionId,
+    }))
+
     expect(await env.DB.prepare('SELECT title, description FROM event_session WHERE id = ?').bind(ids.session).first())
-      .toEqual({ title: 'UPDATED: Taming CI', description: 'First edit' })
-    expect(await env.DB.prepare(dedent`
-      SELECT restored_from_revision_id AS restoredFromRevisionId
-      FROM session_revision WHERE id = 'content-revision-restored'
-    `).first()).toEqual({ restoredFromRevisionId: 'content-revision-1' })
+      .toEqual({
+        title: 'UPDATED: Taming CI',
+        description: 'This session now includes a live demo of remote build caching.',
+      })
+    const revisions = await getDb().query.sessionRevision.findMany({
+      where: { eventId: ids.event, sessionId: ids.session },
+      orderBy: { createdAt: 'asc', id: 'asc' },
+    })
+    expect(revisions).toHaveLength(3)
+    expect(revisions.every((revision) => revision.editorUserId === actionOrganizerId)).toBe(true)
+    expect(revisions[2]?.restoredFromRevisionId).toBe(first.revisionId)
   })
 
-  test('visibility is the public approval gate', async () => {
+  test('organizer approval exposes only the approved session on the anonymous program', async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO room (id, event_id, name, sort_order) VALUES ('content-room', ?, 'Main Stage', 0)").bind(ids.event),
+      env.DB.prepare(dedent`
+        INSERT INTO event_session (id, event_id, kind, status, title, visibility, room_id, starts_at, ends_at, created_at, updated_at)
+        VALUES ('content-private-session', ?, 'CONTENT', 'ACCEPTED', 'Unapproved session', 'PRIVATE', 'content-room', ?, ?, ?, ?)
+      `).bind(ids.event, now + 3_600_000, now + 5_400_000, now, now),
+      env.DB.prepare('UPDATE event SET program_published_at = ? WHERE id = ?').bind(now, ids.event),
+      env.DB.prepare("UPDATE event_session SET room_id = 'content-room', starts_at = ?, ends_at = ? WHERE id = ?")
+        .bind(now, now + 1_800_000, ids.session),
+    ])
     const before = await env.DB.prepare('SELECT status, visibility FROM event_session WHERE id = ?').bind(ids.session).first<any>()
-    await env.DB.prepare("UPDATE event_session SET visibility = 'PUBLIC' WHERE id = ?").bind(ids.session).run()
+    await runWithCookie(organizerCookie, () => setSessionVisibility({
+      orgId: ids.org,
+      eventId: ids.event,
+      sessionId: ids.session,
+      visibility: 'PUBLIC',
+    }))
     const after = await env.DB.prepare('SELECT status, visibility FROM event_session WHERE id = ?').bind(ids.session).first<any>()
     expect([isPublicContentEligible(before), isPublicContentEligible(after)]).toEqual([false, true])
+
+    const response = await app.handle(new Request('http://localhost/public/content-event/schedule.json'))
+    expect(response.status).toBe(200)
+    const program = await response.json<{ sessions: Array<{ id: string }> }>()
+    expect(program.sessions.map((session) => session.id)).toEqual([ids.session])
   })
 })

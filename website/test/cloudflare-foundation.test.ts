@@ -1,11 +1,14 @@
 // Workerd smoke tests for the real anonymous app, D1 migrations, and R2 binding.
 import { env } from 'cloudflare:workers'
+import { createExecutionContext, waitOnExecutionContext } from 'cloudflare:test'
+import * as schema from 'db/schema'
 import { createSpiceflowFetch } from 'spiceflow/client'
 import { SpiceflowTestResponse } from 'spiceflow/testing'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
-import { app } from '../src/app.tsx'
+import worker, { app } from '../src/app.tsx'
 import { getDb } from '../src/db.ts'
+import { runCron } from '../src/lib/emails/cron.ts'
 import { enqueueAndSend } from '../src/lib/emails/send.ts'
 
 const fixture = {
@@ -146,5 +149,76 @@ describe('Cloudflare integration foundation', () => {
       result: { inserted: true, sent: false },
       row: { status: 'QUEUED', attemptCount: 0, lastAttemptAt: null },
     })
+  })
+
+  test('cron queues one task reminder outbox snapshot for an incomplete assignment', async () => {
+    const now = Date.UTC(2026, 7, 10, 12)
+    const dueAt = now + 24 * 60 * 60 * 1000
+    const db = getDb()
+    await db.insert(schema.speaker).values({
+      id: 'workerd-reminder-speaker',
+      eventId: fixture.eventId,
+      firstName: 'Priya',
+      lastName: 'Raman',
+      email: 'priya-reminder@example.test',
+    })
+    await db.insert(schema.taskDefinition).values({
+      id: 'workerd-reminder-task',
+      eventId: fixture.eventId,
+      title: 'Sign speaker release form',
+      target: 'SPEAKER',
+      source: 'MANUAL',
+      assignmentPolicy: 'SELECTED',
+      dueAt,
+    })
+    await db.insert(schema.taskAssignment).values({
+      id: 'workerd-reminder-assignment',
+      eventId: fixture.eventId,
+      taskDefinitionId: 'workerd-reminder-task',
+      speakerId: 'workerd-reminder-speaker',
+      dueAt,
+    })
+
+    const ctx = createExecutionContext()
+    await worker.scheduled(
+      { scheduledTime: now, cron: '*/5 * * * *', noRetry() {} },
+      env,
+      ctx,
+    )
+    await waitOnExecutionContext(ctx)
+    const second = await runCron({ now })
+    const reminders = await db.query.emailMessage.findMany({
+      where: { speakerId: 'workerd-reminder-speaker', kind: 'TASK_REMINDER' },
+    })
+
+    expect({
+      second: second.taskRemindersQueued,
+      reminders: reminders.map((row) => ({
+        status: row.status,
+        subject: row.subject,
+        text: row.bodyText,
+        to: row.toEmail,
+      })),
+    }).toMatchInlineSnapshot(`
+      {
+        "reminders": [
+          {
+            "status": "QUEUED",
+            "subject": "Reminder: Sign speaker release form",
+            "text": "Hey Priya,
+
+      "Sign speaker release form" is still open in your Integration Summit speaker portal. It is due in 1 day.
+
+      It takes a couple of minutes:
+      https://opensession.dev/portal/workerd-fixture-event/tasks/workerd-reminder-assignment
+
+      If anything looks off, just reply to this email.
+      Integration Summit",
+            "to": "priya-reminder@example.test",
+          },
+        ],
+        "second": 0,
+      }
+    `)
   })
 })

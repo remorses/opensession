@@ -43,7 +43,8 @@ export const OUTBOX_BATCH_SIZE = 25
  */
 export const dedupeKeys = {
   submission: (formResponseId: string) => `submission:${formResponseId}`,
-  decision: (sessionId: string, speakerId: string) => `decision:${sessionId}:${speakerId}`,
+  decision: (sessionId: string, speakerId: string, decidedAt: number) =>
+    `decision:${sessionId}:${speakerId}:${decidedAt}`,
   taskAssigned: (assignmentId: string) => `task-assigned:${assignmentId}`,
   /** Day-bucketed: a 5-minute cron must not re-send the same nudge 288 times. */
   taskReminder: (assignmentId: string, day: string) =>

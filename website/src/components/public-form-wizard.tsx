@@ -10,7 +10,7 @@ import * as React from 'react'
 import { CheckCircle2Icon, ChevronLeftIcon, ChevronRightIcon, SaveIcon } from 'lucide-react'
 import { ErrorBoundary } from 'spiceflow/react'
 import type { FieldOption, FormSubmission, ValuesRecord } from '../forms/collect-fields.ts'
-import { collectFields } from '../forms/collect-fields.ts'
+import { collectFields, formatOptionValue } from '../forms/collect-fields.ts'
 import {
   buildWizardTabs,
   extractFormSteps,
@@ -20,6 +20,7 @@ import { FormRenderer } from '../forms/form-renderer.tsx'
 import { cn } from '../lib/utils.ts'
 import { SignInButton } from './login-button.tsx'
 import { Button } from './ui/button.tsx'
+import { toastActionError } from './ui/toast.tsx'
 import { Badge } from './ui/primitives.tsx'
 
 export type PublicFormWizardProps = {
@@ -116,7 +117,7 @@ export function PublicFormWizard({
     try {
       await onSubmit(submission)
     } catch (cause) {
-      setStepError(cause instanceof Error ? cause.message : 'Could not submit')
+      setStepError(toastActionError(cause, 'Could not submit'))
     } finally {
       setSubmitting(false)
     }
@@ -127,7 +128,7 @@ export function PublicFormWizard({
     try {
       await onSaveDraft(submission)
     } catch (cause) {
-      setStepError(cause instanceof Error ? cause.message : 'Could not save draft')
+      setStepError(toastActionError(cause, 'Could not save draft'))
     }
   }
 
@@ -324,12 +325,12 @@ function ReviewStep({
   const entries = [
     ...collected.fields.map((field) => ({
       label: field.name,
-      value: formatValue(submission.values[field.name]),
+      value: formatOptionValue(submission.values[field.name], field.options),
     })),
     ...submission.participants.flatMap((record, index) =>
       collected.participantFields.map((field) => ({
         label: `${field.name} (speaker ${index + 1})`,
-        value: formatValue(record[field.name]),
+        value: formatOptionValue(record[field.name], field.options),
       })),
     ),
   ]
@@ -424,19 +425,15 @@ function visibleSubmission({
   }
 }
 
-function formatValue(value: string | string[] | undefined): string {
-  if (value == null) return ''
-  if (Array.isArray(value)) return value.join(', ')
-  return value
-}
-
 export function SubmittedSuccess({
   title,
   referenceId,
+  message = 'Thanks, your response was saved.',
   footer,
 }: {
   title: string
   referenceId?: string
+  message?: string
   footer?: React.ReactNode
 }) {
   return (
@@ -444,7 +441,7 @@ export function SubmittedSuccess({
       <CheckCircle2Icon className="mx-auto size-10 text-success" />
       <div className="flex flex-col gap-2">
         <h2 className="text-2xl font-semibold">Submission received</h2>
-        <p className="text-muted-foreground">Thanks — your response was saved.</p>
+        <p className="text-muted-foreground">{message}</p>
       </div>
       <div className="mx-auto flex max-w-md flex-col gap-2 border-y border-border py-4 text-left text-sm">
         <span className="font-medium">{title}</span>

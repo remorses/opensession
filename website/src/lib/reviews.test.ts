@@ -221,9 +221,9 @@ describe('derived state, progress, coverage, results, sorting, and CSV', () => {
           "Taming CI",
           "AI Pair Programmer",
         ],
-        "csv": "session_id,title,aggregate,completed,assigned,originality,relevance,recommendation,comments
-      s1,Taming CI,3.3333,1,1,4,2,Accept,Strong
-      s2,AI Pair Programmer,5.0000,1,1,5,5,Accept,Excellent
+        "csv": "session_id,title,status,aggregate,completed,in_progress,recused,assigned,originality,relevance,recommendation,comments
+      s1,Taming CI,COMPLETED,3.3333,1,0,0,1,4,2,Accept,Strong
+      s2,AI Pair Programmer,COMPLETED,5.0000,1,0,0,1,5,5,Accept,Excellent
       ",
         "desc": [
           "AI Pair Programmer",
@@ -240,7 +240,10 @@ describe('derived state, progress, coverage, results, sorting, and CSV', () => {
             },
             "assigned": 1,
             "completed": 1,
+            "inProgress": 0,
+            "recused": 0,
             "sessionId": "s1",
+            "status": "COMPLETED",
             "title": "Taming CI",
           },
           {
@@ -253,7 +256,10 @@ describe('derived state, progress, coverage, results, sorting, and CSV', () => {
             },
             "assigned": 1,
             "completed": 1,
+            "inProgress": 0,
+            "recused": 0,
             "sessionId": "s2",
+            "status": "COMPLETED",
             "title": "AI Pair Programmer",
           },
         ],

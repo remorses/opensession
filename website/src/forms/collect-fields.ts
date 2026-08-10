@@ -74,6 +74,7 @@ export type FormScope = {
   values: ValuesRecord
   tracks?: FieldOption[]
   formats?: FieldOption[]
+  selected?: { track?: string; format?: string }
 } & Record<string, unknown>
 
 /** A non-empty safe-mdx scope enables calls by default. Form expressions only
@@ -104,6 +105,33 @@ export function normalizeOptions(input: unknown): FieldOption[] {
  *  so option membership checks run against real library ids. */
 export function libraryOptions(rows: Array<{ id: string; name: string }>): FieldOption[] {
   return rows.map((row) => ({ value: row.id, label: row.name }))
+}
+
+/** Format stored option ids for display without changing the submitted values. */
+export function formatOptionValue(
+  value: FieldValue | undefined,
+  options?: FieldOption[],
+): string {
+  if (value == null) return ''
+  const labels = new Map(options?.map((option) => [option.value, option.label]))
+  const display = (item: string) => labels.get(item) ?? item
+  return Array.isArray(value) ? value.map(display).join(', ') : display(value)
+}
+
+/** Add readable labels for dynamic library choices while values keep their FK ids. */
+export function withSelectedOptionLabels(scope: FormScope): FormScope {
+  const labelFor = (name: 'track' | 'format', options: FieldOption[] | undefined) => {
+    const value = scope.values[name]
+    if (typeof value !== 'string') return undefined
+    return options?.find((option) => option.value === value)?.label
+  }
+  return {
+    ...scope,
+    selected: {
+      track: labelFor('track', scope.tracks),
+      format: labelFor('format', scope.formats),
+    },
+  }
 }
 
 // ── Marker tree ─────────────────────────────────────────────────────
@@ -185,7 +213,7 @@ export function collectFields({ mdxSource, scope }: { mdxSource: string; scope: 
     markdown: mdxSource,
     mdast,
     components: collectorComponents as any,
-    scope,
+    scope: withSelectedOptionLabels(scope),
     evaluateOptions: FORM_EVALUATE_OPTIONS,
     // Invoke function components directly; host tags (p, h1, div, ...)
     // become pass-through children wrappers so markers inside markdown

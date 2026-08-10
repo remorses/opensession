@@ -13,7 +13,7 @@ const wellKnownFieldGuide = [
 
 export function formUseCase(purpose: string, target: string): string {
   if (purpose === 'CFP') return 'collecting conference talk proposals'
-  if (purpose === 'EVALUATION') return 'evaluating conference talk proposals'
+  if (purpose === 'EVALUATION') return 'scoring assigned conference submissions'
   if (target === 'SPEAKER') return 'updating speaker profiles'
   return 'collecting accepted-session materials'
 }
@@ -59,4 +59,15 @@ export function buildFormCustomizationPrompt({
 
     ${formAuthoringGuide}
   `
+}
+
+/** ChatGPT URL that pre-fills a new chat with `prompt`.
+ *
+ * Uses the hash form (`#?q=`) so the prompt stays client-side. A plain
+ * `?q=` query string hits Cloudflare's ~16 KB request-line limit on our
+ * full authoring-guide prompts (HTTP 431). ChatGPT still reads `q` from
+ * the hash the same way it reads it from the search string.
+ */
+export function chatgptPromptUrl(prompt: string): string {
+  return `https://chatgpt.com/#?q=${encodeURIComponent(prompt)}`
 }

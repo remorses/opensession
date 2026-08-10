@@ -65,12 +65,14 @@ export function TasksPage({ tab }: { tab: TasksTab }) {
   const visible = active.match
     ? tasks.filter((task) => task.target === active.match)
     : tasks
-  const visibleAssignmentIds = visible.flatMap((task) => task.assignments)
-    .filter((assignment) => assignmentFilter === 'all'
-      || (assignmentFilter === 'complete' ? assignment.status === 'COMPLETED' : assignment.status !== 'COMPLETED'))
+  const visibleIncompleteIds = visible.flatMap((task) => task.assignments)
+    .filter((assignment) => assignment.status !== 'COMPLETED')
+    .filter((assignment) => assignmentFilter !== 'complete')
     .map((assignment) => assignment.id)
-  const allAssignmentsSelected = visibleAssignmentIds.length > 0
-    && visibleAssignmentIds.every((id) => selectedAssignments.includes(id))
+  const selectedIncompleteIds = selectedAssignments.filter((id) => visible.some((task) =>
+    task.assignments.some((assignment) => assignment.id === id && assignment.status !== 'COMPLETED')))
+  const allAssignmentsSelected = visibleIncompleteIds.length > 0
+    && visibleIncompleteIds.every((id) => selectedAssignments.includes(id))
 
   return (
     <div className="flex flex-col gap-5">
@@ -78,14 +80,19 @@ export function TasksPage({ tab }: { tab: TasksTab }) {
         <div className="flex flex-col gap-1">
           <h1 className="text-xl font-semibold tracking-tight">Tasks</h1>
           <p className="text-sm text-muted-foreground">
-            Speaker and submission onboarding tasks. Assignments are created automatically when a
-            session is accepted.
+            Define what speakers must do, assign it to people or sessions, then track completion in the speaker portal.
           </p>
         </div>
         <Button onClick={() => setCreateOpen(true)}>
           <PlusIcon />
           Add task
         </Button>
+      </div>
+
+      <div className="grid gap-3 border-y border-border py-4 text-sm md:grid-cols-3">
+        <div><span className="font-medium">1. Definition</span><p className="text-muted-foreground">Choose instructions, action type, target, policy, and default due date.</p></div>
+        <div><span className="font-medium">2. Assignments</span><p className="text-muted-foreground">Each speaker gets a row with its own status and due-date override.</p></div>
+        <div><span className="font-medium">3. Speaker completion</span><p className="text-muted-foreground">Manual tasks use Mark complete. Form tasks use Submit and complete.</p></div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -95,15 +102,15 @@ export function TasksPage({ tab }: { tab: TasksTab }) {
           <option value="complete">Complete</option>
         </NativeSelect>
         <div className="flex items-center gap-2">
-          <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="checkbox" checked={allAssignmentsSelected} onChange={(event) => setSelectedAssignments(event.target.checked ? [...new Set([...selectedAssignments, ...visibleAssignmentIds])] : selectedAssignments.filter((id) => !visibleAssignmentIds.includes(id)))} />Select visible assignments</label>
-          <Button variant="outline" disabled={reminding || selectedAssignments.length === 0} onClick={() => startReminder(async () => {
+          <label className="flex items-center gap-2 text-sm text-muted-foreground"><input type="checkbox" checked={allAssignmentsSelected} disabled={visibleIncompleteIds.length === 0} onChange={(event) => setSelectedAssignments(event.target.checked ? [...new Set([...selectedAssignments, ...visibleIncompleteIds])] : selectedAssignments.filter((id) => !visibleIncompleteIds.includes(id)))} />Select visible incomplete</label>
+          <Button variant="outline" disabled={reminding || selectedIncompleteIds.length === 0} onClick={() => startReminder(async () => {
             try {
-              const result = await remindTaskAssignments({ orgId: currentOrgId, eventId: event.id, assignmentIds: selectedAssignments })
+              const result = await remindTaskAssignments({ orgId: currentOrgId, eventId: event.id, assignmentIds: selectedIncompleteIds })
               toast.success(`Queued ${result.queued} task reminders`)
             } catch (error) {
               toastActionError(error, 'Could not send task reminders')
             }
-          })}>{reminding ? 'Sending...' : `Remind ${selectedAssignments.length || ''}`}</Button>
+          })}>{reminding ? 'Sending...' : `Remind selected incomplete (${selectedIncompleteIds.length})`}</Button>
         </div>
       </div>
 
@@ -241,11 +248,13 @@ function TaskRow({
         <Badge variant="outline" className="px-1.5 capitalize">
           {task.target.toLowerCase()}
         </Badge>
+        <div className="text-xs text-muted-foreground">{task.target === 'SPEAKER' ? 'One task per selected speaker' : 'Tied to an accepted session'}</div>
       </TableCell>
       <TableCell>
         <Badge variant="secondary" className="px-1.5 capitalize">
           {task.source.toLowerCase()}
         </Badge>
+        <div className="text-xs text-muted-foreground">{task.source === 'MANUAL' ? 'Speaker marks it complete' : 'Linked form must be submitted'}</div>
       </TableCell>
       <TableCell className="text-muted-foreground">
         {task.dueAt ? formatDateUTC(task.dueAt) : '—'}
@@ -286,7 +295,7 @@ function TaskRow({
                     taskDefinitionId: task.id,
                   })
                 } catch (err) {
-                  setError(err instanceof Error ? err.message : 'Delete failed')
+                  setError(toastActionError(err, 'Delete failed'))
                 }
               })
             }}
@@ -311,9 +320,9 @@ function TaskRow({
     {task.assignments.filter((assignment) => assignmentFilter === 'all' || (assignmentFilter === 'complete' ? assignment.status === 'COMPLETED' : assignment.status !== 'COMPLETED')).map((assignment) => <TableRow key={assignment.id} className="bg-muted/20">
       <TableCell className="pl-8 text-sm"><label className="flex items-center gap-2"><input type="checkbox" aria-label={`Select ${task.title} for ${assignment.speakerName}`} checked={selectedAssignments.includes(assignment.id)} onChange={(event) => onAssignmentSelected(assignment.id, event.target.checked)} />{assignment.speakerName}</label></TableCell>
       <TableCell colSpan={2} className="text-xs text-muted-foreground">{assignment.sessionTitle ?? 'Speaker task'}</TableCell>
-      <TableCell><Input aria-label={`Due date for ${assignment.speakerName}`} type="date" defaultValue={assignment.dueAt ? new Date(assignment.dueAt).toISOString().slice(0, 10) : ''} onBlur={(event) => updateTaskAssignmentDue({ orgId, eventId, assignmentId: assignment.id, dueAt: event.target.value ? Date.parse(`${event.target.value}T23:59:59Z`) : null }).catch((error) => { setError(toastActionError(error, 'Could not update the due date')) })} /></TableCell>
+      <TableCell><Input aria-label={`Due date for ${assignment.speakerName}`} type="date" disabled={pending} defaultValue={assignment.dueAt ? new Date(assignment.dueAt).toISOString().slice(0, 10) : ''} onBlur={(event) => { const dueAt = event.target.value ? Date.parse(`${event.target.value}T23:59:59Z`) : null; startTransition(async () => { try { await updateTaskAssignmentDue({ orgId, eventId, assignmentId: assignment.id, dueAt }) } catch (error) { setError(toastActionError(error, 'Could not update the due date')) } }) }} /></TableCell>
       <TableCell><Badge variant={assignment.status === 'COMPLETED' ? 'success' : 'secondary'}>{assignment.status.toLowerCase().replace('_', ' ')}</Badge></TableCell>
-      <TableCell><Button size="sm" variant="ghost" disabled={assignment.status === 'COMPLETED'} onClick={async () => { try { const result = await remindTaskAssignments({ orgId, eventId, assignmentIds: [assignment.id] }); toast.success(`Queued ${result.queued} task reminder`) } catch (error) { setError(toastActionError(error, 'Could not send the reminder')) } }}>Remind</Button></TableCell>
+      <TableCell><Button size="sm" variant="ghost" loading={pending} disabled={assignment.status === 'COMPLETED'} onClick={() => startTransition(async () => { try { const result = await remindTaskAssignments({ orgId, eventId, assignmentIds: [assignment.id] }); toast.success(`Queued ${result.queued} task reminder`) } catch (error) { setError(toastActionError(error, 'Could not send the reminder')) } })}>{assignment.status === 'COMPLETED' ? 'Complete' : 'Remind'}</Button></TableCell>
     </TableRow>)}
   </>)
 }
@@ -428,7 +437,7 @@ function TaskDialog({
                     }
                     onOpenChange(false)
                   } catch (err) {
-                    setError(err instanceof Error ? err.message : 'Save failed')
+                    setError(toastActionError(err, 'Save failed'))
                   }
                 })
               }}
@@ -449,7 +458,7 @@ function TaskDialog({
                     disabled={mode === 'edit'}
                     value={target}
                     onChange={(e) => {
-                      const next = e.target.value as typeof target
+                      const next = e.target.value === 'SUBMISSION' ? 'SUBMISSION' : 'SPEAKER'
                       setTarget(next)
                       setFormId('')
                     }}
@@ -463,7 +472,7 @@ function TaskDialog({
                   <NativeSelect
                     disabled={mode === 'edit'}
                     value={source}
-                    onChange={(e) => setSource(e.target.value as typeof source)}
+                    onChange={(e) => setSource(e.target.value === 'FORM' ? 'FORM' : 'MANUAL')}
                   >
                     <option value="MANUAL">Manual</option>
                     <option value="FORM">Form</option>
@@ -471,7 +480,7 @@ function TaskDialog({
                 </label>
               </div>
               {mode === 'create' ? <>
-                <label className="flex flex-col gap-1.5 text-sm font-medium">Assignment policy<NativeSelect value={assignmentPolicy} onChange={(event) => setAssignmentPolicy(event.target.value as typeof assignmentPolicy)}><option value="SELECTED">Selected only</option><option value="ALL_ACCEPTED">All accepted, including future</option></NativeSelect></label>
+                <label className="flex flex-col gap-1.5 text-sm font-medium">Assignment policy<NativeSelect value={assignmentPolicy} onChange={(event) => setAssignmentPolicy(event.target.value === 'ALL_ACCEPTED' ? 'ALL_ACCEPTED' : 'SELECTED')}><option value="SELECTED">Selected only</option><option value="ALL_ACCEPTED">All accepted, including future</option></NativeSelect><span className="font-normal text-muted-foreground">{assignmentPolicy === 'SELECTED' ? 'Creates assignments only for the people or accepted sessions selected below.' : 'Assigns current accepted participants now and future accepted participants automatically.'}</span></label>
                 {assignmentPolicy === 'SELECTED' ? <div className="grid max-h-48 gap-3 overflow-auto rounded-md border border-border p-3 sm:grid-cols-2">
                   <fieldset className="flex flex-col gap-2"><legend className="text-sm font-medium">Speakers</legend>{speakers.map((speaker) => <label key={speaker.id} className="flex items-center gap-2 text-sm"><input type="checkbox" checked={speakerIds.includes(speaker.id)} onChange={(event) => setSpeakerIds(event.target.checked ? [...speakerIds, speaker.id] : speakerIds.filter((id) => id !== speaker.id))} />{speaker.name}</label>)}</fieldset>
                   <fieldset className="flex flex-col gap-2"><legend className="text-sm font-medium">Accepted sessions</legend>{acceptedSessions.map((session) => <label key={session.id} className="flex items-start gap-2 text-sm"><input type="checkbox" checked={sessionIds.includes(session.id)} onChange={(event) => setSessionIds(event.target.checked ? [...sessionIds, session.id] : sessionIds.filter((id) => id !== session.id))} /><span>{session.title}<span className="block text-xs text-muted-foreground">{session.speakerNames.join(', ')}</span></span></label>)}</fieldset>
@@ -495,12 +504,13 @@ function TaskDialog({
                 </label>
               ) : null}
               <label className="flex flex-col gap-1.5 text-sm font-medium">
-                Due date (optional)
+                Definition due date (optional)
                 <Input
                   type="date"
                   value={dueDate}
                   onChange={(e) => setDueDate(e.target.value)}
                 />
+                <span className="font-normal text-muted-foreground">Used for new assignments. Changing it later does not replace existing row due dates; edit a row to override that assignment.</span>
               </label>
               <label className="flex flex-col gap-1.5 text-sm font-medium">
                 Instructions (optional)

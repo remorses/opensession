@@ -40,9 +40,15 @@ export function canViewSession(speakerId: string, session: PortalSessionRow): bo
   return isSessionOwner(speakerId, session)
 }
 
-/** Speakers may edit their own PENDING submissions (submitter or participant). */
-export function canEditSession(speakerId: string, session: PortalSessionRow): boolean {
-  return isSessionOwner(speakerId, session) && session.status === 'PENDING'
+/** Speakers may edit their own PENDING submissions while the owning CFP is open. */
+export function canEditSession(
+  { speakerId, session, formIsOpen = true }: {
+    speakerId: string
+    session: PortalSessionRow
+    formIsOpen?: boolean
+  },
+): boolean {
+  return formIsOpen && isSessionOwner(speakerId, session) && session.status === 'PENDING'
 }
 
 /** Withdraw is a guarded transition to WITHDRAWN for owners. */
@@ -71,11 +77,12 @@ export function canCompleteManualAssignment(assignment: PortalAssignmentRow): bo
   return assignment.status === 'NOT_STARTED' || assignment.status === 'IN_PROGRESS'
 }
 
-/** FORM assignments complete only after a successful form response submit. */
+/** FORM assignments can be submitted again so completed deliverables can receive
+ * replacement versions without reopening the assignment. */
 export function canSubmitFormAssignment(assignment: PortalAssignmentRow): boolean {
   if (assignment.source !== 'FORM') return false
   if (!assignment.formId) return false
-  return assignment.status === 'NOT_STARTED' || assignment.status === 'IN_PROGRESS'
+  return true
 }
 
 export function assignmentOwnedBySpeaker(

@@ -58,7 +58,7 @@ export function EventSwitch() {
               key={event.id}
               onClick={() => {
                 if (event.id === currentEventId) return
-                router.push(`/org/${currentOrgId}/e/${event.id}`)
+                router.push(router.href('/org/:orgId/e/:eventId', { orgId: currentOrgId, eventId: event.id }))
               }}
             >
               <div className="flex size-6 items-center justify-center rounded-md border">

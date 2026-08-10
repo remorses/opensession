@@ -68,6 +68,7 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
   const { currentOrgId } = useLoaderData('/org/:orgId/*')
   const { event } = useLoaderData('/org/:orgId/e/:eventId/*')
   const [selected, setSelected] = useState<string[]>([])
+  const [exporting, setExporting] = useState(false)
   const [reminding, startReminder] = useTransition()
   const visible = fileSlots.filter((slot) => {
     if (status === 'complete' && slot.status !== 'COMPLETED') return false
@@ -89,6 +90,30 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
       status: next.status ?? status,
       kind: next.kind ?? kind,
     }))
+  }
+
+  async function downloadZip() {
+    if (selectedSlots.length === 0) return
+    const fileLabel = selectedSlots.length === 1 ? 'file' : 'files'
+    setExporting(true)
+    toast.info(`Generating ${selectedSlots.length} current ${fileLabel}`)
+    try {
+      const response = await fetch(zipHref)
+      if (!response.ok) throw new Error((await response.text()) || 'Could not generate the ZIP')
+      const url = URL.createObjectURL(await response.blob())
+      const link = document.createElement('a')
+      link.href = url
+      link.download = `${event.slug}-files.zip`
+      document.body.appendChild(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      toast.success(`ZIP ready with ${selectedSlots.length} current ${fileLabel}`)
+    } catch (error) {
+      toastActionError(error, 'Could not generate the ZIP')
+    } finally {
+      setExporting(false)
+    }
   }
 
   return (
@@ -121,17 +146,20 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
             {reminding ? 'Sending...' : `Remind ${incompleteAssignments.length || ''}`}
           </Button>
           <Button
-            disabled={selectedSlots.length === 0}
-            onClick={() => {
-              if (selectedSlots.length === 0) return
-              toast.success(`Generating ${selectedSlots.length} current files`)
-              window.location.href = zipHref
-            }}
+            disabled={exporting || selectedSlots.length === 0}
+            onClick={downloadZip}
           >
             <DownloadIcon data-icon="inline-start" />
-            Download current ZIP {selectedSlots.length || ''}
+            {exporting ? 'Generating ZIP...' : `Download current ZIP ${selectedSlots.length || ''}`}
           </Button>
         </div>
+      </div>
+
+      <div className="grid gap-3 border-y border-border py-4 text-sm sm:grid-cols-2 lg:grid-cols-4">
+        <div><span className="font-medium">Assignment status</span><p className="text-muted-foreground">Tracks whether the whole task is not started, in progress, or complete.</p></div>
+        <div><span className="font-medium">File presence</span><p className="text-muted-foreground">A task can have no upload, one upload, or several immutable versions.</p></div>
+        <div><span className="font-medium">Current version</span><p className="text-muted-foreground">The newest upload. Selected current uploads are included in the ZIP.</p></div>
+        <div><span className="font-medium">Submitted version</span><p className="text-muted-foreground">The version selected when the speaker last submitted the form.</p></div>
       </div>
 
       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -140,7 +168,7 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
             aria-label="Filter files by task status"
             className="w-40"
             value={status}
-            onChange={(event) => setFilters({ status: event.target.value as FilesStatus })}
+            onChange={(event) => setFilters({ status: event.target.value === 'complete' ? 'complete' : event.target.value === 'incomplete' ? 'incomplete' : 'all' })}
           >
             <option value="all">All statuses</option>
             <option value="incomplete">Incomplete</option>
@@ -150,7 +178,7 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
             aria-label="Filter files by kind"
             className="w-40"
             value={kind}
-            onChange={(event) => setFilters({ kind: event.target.value as FilesKind })}
+            onChange={(event) => setFilters({ kind: event.target.value === 'slides' ? 'slides' : event.target.value === 'images' ? 'images' : event.target.value === 'documents' ? 'documents' : 'all' })}
           >
             <option value="all">All file kinds</option>
             <option value="slides">Slides</option>
@@ -174,8 +202,12 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
         <EmptyState
           icon={<FilesIcon />}
           title="No matching deliverables"
-          description="Change the status or file-kind filter, or create a form task with a file field."
-        />
+          description="Change the filters, or create a form task with a file-upload field in Tasks."
+        >
+          <Button render={<Link href={router.href(`/org/${currentOrgId}/e/${event.id}/tasks`)} />}>
+            Create a file form task
+          </Button>
+        </EmptyState>
       ) : (
         <Frame>
           <Table>
@@ -212,7 +244,7 @@ export function FilesPage({ status, kind, fileSlots, otherFiles }: {
             <h2 className="text-sm font-medium">Other event assets</h2>
             <div className="grid gap-2 sm:grid-cols-2">
               {otherFiles.map((file) => (
-                <Link key={file.id} href={`/files/${file.id}`} className="text-sm no-underline hover:underline">
+                <Link key={file.id} href={router.href('/files/:fileId', { fileId: file.id })} className="text-sm no-underline hover:underline">
                   <span className="font-medium">{file.fileName}</span>
                   <span className="block text-xs text-muted-foreground">
                     {file.kind.toLowerCase()} · {formatDateTimeUTC(file.createdAt)}
@@ -284,7 +316,7 @@ function FileSlotRows({ eventId, slot, selected, onSelected }: {
                 ) : slot.versions.map((file, index) => (
                   <div key={file.id} className="flex items-center justify-between gap-3 border-b border-border pb-2 last:border-0">
                     <div className="min-w-0 text-sm">
-                      <Link href={`/files/${file.id}`} className="font-medium no-underline hover:underline">
+                      <Link href={router.href('/files/:fileId', { fileId: file.id })} className="font-medium no-underline hover:underline">
                         {file.fileName}
                       </Link>
                       <div className="text-xs text-muted-foreground">

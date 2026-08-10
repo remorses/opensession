@@ -48,7 +48,12 @@ describe('canTransition', () => {
     expect(canTransition('DECLINE_QUEUE', 'WITHDRAWN')).toBe(true)
   })
 
-  test('rejects terminal and illegal edges', () => {
+  test('allows explicit redecision paths from finalized outcomes', () => {
+    expect(canTransition('ACCEPTED', 'DECLINE_QUEUE')).toBe(true)
+    expect(canTransition('DECLINED', 'ACCEPT_QUEUE')).toBe(true)
+  })
+
+  test('rejects withdrawn and illegal edges', () => {
     expect(canTransition('ACCEPTED', 'PENDING')).toBe(false)
     expect(canTransition('DECLINED', 'PENDING')).toBe(false)
     expect(canTransition('WITHDRAWN', 'PENDING')).toBe(false)
@@ -87,13 +92,29 @@ describe('applyTransition', () => {
     expect(applyTransition(base('DECLINE_QUEUE'), 'DECLINED', 8_000).decidedAt).toBe(8_000)
   })
 
+  test('clears the obsolete decision and delivery timestamps during redecision', () => {
+    expect(applyTransition(base('ACCEPTED', {
+      decidedAt: 7_000,
+      notifiedAt: 8_000,
+    }), 'DECLINE_QUEUE', 9_000)).toMatchInlineSnapshot(`
+      {
+        "decidedAt": null,
+        "notifiedAt": null,
+        "status": "DECLINE_QUEUE",
+        "submittedAt": 1000,
+        "updatedAt": 9000,
+        "withdrawnAt": null,
+      }
+    `)
+  })
+
   test('stamps withdrawnAt on withdraw', () => {
     expect(applyTransition(base('PENDING'), 'WITHDRAWN', 6_000).withdrawnAt).toBe(6_000)
   })
 
   test('never invents notifiedAt (field absent from patch)', () => {
     const patch = applyTransition(base('ACCEPT_QUEUE'), 'ACCEPTED', 1)
-    expect('notifiedAt' in patch).toBe(false)
+    expect(patch.notifiedAt).toBeUndefined()
   })
 
   test('rejects illegal transitions', () => {
@@ -114,8 +135,8 @@ describe('applyTransition', () => {
 })
 
 describe('planBulkStatusUpdate / planNotifyQueue', () => {
-  test('bulk skips illegal rows and keeps legal ones', () => {
-    const planned = planBulkStatusUpdate(
+  test('bulk rejects mixed valid and invalid rows instead of silently skipping', () => {
+    expect(() => planBulkStatusUpdate(
       [
         { id: 'a', ...base('PENDING') },
         { id: 'b', ...base('ACCEPTED') },
@@ -123,9 +144,7 @@ describe('planBulkStatusUpdate / planNotifyQueue', () => {
       ],
       'ACCEPT_QUEUE',
       10,
-    )
-    expect(planned.map((row) => row.id)).toEqual(['a'])
-    expect(planned[0]!.status).toBe('ACCEPT_QUEUE')
+    )).toThrow('2 selected sessions cannot move to ACCEPT_QUEUE')
   })
 
   test('notify only finalises the matching queue', () => {
@@ -228,13 +247,17 @@ describe('sessionMatchesQuery / abstractsToCsv', () => {
         formatName: 'Talk',
         speakerNames: ['Ada', 'Grace'],
         formName: 'CFP',
+        avgRating: 4.5,
+        yes: 2,
+        maybe: 1,
+        no: 0,
         notifiedAt: null,
         submittedAt: 1_700_000_000_000,
       },
     ])
     expect(csv).toMatchInlineSnapshot(`
-      "status,title,track,format,speakers,form,notified_at,submitted_at
-      PENDING,"Hello, ""world""",,Talk,Ada; Grace,CFP,,1700000000000
+      "status,title,track,format,speakers,form,avg_rating,yes,maybe,no,notified_at,submitted_at
+      PENDING,"Hello, ""world""",,Talk,Ada; Grace,CFP,4.50,2,1,0,,1700000000000
       "
     `)
   })

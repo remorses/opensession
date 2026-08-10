@@ -95,6 +95,14 @@ export function EmailsPage({ tab }: { tab: EmailsTab }) {
         </p>
       </div>
 
+      <div className="grid gap-3 border-y border-border py-4 text-sm sm:grid-cols-3">
+        <div><Badge variant="outline">Queued</Badge><p className="text-muted-foreground">Saved in the outbox and waiting for delivery or the next retry.</p></div>
+        <div><Badge variant="secondary">Sent</Badge><p className="text-muted-foreground">Accepted by the email service. Replies still go to the event contact.</p></div>
+        <div><Badge variant="destructive">Failed</Badge><p className="text-muted-foreground">Delivery did not complete. Review the error, then use Retry.</p></div>
+      </div>
+
+      <p className="max-w-3xl text-sm text-muted-foreground">This log combines decision notices, automatic reminders, schedule and calendar updates, and custom speaker messages. Create those messages in their owning workflow; use this page to inspect delivery.</p>
+
       <div className="flex items-center gap-1 border-b border-border">
         {[...tabs, { value: 'reminders' as const, label: 'Reminders', status: null }].map(
           (row) => {

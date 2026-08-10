@@ -2,10 +2,31 @@
 import { describe, expect, test } from 'vitest'
 import {
   autoPlaceSessions,
+  buildPublicWidgetScript,
   isPublicProgramSession,
   projectPublicProgram,
+  renderPublicWidgetHtml,
+  renderPublicWidgetXml,
+  summarizeProgramPublication,
   type PublicProgramSource,
 } from './public-program.ts'
+import { nextTrackColor } from './utils.ts'
+
+describe('track palette defaults', () => {
+  test('selects distinct unused colors before cycling the palette', () => {
+    expect([
+      nextTrackColor([]),
+      nextTrackColor(['#2563eb']),
+      nextTrackColor(['#2563EB', '#7c3aed']),
+    ]).toMatchInlineSnapshot(`
+      [
+        "#2563eb",
+        "#7c3aed",
+        "#db2777",
+      ]
+    `)
+  })
+})
 
 const DAY = '2027-05-12'
 
@@ -62,6 +83,15 @@ describe('automatic agenda placement', () => {
 })
 
 describe('public program projection', () => {
+  test('summarizes the scheduled public handoff before publication', () => {
+    expect(summarizeProgramPublication([
+      { status: 'ACCEPTED', visibility: 'PUBLIC', roomId: 'room', startsAt: 100, endsAt: 200 },
+      { status: 'ACCEPTED', visibility: 'PRIVATE', roomId: 'room', startsAt: 200, endsAt: 300 },
+      { status: 'ACCEPTED', visibility: 'PRIVATE', roomId: null, startsAt: null, endsAt: null },
+      { status: 'PENDING', visibility: 'PRIVATE', roomId: 'room', startsAt: 300, endsAt: 400 },
+    ])).toEqual({ publicScheduledCount: 1, privateScheduledCount: 1 })
+  })
+
   test('uses one eligibility gate and keeps cross-feed ids consistent', () => {
     const source: PublicProgramSource = {
       event: {
@@ -70,10 +100,10 @@ describe('public program projection', () => {
         location: 'Moscone West', description: 'Conference', programPublishedAt: 3,
       },
       sessions: [
-        session('visible', 'ACCEPTED', 'PUBLIC', 100, 200),
-        session('private', 'ACCEPTED', 'PRIVATE', 100, 200),
-        session('pending', 'PENDING', 'PUBLIC', 100, 200),
-        session('unplaced', 'ACCEPTED', 'PUBLIC', null, null),
+        session({ id: 'visible', status: 'ACCEPTED', visibility: 'PUBLIC', startsAt: 100, endsAt: 200 }),
+        session({ id: 'private', status: 'ACCEPTED', visibility: 'PRIVATE', startsAt: 100, endsAt: 200 }),
+        session({ id: 'pending', status: 'PENDING', visibility: 'PUBLIC', startsAt: 100, endsAt: 200 }),
+        session({ id: 'unplaced', status: 'ACCEPTED', visibility: 'PUBLIC', startsAt: null, endsAt: null }),
       ],
     }
 
@@ -110,9 +140,42 @@ describe('public program projection', () => {
       status: 'ACCEPTED', visibility: 'PUBLIC', roomId: null, startsAt: null, endsAt: null,
     })).toBe(false)
   })
+
+  test('renders basic HTML, XML, and the styled embed script from the shared projection', () => {
+    const program = projectPublicProgram({
+      event: {
+        id: 'event', name: 'DevFlow & Friends', slug: 'devflow', status: 'ACTIVE',
+        timezone: 'America/Los_Angeles', startsAt: Date.UTC(2027, 4, 12), endsAt: Date.UTC(2027, 4, 13),
+        location: 'Moscone <West>', description: 'Conference', programPublishedAt: 3,
+      },
+      sessions: [session({
+        id: 'visible',
+        status: 'ACCEPTED',
+        visibility: 'PUBLIC',
+        startsAt: Date.UTC(2027, 4, 12, 16),
+        endsAt: Date.UTC(2027, 4, 12, 16, 30),
+      })],
+    })
+    if (!program) throw new Error('expected a published program')
+
+    expect(renderPublicWidgetHtml({ program, view: 'sessions', filters: {}, fields: ['time', 'room'] })).toMatchInlineSnapshot(`"<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>DevFlow &amp; Friends sessions</title></head><body><main><h1>DevFlow &amp; Friends</h1><article><h2>visible</h2><p>Wed, May 12 · 09:00 – 09:30</p><p>Main Stage</p></article></main></body></html>"`)
+    expect(renderPublicWidgetXml({ program, view: 'sessions', filters: {} })).toMatchInlineSnapshot(`"<?xml version="1.0" encoding="UTF-8"?><program><event id="event"><name>DevFlow &amp; Friends</name><slug>devflow</slug></event><sessions><session id="visible"><title>visible</title><description>visible description</description><startsAt>1810137600000</startsAt><endsAt>1810139400000</endsAt><room>Main Stage</room><track>AI Engineering</track><format>Talk</format><speakers><speaker id="speaker-visible">Priya Raman</speaker></speakers></session></sessions></program>"`)
+    expect(buildPublicWidgetScript({
+      iframeUrl: 'https://opensession.dev/embed/devflow/sessions?track=ai',
+      title: 'DevFlow "sessions"',
+    })).toMatchInlineSnapshot(`
+      "(()=>{const s=document.currentScript;if(!s)return;const f=document.createElement('iframe');f.src=\"https://opensession.dev/embed/devflow/sessions?track=ai\";f.title=\"DevFlow \\\"sessions\\\"\";f.loading='lazy';f.style.cssText='width:100%;height:720px;border:0';f.allow='clipboard-write';s.insertAdjacentElement('afterend',f)})();"
+    `)
+  })
 })
 
-function session(id: string, status: string, visibility: 'PUBLIC' | 'PRIVATE', startsAt: number | null, endsAt: number | null) {
+function session({ id, status, visibility, startsAt, endsAt }: {
+  id: string
+  status: string
+  visibility: 'PUBLIC' | 'PRIVATE'
+  startsAt: number | null
+  endsAt: number | null
+}) {
   return {
     id,
     kind: 'CONTENT' as const,

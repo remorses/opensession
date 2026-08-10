@@ -4,9 +4,8 @@
 'use client'
 
 import { useEffect, useState } from 'react'
-// Using <a> instead of <Link> because holocron doc paths are not registered
-// in the Spiceflow router and Link expects a ResolvedHref type.
 import { VideoBackgroundShader } from '@holocron.so/vite/mdx'
+import { Link, router } from 'spiceflow/react'
 
 const HERO_FONT = "'IvarText', serif"
 
@@ -49,8 +48,8 @@ export function HeroSection() {
 
         {/* CTAs */}
         <div className='flex gap-2.5 flex-wrap justify-center'>
-          <a
-            href='/login/google'
+          <Link
+            href={router.href('/login/google')}
             className='inline-flex items-center gap-2 rounded-md bg-primary/90 backdrop-blur-sm h-9 px-4 text-sm font-medium text-primary-foreground no-underline hover:bg-primary/80 transition-colors'
           >
             <svg className='size-4' viewBox='0 0 24 24' fill='currentColor'>
@@ -60,13 +59,13 @@ export function HeroSection() {
               <path d='M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z' />
             </svg>
             Login with Google
-          </a>
-          <a
-            href='#features'
+          </Link>
+          <Link
+            href={router.href('/#features')}
             className='inline-flex items-center gap-2 rounded-md backdrop-blur-sm h-9 px-4 text-sm font-medium text-foreground no-underline hover:bg-accent/50 transition-colors'
           >
             Learn more ↓
-          </a>
+          </Link>
         </div>
       </div>
     </div>

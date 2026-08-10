@@ -3,7 +3,7 @@
 // that change names/required/limits fail loudly.
 import { describe, expect, test } from 'vitest'
 import { collectFields } from './collect-fields.ts'
-import { buildFormCustomizationPrompt } from './form-customization-prompt.ts'
+import { buildFormCustomizationPrompt, chatgptPromptUrl } from './form-customization-prompt.ts'
 import { extractFormSteps } from './form-steps.ts'
 import {
   starterCfpTemplate,
@@ -172,6 +172,7 @@ describe('starterSpeakerProfileTemplate', () => {
       'speaker.websiteUrl',
       'speaker.linkedinUrl',
       'speaker.twitterUrl',
+      'speaker.travelLogistics',
     ])
     expect(result.participants).toBeNull()
   })
@@ -190,4 +191,19 @@ test('builds a complete ChatGPT customization prompt from the live field registr
   expect(prompt).toContain('`title` → `eventSession.title`')
   expect(prompt).toContain('`speaker.email` → `speaker.email`')
   expect(prompt).toContain('```mdx\n# Submit\n\n<TextField name="title" label="Talk title" />\n```')
+})
+
+test('builds a ChatGPT URL that pre-fills the prompt via the hash form', () => {
+  const prompt = buildFormCustomizationPrompt({
+    formName: 'Call for Papers',
+    useCase: 'collecting conference talk proposals',
+    fieldNames: ['title'],
+    mdxSource: '<TextField name="title" label="Talk title" />',
+  })
+  const url = chatgptPromptUrl(prompt)
+  expect(url.startsWith('https://chatgpt.com/#?q=')).toBe(true)
+  expect(decodeURIComponent(url.slice('https://chatgpt.com/#?q='.length))).toBe(prompt)
+  // Hash form keeps the long authoring guide off the request line.
+  expect(url.includes('?q=')).toBe(true)
+  expect(new URL(url).search).toBe('')
 })

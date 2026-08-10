@@ -14,6 +14,8 @@ import { validateSubmission } from '../forms/validate.ts'
 import {
   assertCfpResponseLimit,
   flattenSubmissionValues,
+  formScheduleBlock,
+  formScheduleBlockMessage,
   getFileFieldNames,
   isResumableCfpDraft,
   restoreSubmissionValues,
@@ -40,27 +42,96 @@ export type PublicCfpForm = {
   formats: Array<typeof schema.format.$inferSelect>
 }
 
-export async function getPublicCfp(eventSlug: string, formSlug: string): Promise<PublicCfpForm | null> {
+/** Why a public /submit URL cannot open. Safe to show on the unavailable page. */
+export type PublicCfpBlockReason =
+  | 'event_not_found'
+  | 'event_draft'
+  | 'event_archived'
+  | 'form_not_found'
+  | 'form_draft'
+  | 'form_closed'
+  | 'form_archived'
+  | 'form_past_deadline'
+  | 'form_not_yet_open'
+  | 'form_no_version'
+
+export type PublicCfpLookup =
+  | { ok: true; cfp: PublicCfpForm }
+  | { ok: false; reason: PublicCfpBlockReason }
+
+/** Human copy for the public unavailable page (and organizer share hints). */
+export function publicCfpBlockMessage(reason: PublicCfpBlockReason): string {
+  switch (reason) {
+    case 'event_not_found':
+      return 'No event matches this link.'
+    case 'event_draft':
+      return 'This event is still a draft. Set the event status to Active in Settings before the public CFP link works.'
+    case 'event_archived':
+      return 'This event is archived, so its public CFP is closed.'
+    case 'form_not_found':
+      return 'No CFP form matches this link.'
+    case 'form_draft':
+      return 'This CFP form is still a draft. Open it in the form Settings (status → Open) before speakers can submit.'
+    case 'form_closed':
+      return 'This CFP form is closed and no longer accepts submissions.'
+    case 'form_archived':
+      return 'This CFP form is archived and no longer public.'
+    case 'form_past_deadline':
+      return 'This CFP form closed at its deadline and no longer accepts submissions.'
+    case 'form_not_yet_open':
+      return 'This CFP form is not open yet. Its open date is still in the future.'
+    case 'form_no_version':
+      return 'This CFP form has no published version yet.'
+  }
+}
+
+/**
+ * Resolve a public CFP URL. Requires event ACTIVE and form schedule open.
+ * opensAt/closesAt are optional: null means no bound (open immediately /
+ * never auto-close). Status DRAFT still hides unfinished forms.
+ */
+export async function lookupPublicCfp(eventSlug: string, formSlug: string): Promise<PublicCfpLookup> {
   const db = getDb()
   const event = await db.query.event.findFirst({
-    where: { slug: eventSlug, status: 'ACTIVE' },
+    where: { slug: eventSlug },
     with: {
       tracks: { orderBy: { sortOrder: 'asc', name: 'asc' } },
       formats: { orderBy: { sortOrder: 'asc', name: 'asc' } },
     },
   })
-  if (!event) return null
+  if (!event) return { ok: false, reason: 'event_not_found' }
+  if (event.status === 'DRAFT') return { ok: false, reason: 'event_draft' }
+  if (event.status === 'ARCHIVED') return { ok: false, reason: 'event_archived' }
+  if (event.status !== 'ACTIVE') return { ok: false, reason: 'event_not_found' }
+
   const form = await db.query.form.findFirst({
-    where: { eventId: event.id, slug: formSlug, purpose: 'CFP', status: 'OPEN' },
+    where: { eventId: event.id, slug: formSlug, purpose: 'CFP' },
   })
-  if (!form || (form.closesAt != null && form.closesAt <= Date.now())) return null
+  if (!form) return { ok: false, reason: 'form_not_found' }
+  const schedule = formScheduleBlock(form)
+  if (schedule === 'status_draft') return { ok: false, reason: 'form_draft' }
+  if (schedule === 'status_closed') return { ok: false, reason: 'form_closed' }
+  if (schedule === 'status_archived') return { ok: false, reason: 'form_archived' }
+  if (schedule === 'not_yet_open') return { ok: false, reason: 'form_not_yet_open' }
+  if (schedule === 'past_deadline') return { ok: false, reason: 'form_past_deadline' }
+  if (schedule != null) return { ok: false, reason: 'form_not_found' }
+
   const version = await db.query.formVersion.findFirst({
     where: { formId: form.id },
     orderBy: { createdAt: 'desc', id: 'desc' },
   })
-  if (!version) return null
+  if (!version) return { ok: false, reason: 'form_no_version' }
+
   const { tracks, formats, ...eventRow } = event
-  return { event: eventRow, form, version, tracks, formats }
+  return {
+    ok: true,
+    cfp: { event: eventRow, form, version, tracks, formats },
+  }
+}
+
+export async function getPublicCfp(eventSlug: string, formSlug: string): Promise<PublicCfpForm | null> {
+  const result = await lookupPublicCfp(eventSlug, formSlug)
+  return result.ok ? result.cfp : null
 }
 
 function sessionProfile(session: Session) {
@@ -199,10 +270,40 @@ export async function getOrCreateCfpDraft({ cfp, session, explicitlyRequested = 
   return {
     responseId: response.id,
     sessionId: responseSession.id,
+    pinnedVersionId: responseVersion.id,
+    currentVersionId: cfp.version.id,
+    isLatestVersion: responseVersion.id === cfp.version.id,
+    hasSavedData: response.fieldValues.length > 0,
     pinnedMdxSource: responseVersion.mdxSource,
     values: restored.values,
     participants: restored.participants,
   }
+}
+
+/** Discard the active draft session and create a clean draft on the live form version. */
+export async function resetCfpDraft({ cfp, session }: { cfp: PublicCfpForm; session: Session }) {
+  const speaker = await linkSpeakerIdentity({
+    eventId: cfp.event.id,
+    session,
+    profile: sessionProfile(session),
+  })
+  const db = getDb()
+  const response = await db.query.formResponse.findFirst({
+    where: {
+      formId: cfp.form.id,
+      speakerId: speaker.id,
+      status: 'DRAFT',
+      session: { status: 'DRAFT' },
+    },
+  })
+  if (response?.sessionId) {
+    await db.delete(schema.eventSession)
+      .where(orm.eq(schema.eventSession.id, response.sessionId))
+      .limit(1)
+  }
+  const draft = await getOrCreateCfpDraft({ cfp, session, explicitlyRequested: true })
+  if (!draft) throw new Error('Could not start a new CFP draft')
+  return draft
 }
 
 async function loadOwnedDraft({ eventId, formId, responseId, session, submission }: {
@@ -245,7 +346,8 @@ async function loadOwnedDraft({ eventId, formId, responseId, session, submission
   ) {
     throw new Error('CFP draft not found')
   }
-  if (form.closesAt != null && form.closesAt <= Date.now()) throw new Error('This CFP is closed')
+  const schedule = formScheduleBlock(form)
+  if (schedule != null) throw new Error(formScheduleBlockMessage(schedule))
   return {
     db,
     event,

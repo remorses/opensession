@@ -4,8 +4,8 @@
 'use client'
 
 import * as React from 'react'
-import { Link } from 'spiceflow/react'
-import { savePublicCfpDraft, startPublicCfpSubmission, submitPublicCfp } from '../actions.tsx'
+import { Link, router } from 'spiceflow/react'
+import { resetPublicCfpDraft, savePublicCfpDraft, startPublicCfpSubmission, submitPublicCfp } from '../actions.tsx'
 import type { FieldOption, FormSubmission, ValuesRecord } from '../forms/collect-fields.ts'
 import { formatDateRange, formatDateTimeUTC } from '../lib/utils.ts'
 import { OpenSessionLogo } from './auth-page.tsx'
@@ -17,6 +17,10 @@ import { Badge } from './ui/primitives.tsx'
 type DraftData = {
   responseId: string
   sessionId: string
+  pinnedVersionId: string
+  currentVersionId: string
+  isLatestVersion: boolean
+  hasSavedData: boolean
   pinnedMdxSource: string
   values: ValuesRecord
   participants: ValuesRecord[]
@@ -44,6 +48,8 @@ export function PublicCfpPage({
   accountName?: string | null
 }) {
   const [lastSubmission, setLastSubmission] = React.useState<FormSubmission | null>(null)
+  const [replacementDraft, setReplacementDraft] = React.useState<DraftData | null>(null)
+  const [draftChoice, setDraftChoice] = React.useState<'prompt' | 'edit' | null>(null)
   const [saving, setSaving] = React.useState(false)
   const [starting, setStarting] = React.useState(false)
   const [savedAt, setSavedAt] = React.useState<number | null>(null)
@@ -53,6 +59,10 @@ export function PublicCfpPage({
     title: string
     status: 'PENDING'
   } | null>(null)
+  const activeDraft = replacementDraft ?? draft
+  const showDraftPrompt = draftChoice == null
+    ? Boolean(activeDraft?.hasSavedData || activeDraft?.isLatestVersion === false)
+    : draftChoice === 'prompt'
 
   const uploadFile = async (file: File, fieldName: string) => {
     const body = new FormData()
@@ -72,16 +82,17 @@ export function PublicCfpPage({
   }
 
   const save = async (submission = lastSubmission) => {
-    if (!draft || !submission) return
+    if (!activeDraft || !submission) return
     setSaving(true)
     setError(null)
     try {
       await savePublicCfpDraft({
         eventId: event.id,
         formId: form.id,
-        responseId: draft.responseId,
+        responseId: activeDraft.responseId,
         submission,
       })
+      setDraftChoice('edit')
       setSavedAt(Date.now())
     } catch (cause) {
       setError(toastActionError(cause, 'Could not save the draft'))
@@ -91,13 +102,13 @@ export function PublicCfpPage({
   }
 
   const submit = async (submission: FormSubmission) => {
-    if (!draft) throw new Error('Sign in to submit')
+    if (!activeDraft) throw new Error('Sign in to submit')
     setError(null)
     try {
       const result = await submitPublicCfp({
         eventId: event.id,
         formId: form.id,
-        responseId: draft.responseId,
+        responseId: activeDraft.responseId,
         submission,
       })
       setSubmitted({ sessionId: result.sessionId, title: result.title, status: 'PENDING' })
@@ -131,12 +142,13 @@ export function PublicCfpPage({
             <SubmittedSuccess
               title={submitted.title}
               referenceId={submitted.sessionId}
+              message="Your submission is in the review queue. A confirmation email with your speaker portal link was queued for delivery."
               footer={(
                 <div className="flex flex-col items-center gap-3">
                   <Badge variant="warning" className="w-fit px-1.5">Pending</Badge>
                   <Button
                     variant="outline"
-                    render={<Link href={`/portal/${event.slug}`} />}
+                    render={<Link href={router.href('/portal/:eventSlug', { eventSlug: event.slug })} />}
                   >
                     View speaker portal
                   </Button>
@@ -150,12 +162,51 @@ export function PublicCfpPage({
             <section className="flex flex-col gap-3 py-8 text-center text-balance">
               <h2 className="text-xl font-semibold">Submission limit reached</h2>
               <p className="text-sm text-muted-foreground">You already have three submissions for this event.</p>
-              <Link href={`/portal/${event.slug}`} className="text-sm underline underline-offset-4">
+              <Link href={router.href('/portal/:eventSlug', { eventSlug: event.slug })} className="text-sm underline underline-offset-4">
                 View your submissions
               </Link>
             </section>
           </>
-        ) : !draft && accountEmail ? (
+        ) : activeDraft && showDraftPrompt ? (
+          <>
+            {header}
+            <section className="flex flex-col gap-5 py-6">
+              <div className="flex flex-col gap-2 text-balance">
+                <h2 className="text-xl font-semibold">
+                  {activeDraft.isLatestVersion ? 'Resume your saved draft' : 'The CFP form changed since you saved this draft'}
+                </h2>
+                <p className="text-sm text-muted-foreground">
+                  {activeDraft.isLatestVersion
+                    ? 'Your saved answers are ready. Resume them or discard the draft and start over.'
+                    : 'Resume with the form version you started, or discard it and start against the latest form version.'}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <Button onClick={() => setDraftChoice('edit')}>Resume saved draft</Button>
+                <Button
+                  variant="outline"
+                  loading={starting}
+                  onClick={async () => {
+                    setStarting(true)
+                    try {
+                      const next = await resetPublicCfpDraft({ eventSlug: event.slug, formSlug: form.slug })
+                      setReplacementDraft(next)
+                      setLastSubmission(null)
+                      setSavedAt(null)
+                      setDraftChoice('edit')
+                    } catch (cause) {
+                      toastActionError(cause, 'Could not discard the draft')
+                    } finally {
+                      setStarting(false)
+                    }
+                  }}
+                >
+                  {activeDraft.isLatestVersion ? 'Discard and start over' : 'Discard and use latest form'}
+                </Button>
+              </div>
+            </section>
+          </>
+        ) : !activeDraft && accountEmail ? (
           <>
             {header}
             <section className="flex flex-col items-center gap-4 py-8 text-center text-balance">
@@ -184,18 +235,28 @@ export function PublicCfpPage({
           </>
         ) : (
           <PublicFormWizard
-            header={header}
-            mdxSource={draft?.pinnedMdxSource ?? mdxSource}
+            header={(
+              <>
+                {header}
+                {activeDraft?.hasSavedData ? (
+                  <div className="flex flex-wrap items-center justify-between gap-3 rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
+                    <span>You resumed a saved draft.</span>
+                    <Button variant="ghost" size="sm" onClick={() => setDraftChoice('prompt')}>Reset saved data</Button>
+                  </div>
+                ) : null}
+              </>
+            )}
+            mdxSource={activeDraft?.pinnedMdxSource ?? mdxSource}
             scope={scope}
-            initialValues={draft?.values}
-            initialParticipants={draft?.participants}
-            authenticated={Boolean(draft)}
+            initialValues={activeDraft?.values}
+            initialParticipants={activeDraft?.participants}
+            authenticated={Boolean(activeDraft)}
             accountEmail={accountEmail}
             accountName={accountName}
             signInHref={signInHref}
-            uploadFile={draft ? uploadFile : undefined}
+            uploadFile={activeDraft ? uploadFile : undefined}
             onChange={setLastSubmission}
-            onSaveDraft={draft ? save : undefined}
+            onSaveDraft={activeDraft ? save : undefined}
             onSubmit={submit}
             submitLabel="Submit session"
             saving={saving}

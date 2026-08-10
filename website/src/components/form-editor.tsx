@@ -1,20 +1,21 @@
 // MDX form editor ('use client') — /org/:orgId/e/:eventId/forms/:formId.
-// Monaco editor and live FormRenderer preview (debounced ~300ms, with the
-// event's real tracks/formats in scope) share the SAME full-width pane,
-// toggled via an Editor | Preview tab row or Cmd/Ctrl+P (bound globally
-// AND inside Monaco, since Monaco swallows keydown while focused). Save
-// inserts a NEW immutable FormVersion (saveFormVersion warns when field
-// names disappear on a form that already has responses). Version history
-// loads an old version's source into the editor (unsaved until Save).
-// Settings dialog edits name/slug/status/closesAt; purpose/target are
-// immutable.
+// Live FormRenderer preview and Monaco editor share the SAME full-width
+// pane. Tabs are Preview | Editor (Preview default and first). Toggle with
+// Cmd/Ctrl+P (bound globally AND inside Monaco, since Monaco swallows
+// keydown while focused). Preview debounces MDX ~300ms with the event's
+// real tracks/formats in scope. Save inserts a NEW immutable FormVersion
+// (saveFormVersion warns when field names disappear on a form that already
+// has responses). Version history loads an old version's source into the
+// editor (unsaved until Save). Settings dialog edits name/slug/status/
+// closesAt; purpose/target are immutable.
 'use client'
 
 import * as React from 'react'
 import Editor from '@monaco-editor/react'
-import { ErrorBoundary, Link, useLoaderData } from 'spiceflow/react'
+import { ErrorBoundary, Link, router, useLoaderData } from 'spiceflow/react'
 import {
   ArrowLeftIcon,
+  ArrowRightIcon,
   CheckIcon,
   ChevronDownIcon,
   CopyIcon,
@@ -25,13 +26,22 @@ import {
 } from 'lucide-react'
 import { deleteForm, saveFormVersion, updateFormSettings } from '../actions.tsx'
 import { collectFields, libraryOptions } from '../forms/collect-fields.ts'
-import { buildFormCustomizationPrompt, formUseCase } from '../forms/form-customization-prompt.ts'
+import {
+  buildFormCustomizationPrompt,
+  chatgptPromptUrl,
+  formUseCase,
+} from '../forms/form-customization-prompt.ts'
 import { FormRenderer } from '../forms/form-renderer.tsx'
 import { cn, formatDateTimeUTC } from '../lib/utils.ts'
 import { Button } from './ui/button.tsx'
 import { Input, NativeSelect } from './ui/primitives.tsx'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from './ui/tooltip.tsx'
-import { FormStatusBadge } from './forms-list.tsx'
+import {
+  FormPurposeBadge,
+  FormStatusBadge,
+  ShareFormLink,
+  formSharePath,
+} from './forms-list.tsx'
 import {
   Dialog, DialogDescription, DialogHeader,
   DialogPanel, DialogPopup, DialogTitle,
@@ -40,10 +50,10 @@ import {
   DropdownMenu,
   DropdownMenuItem,
   DropdownMenuLabel,
-  DropdownMenuLinkItem,
   DropdownMenuPopup,
   DropdownMenuTrigger,
 } from './ui/dropdown-menu.tsx'
+import { toastActionError } from './ui/toast.tsx'
 
 // ── Dark mode (hydration-safe, tailwind-skill pattern) ──────────────
 
@@ -86,11 +96,11 @@ export function FormEditorPage() {
   const [saveError, setSaveError] = React.useState<string | null>(null)
   const [removedWarning, setRemovedWarning] = React.useState<string[] | null>(null)
   const [settingsOpen, setSettingsOpen] = React.useState(false)
-  const [copied, setCopied] = React.useState(false)
   const [promptCopied, setPromptCopied] = React.useState(false)
-  const [pane, setPane] = React.useState<'editor' | 'preview'>('editor')
+  // Preview is the default open tab; Editor is second.
+  const [pane, setPane] = React.useState<'preview' | 'editor'>('preview')
 
-  // Cmd/Ctrl+P toggles Editor/Preview. Bound on window (preventDefault so
+  // Cmd/Ctrl+P toggles Preview/Editor. Bound on window (preventDefault so
   // the browser print/palette dialog never opens) AND inside Monaco via
   // addCommand — Monaco consumes keydown before it bubbles to window.
   // toggleRef keeps the Monaco command (registered once in onMount)
@@ -141,8 +151,22 @@ export function FormEditorPage() {
     setTimeout(() => setPromptCopied(false), 1500)
   }
 
+  const handleOpenInChatGpt = async () => {
+    // Clipboard is a fallback if ChatGPT drops a very long hash prompt.
+    try {
+      await navigator.clipboard.writeText(customizationPrompt)
+    } catch {
+      // open ChatGPT even when clipboard is blocked
+    }
+    window.open(chatgptPromptUrl(customizationPrompt), '_blank', 'noopener,noreferrer')
+  }
+
   const dirty = source !== (newest?.mdxSource ?? '')
-  const publicPath = `/submit/${event.slug}/${form.slug}`
+  const sharePath = formSharePath({
+    purpose: form.purpose,
+    eventSlug: event.slug,
+    formSlug: form.slug,
+  })
 
   const handleSave = async () => {
     setSaving(true)
@@ -158,46 +182,40 @@ export function FormEditorPage() {
       setLoadedVersionId(result.versionId)
       if (result.removedFields.length > 0) setRemovedWarning(result.removedFields)
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : 'Failed to save')
+      setSaveError(toastActionError(error, 'Failed to save'))
     } finally {
       setSaving(false)
     }
   }
 
-  const handleCopyUrl = async () => {
-    await navigator.clipboard.writeText(`${window.location.origin}${publicPath}`)
-    setCopied(true)
-    setTimeout(() => setCopied(false), 1500)
-  }
-
   return (
     <div className="flex flex-col gap-4">
       <Link
-        href={`/org/${currentOrgId}/e/${event.id}/${form.purpose === 'PORTAL' ? 'portal-forms' : form.purpose === 'EVALUATION' ? 'evaluation' : 'forms'}`}
+        href={
+          form.purpose === 'EVALUATION'
+            ? router.href(`/org/${currentOrgId}/e/${event.id}/evaluation`, { tab: 'rounds' })
+            : router.href('/org/:orgId/e/:eventId/forms', { orgId: currentOrgId, eventId: event.id })
+        }
         className="flex w-fit items-center gap-1.5 text-sm text-muted-foreground no-underline transition-colors hover:text-foreground"
       >
         <ArrowLeftIcon className="size-3.5" />
-        Back to forms
+        {form.purpose === 'EVALUATION' ? 'Evaluation rounds' : 'Back to forms'}
       </Link>
 
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <div className="flex items-center gap-2.5">
+          <div className="flex flex-wrap items-center gap-2.5">
             <h1 className="text-xl font-semibold tracking-tight">{form.name}</h1>
+            <FormPurposeBadge purpose={form.purpose} target={form.target} />
             <FormStatusBadge status={form.status} />
           </div>
           <p className="text-sm text-muted-foreground">
-            {form.purpose === 'CFP'
-              ? 'CFP form'
-              : form.purpose === 'EVALUATION'
-                ? 'Evaluation form'
-                : `Portal form · ${form.target.toLowerCase()} target`}
-            {' · '}
-            {submitted} submission{submitted === 1 ? '' : 's'} · {drafts} draft{drafts === 1 ? '' : 's'}
+            {form.purpose === 'EVALUATION' ? 'Scorecard step · ' : ''}{submitted} submission{submitted === 1 ? '' : 's'} · {drafts} draft{drafts === 1 ? '' : 's'}
             {form.closesAt ? ` · closes ${formatDateTimeUTC(form.closesAt)}` : ''}
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {form.purpose === 'EVALUATION' ? <Button variant="outline" render={<Link href={router.href(`/org/${currentOrgId}/e/${event.id}/evaluation`, { tab: 'reviewers' })} />}>Continue to reviewers<ArrowRightIcon data-icon="inline-end" /></Button> : null}
           <VersionHistory
             versions={versions}
             loadedVersionId={loadedVersionId}
@@ -217,20 +235,15 @@ export function FormEditorPage() {
                   </DropdownMenuTrigger>
                 </TooltipTrigger>
                 <TooltipContent>
-                  Opens ChatGPT and copies this form with the OpenSession MDX guide. Paste the prompt into the new chat, or copy it for another AI.
+                  Opens ChatGPT with this form and the OpenSession MDX guide pre-filled. Also copies the prompt for other AIs.
                 </TooltipContent>
               </Tooltip>
             </TooltipProvider>
             <DropdownMenuPopup side="bottom" align="end" sideOffset={4}>
-              <DropdownMenuLinkItem
-                href="https://chatgpt.com/"
-                target="_blank"
-                rel="noreferrer"
-                onClick={() => navigator.clipboard.writeText(customizationPrompt)}
-              >
+              <DropdownMenuItem onClick={handleOpenInChatGpt}>
                 <ExternalLinkIcon />
                 Open in ChatGPT
-              </DropdownMenuLinkItem>
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={handleCopyCustomizationPrompt}>
                 {promptCopied ? <CheckIcon /> : <CopyIcon />}
                 {promptCopied ? 'Prompt copied' : 'Copy prompt'}
@@ -247,19 +260,23 @@ export function FormEditorPage() {
         </div>
       </div>
 
-      {form.purpose === 'CFP' && form.status === 'OPEN' ? (
-        <div className="flex w-fit items-center gap-2 rounded-md border border-border bg-muted/50 px-3 py-1.5">
-          <span className="text-xs text-muted-foreground">Public URL</span>
-          <Link href={publicPath} className="font-mono text-xs underline underline-offset-4">{publicPath}</Link>
-          <Button
-            aria-label="Copy public URL"
-            size="icon-xs"
-            variant="ghost"
-            title="Copy public URL"
-            onClick={handleCopyUrl}
-          >
-            {copied ? <CheckIcon className="size-3.5 text-success-foreground" /> : <CopyIcon className="size-3.5 text-muted-foreground" />}
-          </Button>
+      {sharePath ? (
+        <div className="flex flex-col gap-1.5 rounded-md border border-border bg-muted/50 px-3 py-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs font-medium text-muted-foreground">Share with speakers</span>
+            <ShareFormLink
+              path={sharePath}
+              live={form.status === 'OPEN'}
+              purpose={form.purpose}
+            />
+          </div>
+          <p className="text-xs text-muted-foreground">
+            {form.purpose === 'CFP'
+              ? form.status === 'OPEN'
+                ? 'Copy this link and send it to people you want abstracts from. The event must also be Active in Settings.'
+                : 'Set form status to Open in Settings, and set the event to Active, before speakers can submit. You can still copy the link now.'
+              : 'Speakers open the portal with this link. Portal forms are completed from tasks and profile.'}
+          </p>
         </div>
       ) : null}
 
@@ -276,20 +293,25 @@ export function FormEditorPage() {
       ) : null}
 
       <div className="flex min-h-0 flex-col gap-2">
-        <div className="flex items-center gap-1">
-          {(['editor', 'preview'] as const).map((value) => (
+        <div className="flex items-center gap-1" role="tablist" aria-label="Form view">
+          {([
+            { value: 'preview', label: 'Preview' },
+            { value: 'editor', label: 'Editor' },
+          ] as const).map((tab) => (
             <button
-              key={value}
+              key={tab.value}
               type="button"
-              onClick={() => setPane(value)}
+              role="tab"
+              aria-selected={pane === tab.value}
+              onClick={() => setPane(tab.value)}
               className={cn(
-                'rounded-md px-2.5 py-1 text-sm capitalize transition-colors',
-                pane === value
+                'rounded-md px-2.5 py-1 text-sm transition-colors',
+                pane === tab.value
                   ? 'bg-accent font-medium text-foreground'
                   : 'text-muted-foreground hover:text-foreground',
               )}
             >
-              {value}
+              {tab.label}
             </button>
           ))}
           <span className="ml-1 text-xs text-muted-foreground" title="Toggle editor and preview">
@@ -297,8 +319,25 @@ export function FormEditorPage() {
           </span>
         </div>
 
-        {/* Both panes stay mounted so Monaco keeps cursor/undo state and
-            the preview keeps its form values across toggles. */}
+        {/* Preview first (default). Both panes stay mounted so Monaco keeps
+            cursor/undo and the preview keeps form values across toggles. */}
+        <div
+          className={cn(
+            'flex h-[calc(100vh-21rem)] min-w-0 flex-col gap-5 overflow-y-auto rounded-lg border border-border p-5',
+            pane !== 'preview' && 'hidden',
+          )}
+        >
+          <FormRenderer mdxSource={previewSource} scope={scope} />
+          <div className="mt-auto flex flex-col gap-1 border-t border-border pt-3">
+            <span className="text-xs font-medium text-muted-foreground">
+              Visible fields ({summary.fields.length + summary.participantFields.length})
+            </span>
+            <span className="font-mono text-xs text-muted-foreground">
+              {[...summary.fields, ...summary.participantFields].map((field) => field.name).join(', ') || '—'}
+            </span>
+          </div>
+        </div>
+
         <div className={cn('overflow-hidden rounded-lg border border-border', pane !== 'editor' && 'hidden')}>
           <Editor
             height="calc(100vh - 21rem)"
@@ -321,23 +360,6 @@ export function FormEditorPage() {
               padding: { top: 12, bottom: 12 },
             }}
           />
-        </div>
-
-        <div
-          className={cn(
-            'flex h-[calc(100vh-21rem)] min-w-0 flex-col gap-5 overflow-y-auto rounded-lg border border-border p-5',
-            pane !== 'preview' && 'hidden',
-          )}
-        >
-          <FormRenderer mdxSource={previewSource} scope={scope} />
-          <div className="mt-auto flex flex-col gap-1 border-t border-border pt-3">
-            <span className="text-xs font-medium text-muted-foreground">
-              Visible fields ({summary.fields.length + summary.participantFields.length})
-            </span>
-            <span className="font-mono text-xs text-muted-foreground">
-              {[...summary.fields, ...summary.participantFields].map((field) => field.name).join(', ') || '—'}
-            </span>
-          </div>
         </div>
       </div>
 
@@ -452,7 +474,7 @@ function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
                       : 'DRAFT',
                   closesAt,
                   opensAt,
-                  blind: form.purpose === 'EVALUATION' ? formData.get('blind') === 'on' : false,
+                  blind: form.purpose === 'EVALUATION' ? formData.get('blind') === 'on' : undefined,
                 })
                 setSaved(true)
                 setTimeout(() => setSaved(false), 1500)
@@ -490,6 +512,9 @@ function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
                   type="datetime-local"
                   defaultValue={form.opensAt ? epochToDateTimeLocalInput(form.opensAt) : ''}
                 />
+                <span className="text-xs font-normal text-muted-foreground">
+                  Optional. Empty means open as soon as status is Open.
+                </span>
               </label>
               <label className="flex flex-col gap-1.5 text-sm font-medium">
                 Closes at
@@ -498,6 +523,9 @@ function FormSettingsDialog({ open, onOpenChange, orgId, eventId, form }: {
                   type="datetime-local"
                   defaultValue={form.closesAt ? epochToDateTimeLocalInput(form.closesAt) : ''}
                 />
+                <span className="text-xs font-normal text-muted-foreground">
+                  Optional. Empty means no automatic close.
+                </span>
               </label>
               {form.purpose === 'EVALUATION' ? (
                 <label className="flex items-center gap-2 text-sm font-medium">
@@ -545,7 +573,7 @@ function DangerZone({ orgId, eventId, form, hasResponses }: {
       try {
         await action()
       } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed')
+        setError(toastActionError(err, 'Failed to update the form'))
       } finally {
         setPending(false)
       }
@@ -570,6 +598,7 @@ function DangerZone({ orgId, eventId, form, hasResponses }: {
                   slug: form.slug,
                   status: 'ARCHIVED',
                   closesAt: form.closesAt,
+                  blind: form.purpose === 'EVALUATION' ? form.blind : undefined,
                 }),
               )
             }

@@ -2,6 +2,35 @@
 // derived assignment state, weighted results, progress, sorting, and CSV.
 import type { CollectedField, ValuesRecord } from '../forms/collect-fields.ts'
 
+export type ReviewVote = 'YES' | 'MAYBE' | 'NO'
+
+/** Compatibility aggregate for imported quick-review rows shown in abstract lists. */
+export function aggregateReviewStats(
+  reviews: Array<{ vote?: ReviewVote | null; rating?: number | null }>,
+) {
+  let yes = 0
+  let maybe = 0
+  let no = 0
+  let ratingSum = 0
+  let ratingCount = 0
+  for (const review of reviews) {
+    if (review.vote === 'YES') yes += 1
+    if (review.vote === 'MAYBE') maybe += 1
+    if (review.vote === 'NO') no += 1
+    if (review.rating != null) {
+      ratingSum += review.rating
+      ratingCount += 1
+    }
+  }
+  return {
+    total: reviews.length,
+    yes,
+    maybe,
+    no,
+    avgRating: ratingCount === 0 ? null : ratingSum / ratingCount,
+  }
+}
+
 export type ReviewState = 'ASSIGNED' | 'IN_PROGRESS' | 'COMPLETED' | 'RECUSED'
 
 export function invitationAcceptanceDecision(input: {
@@ -122,6 +151,9 @@ export type EvaluationResult = {
   aggregate: number | null
   completed: number
   assigned: number
+  inProgress: number
+  recused: number
+  status: 'UNASSIGNED' | 'PENDING' | 'IN_PROGRESS' | 'COMPLETED' | 'RECUSED'
   answers: Record<string, string>
 }
 
@@ -134,6 +166,8 @@ export function aggregateEvaluationResults(input: {
   return input.sessions.map((session) => {
     const assigned = input.assignments.filter((assignment) => assignment.sessionId === session.id)
     const completed = assigned.filter((assignment) => assignment.response?.status === 'SUBMITTED' && assignment.recusedAt == null)
+    const inProgress = assigned.filter((assignment) => assignment.response?.status === 'DRAFT' && assignment.recusedAt == null).length
+    const recused = assigned.filter((assignment) => assignment.recusedAt != null).length
     let weightedSum = 0
     let totalWeight = 0
     for (const assignment of completed) {
@@ -159,6 +193,17 @@ export function aggregateEvaluationResults(input: {
       aggregate: totalWeight > 0 ? weightedSum / totalWeight : null,
       completed: completed.length,
       assigned: assigned.length,
+      inProgress,
+      recused,
+      status: assigned.length === 0
+        ? 'UNASSIGNED'
+        : completed.length === assigned.length
+          ? 'COMPLETED'
+          : recused === assigned.length
+            ? 'RECUSED'
+            : completed.length > 0 || inProgress > 0 || recused > 0
+              ? 'IN_PROGRESS'
+              : 'PENDING',
       answers,
     }
   })
@@ -174,18 +219,21 @@ export function sortEvaluationResults(rows: EvaluationResult[], direction: 'asc'
   })
 }
 
-function csv(value: unknown): string {
+function csv(value: string | number | null): string {
   const text = value == null ? '' : String(value)
   return /[",\r\n]/.test(text) ? `"${text.replaceAll('"', '""')}"` : text
 }
 
 export function evaluationResultsToCsv(rows: EvaluationResult[], fields: CollectedField[]): string {
-  const header = ['session_id', 'title', 'aggregate', 'completed', 'assigned', ...fields.map((field) => field.name)]
+  const header = ['session_id', 'title', 'status', 'aggregate', 'completed', 'in_progress', 'recused', 'assigned', ...fields.map((field) => field.name)]
   const body = rows.map((row) => [
     row.sessionId,
     row.title,
+    row.status,
     row.aggregate == null ? '' : row.aggregate.toFixed(4),
     row.completed,
+    row.inProgress,
+    row.recused,
     row.assigned,
     ...fields.map((field) => row.answers[field.name] ?? ''),
   ].map(csv).join(','))

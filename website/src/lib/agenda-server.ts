@@ -34,6 +34,7 @@ import {
 } from './conflicts.ts'
 import { dedupeKeys, enqueueAndSend, replyToFor } from './emails/send.ts'
 import { buildIcsEvent } from './ics.ts'
+import type { AutoPlacement } from './public-program.ts'
 
 type Db = ReturnType<typeof getDb>
 type EventRow = typeof schema.event.$inferSelect
@@ -60,6 +61,8 @@ export type ScheduleResult = {
   icsSequence: number
   emailsQueued: number
 }
+
+const MAX_AUTO_PLACEMENTS = 500
 
 /** Sessions that may occupy an agenda slot: accepted talks and service blocks. */
 function isSchedulable(row: { kind: 'CONTENT' | 'SERVICE'; status: string }): boolean {
@@ -368,6 +371,110 @@ export async function scheduleSessionSlot({
   })
 
   return { scheduled: true, conflicts, sessionId: session.id, icsSequence: sequence, emailsQueued }
+}
+
+/**
+ * Validate a complete automatic plan against one fresh agenda snapshot, then
+ * write every slot in one D1 batch. No placement is written when any target,
+ * room, or conflict is invalid. Calendar mail is queued only after commit.
+ */
+export async function applyAutoPlacementPlan({
+  db,
+  event,
+  placements,
+  now,
+}: {
+  db: Db
+  event: EventRow
+  placements: AutoPlacement[]
+  now: number
+}) {
+  if (placements.length === 0) return { applied: 0, emailsQueued: 0 }
+  if (placements.length > MAX_AUTO_PLACEMENTS) throw new Error('Automatic placement plan is too large')
+  if (new Set(placements.map((placement) => placement.sessionId)).size !== placements.length) {
+    throw new Error('Automatic placement plan contains duplicate sessions')
+  }
+
+  const [sessions, rooms] = await Promise.all([
+    loadAgendaSessions(db, event.id),
+    db.query.room.findMany({ where: { eventId: event.id } }),
+  ])
+  const sessionById = new Map(sessions.map((session) => [session.id, session]))
+  const roomById = new Map(rooms.map((room) => [room.id, room]))
+  const proposed = sessions.map(toConflictSession)
+  const writes: Array<{
+    session: AgendaRow
+    roomName: string
+    roomId: string
+    startsAt: number
+    endsAt: number
+    sequence: number
+  }> = []
+
+  for (const placement of placements) {
+    const session = sessionById.get(placement.sessionId)
+    if (!session) throw new Error(`Automatic placement session not found: ${placement.sessionId}`)
+    if (session.roomId != null || session.startsAt != null || session.endsAt != null) {
+      throw new Error(`Automatic placement session is already scheduled: ${session.title ?? placement.sessionId}`)
+    }
+    const room = roomById.get(placement.roomId)
+    if (!room) throw new Error(`Automatic placement room not found: ${placement.roomId}`)
+    if (!Number.isInteger(placement.startMinute) || placement.startMinute < 0 || placement.startMinute >= 24 * 60) {
+      throw new Error(`Automatic placement has an invalid start time: ${placement.sessionId}`)
+    }
+    if (!Number.isInteger(placement.durationMinutes) || placement.durationMinutes < 5 || placement.durationMinutes > MAX_SLOT_MINUTES) {
+      throw new Error(`Automatic placement has an invalid duration: ${placement.sessionId}`)
+    }
+    const startsAt = zonedEpoch(placement.dayKey, placement.startMinute, event.timezone)
+    const endsAt = startsAt + placement.durationMinutes * 60_000
+    const candidate = { ...toConflictSession(session), roomId: room.id, startsAt, endsAt }
+    if (conflictsForPlacement({ candidate, others: proposed }).length > 0) {
+      throw new Error(`Automatic placement conflicts with the current agenda: ${session.title ?? placement.sessionId}`)
+    }
+    proposed.push(candidate)
+    writes.push({
+      session,
+      roomName: room.name,
+      roomId: room.id,
+      startsAt,
+      endsAt,
+      sequence: nextIcsSequence({ current: session.icsSequence, wasScheduled: false }),
+    })
+  }
+
+  const updatePlacement = (write: typeof writes[number]) => db
+    .update(schema.eventSession)
+    .set({
+      roomId: write.roomId,
+      startsAt: write.startsAt,
+      endsAt: write.endsAt,
+      icsSequence: write.sequence,
+      updatedAt: now,
+    })
+    .where(orm.and(
+      orm.eq(schema.eventSession.id, write.session.id),
+      orm.eq(schema.eventSession.eventId, event.id),
+    ))
+    .limit(1)
+  const [firstWrite, ...remainingWrites] = writes
+  if (!firstWrite) throw new Error('Automatic placement plan produced no writes')
+  await db.batch([updatePlacement(firstWrite), ...remainingWrites.map(updatePlacement)])
+
+  let emailsQueued = 0
+  for (const write of writes) {
+    emailsQueued += await sendScheduleMails({
+      db,
+      event,
+      session: write.session,
+      roomName: write.roomName,
+      startsAt: write.startsAt,
+      endsAt: write.endsAt,
+      sequence: write.sequence,
+      kind: 'SCHEDULE_INVITE',
+      now,
+    })
+  }
+  return { applied: writes.length, emailsQueued }
 }
 
 /**

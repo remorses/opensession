@@ -9,8 +9,8 @@
 export const DAY_MS = 24 * 60 * 60 * 1000
 
 /** Days before the deadline that get a nudge, plus the deadline day itself. */
-export const TASK_REMINDER_DAYS = [3, 1, 0] as const
-export const DRAFT_REMINDER_DAYS = [3, 1, 0] as const
+export const TASK_REMINDER_DAYS: readonly number[] = [3, 1, 0]
+export const DRAFT_REMINDER_DAYS: readonly number[] = [3, 1, 0]
 
 /** Stop nagging after this many days past due, so a task nobody will ever do
  *  does not mail the speaker forever. */
@@ -38,7 +38,7 @@ export function taskReminderDecision(
   // organizer's job, not the cron's.
   if (dueAt == null) return { due: false }
   const days = daysUntil(dueAt, now)
-  if ((TASK_REMINDER_DAYS as readonly number[]).includes(days)) {
+  if (TASK_REMINDER_DAYS.includes(days)) {
     return { due: true, daysUntil: days }
   }
   if (days < 0 && days >= -OVERDUE_REMINDER_MAX_DAYS) {
@@ -53,12 +53,13 @@ export function taskReminderDecision(
  * so a nudge would only be annoying.
  */
 export function draftReminderDecision(
+  // null closesAt = no deadline → no draft-close reminders
   closesAt: number | null,
   now: number,
 ): ReminderDecision {
   if (closesAt == null) return { due: false }
   const days = daysUntil(closesAt, now)
-  if ((DRAFT_REMINDER_DAYS as readonly number[]).includes(days)) {
+  if (DRAFT_REMINDER_DAYS.includes(days)) {
     return { due: true, daysUntil: days }
   }
   return { due: false }

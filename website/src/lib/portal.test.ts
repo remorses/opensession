@@ -28,10 +28,11 @@ describe('portal ownership', () => {
   })
 
   test('only PENDING owners can edit', () => {
-    expect(canEditSession('sp_owner', baseSession)).toBe(true)
-    expect(canEditSession('sp_co', baseSession)).toBe(true)
-    expect(canEditSession('sp_owner', { ...baseSession, status: 'ACCEPTED' })).toBe(false)
-    expect(canEditSession('sp_other', baseSession)).toBe(false)
+    expect(canEditSession({ speakerId: 'sp_owner', session: baseSession })).toBe(true)
+    expect(canEditSession({ speakerId: 'sp_co', session: baseSession })).toBe(true)
+    expect(canEditSession({ speakerId: 'sp_owner', session: baseSession, formIsOpen: false })).toBe(false)
+    expect(canEditSession({ speakerId: 'sp_owner', session: { ...baseSession, status: 'ACCEPTED' } })).toBe(false)
+    expect(canEditSession({ speakerId: 'sp_other', session: baseSession })).toBe(false)
   })
 
   test('owners can withdraw from PENDING', () => {
@@ -90,6 +91,7 @@ describe('portal assignments', () => {
     expect(canCompleteManualAssignment(rows[2]!)).toBe(false)
     expect(canSubmitFormAssignment(rows[0]!)).toBe(true)
     expect(canSubmitFormAssignment(rows[1]!)).toBe(false)
+    expect(canSubmitFormAssignment({ ...rows[0]!, status: 'COMPLETED' })).toBe(true)
   })
 
   test('ownership helper', () => {

@@ -25,7 +25,7 @@ import {
 } from './db.ts'
 import { collectFields, libraryOptions, type FieldOption, type ValuesRecord } from './forms/collect-fields.ts'
 import { loadAgendaSessions, speakerDisplayName } from './lib/agenda-server.ts'
-import { canAccessFile, restoreSubmissionValues } from './lib/cfp-submission.ts'
+import { canAccessFile, formScheduleBlock, restoreSubmissionValues } from './lib/cfp-submission.ts'
 import {
   eventDayKeys,
   findConflicts,
@@ -34,23 +34,29 @@ import {
   type AgendaConflictRow,
   type AgendaSessionRow,
 } from './lib/conflicts.ts'
-import { getOrCreateCfpDraft, getPublicCfp, type PublicCfpForm } from './lib/cfp-server.ts'
 import {
-  coverageBySession,
+  getOrCreateCfpDraft,
+  lookupPublicCfp,
+  publicCfpBlockMessage,
+  type PublicCfpBlockReason,
+  type PublicCfpForm,
+} from './lib/cfp-server.ts'
+import {
   aggregateEvaluationResults,
+  coverageBySession,
   evaluationResultsToCsv,
   progressByReviewer,
   projectAssignedSession,
   reviewState,
-  sortEvaluationResults,
 } from './lib/reviews.ts'
 import {
   draftValuesFromSpeaker,
   getPortalAssignment,
-  getPortalProfileForm,
   getPortalSession,
   listPortalAssignments,
   listPortalSessions,
+  loadOrganizerSpeakerDetail,
+  loadSpeakerProfileForm,
   loadPortalContext,
   restoreCfpEditDraft,
 } from './lib/portal-server.ts'
@@ -75,12 +81,16 @@ import { Toaster } from './components/ui/toast.tsx'
 import { normalizeAuthRedirectPath } from './auth-redirect.ts'
 import { OpenSessionLogo } from './components/auth-page.tsx'
 import {
+  buildPublicWidgetScript,
   filterPublicSessions,
   isPublicProgramSession,
+  parsePublicWidgetFields,
   projectPublicProgram,
+  renderPublicWidgetHtml,
+  renderPublicWidgetXml,
+  selectPublicWidgetData,
   type PublicProgram,
   type PublicProgramFilters,
-  type PublicProgramSource,
 } from './lib/public-program.ts'
 import { buildIcsCalendar } from './lib/ics.ts'
 import { contactMetrics } from './lib/contact-crm.ts'
@@ -88,6 +98,19 @@ import { contactMetrics } from './lib/contact-crm.ts'
 // ── Schemas ─────────────────────────────────────────────────────────
 
 const loginQuerySchema = z.object({ callbackURL: z.string().optional() })
+const abstractsQuerySchema = z.object({
+  status: z.enum([
+    'all',
+    'pending',
+    'accept-queue',
+    'accepted',
+    'decline-queue',
+    'declined',
+    'withdrawn',
+    'drafts',
+  ]).optional(),
+  q: z.string().optional(),
+})
 const publicProgramQuerySchema = z.object({
   q: z.string().trim().max(100).optional(),
   track: z.string().trim().max(100).optional(),
@@ -97,16 +120,11 @@ const publicProgramQuerySchema = z.object({
 const embedProgramQuerySchema = publicProgramQuerySchema.extend({
   accent: z.string().regex(/^#[0-9a-fA-F]{6}$/).optional(),
   compact: z.enum(['0', '1']).optional(),
-  fields: z.string().regex(/^(description|speakers|track|format|room|time)(,(description|speakers|track|format|room|time))*$/).optional(),
+  fields: z.string().regex(/^(description|speakers|track|format|room|time|photo|jobTitle|company|bio|sessions)(,(description|speakers|track|format|room|time|photo|jobTitle|company|bio|sessions))*$/).optional(),
 })
+const publicWidgetViewSchema = z.enum(['sessions', 'speakers', 'agenda', 'itinerary', 'gallery'])
+const widgetOutputQuerySchema = embedProgramQuerySchema.extend({ widget: publicWidgetViewSchema })
 const personalIcsQuerySchema = z.object({ session: z.array(z.string().min(1).max(100)).min(1).max(100) })
-
-function validatedEmbedQuery(request: Request) {
-  const parsed = embedProgramQuerySchema.safeParse(
-    Object.fromEntries(new URL(request.url).searchParams.entries()),
-  )
-  return parsed.success ? parsed.data : null
-}
 
 type PortalSubmissionListRow = {
   id: string
@@ -138,6 +156,7 @@ type PortalShellLoaderData = {
   userName: string
   submissions: PortalSubmissionListRow[]
   assignments: PortalAssignmentListRow[]
+  openCfp: { slug: string; name: string } | null
 }
 
 type PortalTaskLoaderData = {
@@ -172,6 +191,7 @@ function emptyPortalShell(userEmail: string, userName: string): PortalShellLoade
     userName,
     submissions: [],
     assignments: [],
+    openCfp: null,
   }
 }
 
@@ -185,7 +205,7 @@ async function createGoogleSignInRedirect(request: Pick<Request, 'headers'>, cal
     returnHeaders: true,
   })
   if (!response?.url) {
-    throw json({ error: 'failed to start google sign-in' }, { status: 500 })
+    throw json({ message: 'Failed to start Google sign-in', code: 'sign_in_failed' }, { status: 500 })
   }
   const redirectResponse = new Response(null, {
     status: 302,
@@ -329,10 +349,7 @@ export const app = new Spiceflow()
     )
   })
 
-  // ── Restricted reviewer portal ────────────────────────────────────
-  // These routes are outside /org, so the organizer shell and its loader
-  // data are never rendered or serialized to reviewers.
-
+  // Restricted reviewer routes do not load or serialize organizer data.
   .loader('/review/:formId', async ({ params, request }) => loadReviewerRound(request, params.formId))
   .page({
     path: '/review/:formId',
@@ -345,13 +362,14 @@ export const app = new Spiceflow()
   .loader('/review/:formId/:reviewId', async ({ params, request }) => {
     const data = await loadReviewerRound(request, params.formId)
     const assignment = data.assignments.find((row) => row.id === params.reviewId)
-    if (!assignment) throw json({ error: 'not_found' }, { status: 404 })
+    if (!assignment) throw json({ message: 'Task assignment not found', code: 'not_found' }, { status: 404 })
     return { ...data, assignment }
   })
   .page('/review/:formId/:reviewId', async () => {
     const { ReviewerAssignmentPage } = await import('./components/reviewer-dashboard.tsx')
     return <ReviewerAssignmentPage />
   })
+
 
   // ── Dashboard resolver ────────────────────────────────────────────
   // /dashboard is the stable entry point (docs, emails, OAuth
@@ -380,25 +398,25 @@ export const app = new Spiceflow()
     const assignmentId = String(body.get('taskAssignmentId') ?? '').trim()
     const fieldName = String(body.get('fieldName') ?? '').trim()
     if (!(uploaded instanceof File) || !eventId || !kindResult.success) {
-      return json({ error: 'invalid_upload', message: 'File, eventId, and kind are required' }, { status: 400 })
+      return json({ code: 'invalid_upload', message: 'File, eventId, and kind are required' }, { status: 400 })
     }
     if (uploaded.size > MAX_UPLOAD_BYTES) {
-      return json({ error: 'file_too_large', message: 'Files must be 100 MB or smaller' }, { status: 413 })
+      return json({ code: 'file_too_large', message: 'Files must be 100 MB or smaller' }, { status: 413 })
     }
     if (!isAllowedUpload(uploaded, kindResult.data)) {
-      return json({ error: 'unsupported_file', message: 'This file type is not supported' }, { status: 415 })
+      return json({ code: 'unsupported_file', message: 'This file type is not supported' }, { status: 415 })
     }
 
     const db = getDb()
     const event = await db.query.event.findFirst({ where: { id: eventId } })
-    if (!event) return json({ error: 'not_found', message: 'Event not found' }, { status: 404 })
+    if (!event) return json({ code: 'not_found', message: 'Event not found' }, { status: 404 })
     const [member, speaker] = await db.batch([
       db.query.orgMember.findFirst({ where: { userId: session.userId, orgId: event.orgId } }),
       db.query.speaker.findFirst({ where: { eventId, userId: session.userId } }),
     ] as const)
-    if (!member && !speaker) return json({ error: 'not_found', message: 'Event not found' }, { status: 404 })
+    if (!member && !speaker) return json({ code: 'not_found', message: 'Event not found' }, { status: 404 })
     if (Boolean(assignmentId) !== Boolean(fieldName) || fieldName.length > 200) {
-      return json({ error: 'invalid_task_slot', message: 'A task assignment and field name are both required' }, { status: 400 })
+      return json({ code: 'invalid_task_slot', message: 'A task assignment and field name are both required' }, { status: 400 })
     }
     const assignment = assignmentId
       ? await db.query.taskAssignment.findFirst({
@@ -408,8 +426,8 @@ export const app = new Spiceflow()
       : null
     if (assignmentId) {
       if (!speaker || !assignment || assignment.speakerId !== speaker.id
-        || assignment.status === 'COMPLETED' || assignment.taskDefinition?.source !== 'FORM') {
-        return json({ error: 'not_found', message: 'Task assignment not found' }, { status: 404 })
+        || assignment.taskDefinition?.source !== 'FORM') {
+        return json({ code: 'not_found', message: 'Task assignment not found' }, { status: 404 })
       }
     }
 
@@ -432,7 +450,7 @@ export const app = new Spiceflow()
         taskAssignmentId: assignment?.id ?? null,
         fieldName: assignment ? fieldName : null,
       })
-      if (assignment) {
+      if (assignment && assignment.status !== 'COMPLETED') {
         await db.batch([
           insertFile,
           db.update(schema.taskAssignment).set({ status: 'IN_PROGRESS', updatedAt: Date.now() })
@@ -551,23 +569,40 @@ export const app = new Spiceflow()
 
   .loader('/submit/:eventSlug/:formSlug', async ({ params, request }): Promise<{
     cfp: PublicCfpForm | null
+    unavailableReason: PublicCfpBlockReason | null
     draft: Awaited<ReturnType<typeof getOrCreateCfpDraft>> | null
     capReached: boolean
     accountEmail: string | null
     accountName: string | null
   }> => {
-    const cfp = await getPublicCfp(params.eventSlug, params.formSlug)
-    if (!cfp) {
-      return { cfp: null, draft: null, capReached: false, accountEmail: null, accountName: null }
+    const lookup = await lookupPublicCfp(params.eventSlug, params.formSlug)
+    if (!lookup.ok) {
+      return {
+        cfp: null,
+        unavailableReason: lookup.reason,
+        draft: null,
+        capReached: false,
+        accountEmail: null,
+        accountName: null,
+      }
     }
+    const cfp = lookup.cfp
     const session = await getSession(request)
     if (!session) {
-      return { cfp, draft: null, capReached: false, accountEmail: null, accountName: null }
+      return {
+        cfp,
+        unavailableReason: null,
+        draft: null,
+        capReached: false,
+        accountEmail: null,
+        accountName: null,
+      }
     }
     try {
       const draft = await getOrCreateCfpDraft({ cfp, session })
       return {
         cfp,
+        unavailableReason: null,
         draft,
         capReached: false,
         accountEmail: session.user.email,
@@ -577,6 +612,7 @@ export const app = new Spiceflow()
       if (cause instanceof Error && cause.message.includes('at most 3 sessions')) {
         return {
           cfp,
+          unavailableReason: null,
           draft: null,
           capReached: true,
           accountEmail: session.user.email,
@@ -588,7 +624,9 @@ export const app = new Spiceflow()
   })
 
   .page('/submit/:eventSlug/:formSlug', async ({ params, loaderData }) => {
-    if (!loaderData.cfp) return <PublicUnavailable />
+    if (!loaderData.cfp) {
+      return <PublicUnavailable reason={loaderData.unavailableReason} />
+    }
     const { PublicCfpPage } = await import('./components/public-cfp-page.tsx')
     const { event, form, tracks, formats } = loaderData.cfp
     const callbackURL = `/submit/${params.eventSlug}/${params.formSlug}`
@@ -618,6 +656,15 @@ export const app = new Spiceflow()
     if (!ctx) {
       return emptyPortalShell(session.user.email, session.user.name)
     }
+    const openCfpForms = ctx.event.status === 'ACTIVE'
+      ? await getDb().query.form.findMany({
+        where: { eventId: ctx.event.id, purpose: 'CFP', status: 'OPEN' },
+        with: { versions: { orderBy: { createdAt: 'desc', id: 'desc' }, limit: 1 } },
+        orderBy: { createdAt: 'asc' },
+        limit: 20,
+      })
+      : []
+    const openCfp = openCfpForms.find((form) => form.versions.length > 0 && formScheduleBlock(form) == null)
     // No speaker row yet: show portal shell with empty lists (must CFP or be invited).
     const [sessionRows, assignmentRows] = ctx.speaker
       ? await Promise.all([
@@ -651,6 +698,7 @@ export const app = new Spiceflow()
         sessionTitle: row.session?.title ?? null,
         dueAt: row.dueAt,
       })),
+      openCfp: openCfp ? { slug: openCfp.slug, name: openCfp.name } : null,
     }
   })
 
@@ -671,21 +719,25 @@ export const app = new Spiceflow()
     }
     const ctx = await loadPortalContext(params.eventSlug, session)
     if (!ctx?.speaker) {
+      const scope: { tracks: FieldOption[]; formats: FieldOption[] } = { tracks: [], formats: [] }
       return {
         detail: null,
         draft: null,
-        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
+        scope,
         canEdit: false,
+        editBlockMessage: null,
         canWithdraw: false,
       }
     }
     const loaded = await getPortalSession(ctx.event.id, ctx.speaker.id, params.sessionId)
     if (!loaded) {
+      const scope: { tracks: FieldOption[]; formats: FieldOption[] } = { tracks: [], formats: [] }
       return {
         detail: null,
         draft: null,
-        scope: { tracks: [] as FieldOption[], formats: [] as FieldOption[] },
+        scope,
         canEdit: false,
+        editBlockMessage: null,
         canWithdraw: false,
       }
     }
@@ -709,12 +761,14 @@ export const app = new Spiceflow()
             firstName: row.speaker.firstName,
             lastName: row.speaker.lastName,
             email: row.speaker.email,
+            roleLabel: participantRoleLabel(row.role, row.sortOrder),
           }]
         }),
       },
       draft: restoreCfpEditDraft(loaded),
       scope: { tracks: libraryOptions(tracks), formats: libraryOptions(formats) },
       canEdit: loaded.canEdit,
+      editBlockMessage: loaded.editBlockMessage,
       canWithdraw: loaded.canWithdraw,
     }
   })
@@ -731,21 +785,18 @@ export const app = new Spiceflow()
     }
     const ctx = await loadPortalContext(params.eventSlug, session)
     if (!ctx?.speaker) {
-      return { profileForm: null, profileMdx: null, initialValues: {} as Record<string, string> }
+      const initialValues: Record<string, string> = {}
+      return { profileForm: null, profileMdx: null, initialValues }
     }
-    const form = await getPortalProfileForm(ctx.event.id)
-    if (!form) {
-      return { profileForm: null, profileMdx: null, initialValues: {} as Record<string, string> }
+    const profile = await loadSpeakerProfileForm(ctx.event.id, ctx.speaker)
+    if (!profile) {
+      const initialValues: Record<string, string> = {}
+      return { profileForm: null, profileMdx: null, initialValues }
     }
-    const db = getDb()
-    const version = await db.query.formVersion.findFirst({
-      where: { formId: form.id },
-      orderBy: { createdAt: 'desc', id: 'desc' },
-    })
     return {
-      profileForm: { id: form.id, name: form.name },
-      profileMdx: version?.mdxSource ?? null,
-      initialValues: draftValuesFromSpeaker(ctx.speaker).values as Record<string, string>,
+      profileForm: { id: profile.form.id, name: profile.form.name },
+      profileMdx: profile.version?.mdxSource ?? null,
+      initialValues: profile.initialValues,
     }
   })
 
@@ -848,85 +899,114 @@ export const app = new Spiceflow()
   // Both route families call loadPublicProgram(). This is the only anonymous
   // projection and therefore the only place publication and approval gates live.
 
-  .loader('/public/:eventSlug/*', async ({ params }) => ({
-    program: await loadPublicProgram(params.eventSlug),
-  }))
-  .loader('/embed/:eventSlug/*', async ({ params }) => ({
-    program: await loadPublicProgram(params.eventSlug),
-  }))
+  .loader('/public/:eventSlug/*', async ({ params, response }) => {
+    response.headers.set('cache-control', 'no-store')
+    return { program: await loadPublicProgram(params.eventSlug) }
+  })
+  .loader('/embed/:eventSlug/*', async ({ params, response }) => {
+    response.headers.set('cache-control', 'no-store')
+    return { program: await loadPublicProgram(params.eventSlug) }
+  })
   .get('/public/:eventSlug', async ({ params }) => {
     throw redirect(`/public/${encodeURIComponent(params.eventSlug)}/sessions`)
   }, { detail: { hide: true } })
   .page({
     path: '/public/:eventSlug/sessions',
     query: publicProgramQuerySchema,
-    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'sessions', query),
+    handler: async ({ loaderData, query }) => renderPublicProgram({ program: loaderData.program, view: 'sessions', filters: query }),
   })
   .page({
     path: '/public/:eventSlug/speakers',
     query: publicProgramQuerySchema,
-    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'speakers', query),
+    handler: async ({ loaderData, query }) => renderPublicProgram({ program: loaderData.program, view: 'speakers', filters: query }),
   })
   .page({
     path: '/public/:eventSlug/agenda',
     query: publicProgramQuerySchema,
-    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'agenda', query),
+    handler: async ({ loaderData, query }) => renderPublicProgram({ program: loaderData.program, view: 'agenda', filters: query }),
   })
   .page({
     path: '/public/:eventSlug/itinerary',
     query: publicProgramQuerySchema,
-    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'itinerary', query),
+    handler: async ({ loaderData, query }) => renderPublicProgram({ program: loaderData.program, view: 'itinerary', filters: query }),
   })
   .page({
     path: '/public/:eventSlug/gallery',
     query: publicProgramQuerySchema,
-    handler: async ({ loaderData, query }) => renderPublicProgram(loaderData.program, 'gallery', query),
+    handler: async ({ loaderData, query }) => renderPublicProgram({ program: loaderData.program, view: 'gallery', filters: query }),
   })
   .page({
     path: '/embed/:eventSlug/sessions',
     query: embedProgramQuerySchema,
-    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'sessions', request, response.headers),
+    handler: async ({ loaderData, query, response }) => renderValidatedEmbedProgram({ program: loaderData.program, view: 'sessions', query, headers: response.headers }),
   })
   .page({
     path: '/embed/:eventSlug/speakers',
     query: embedProgramQuerySchema,
-    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'speakers', request, response.headers),
+    handler: async ({ loaderData, query, response }) => renderValidatedEmbedProgram({ program: loaderData.program, view: 'speakers', query, headers: response.headers }),
   })
   .page({
     path: '/embed/:eventSlug/agenda',
     query: embedProgramQuerySchema,
-    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'agenda', request, response.headers),
+    handler: async ({ loaderData, query, response }) => renderValidatedEmbedProgram({ program: loaderData.program, view: 'agenda', query, headers: response.headers }),
   })
   .page({
     path: '/embed/:eventSlug/itinerary',
     query: embedProgramQuerySchema,
-    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'itinerary', request, response.headers),
+    handler: async ({ loaderData, query, response }) => renderValidatedEmbedProgram({ program: loaderData.program, view: 'itinerary', query, headers: response.headers }),
   })
   .page({
     path: '/embed/:eventSlug/gallery',
     query: embedProgramQuerySchema,
-    handler: async ({ loaderData, request, response }) => renderValidatedEmbedProgram(loaderData.program, 'gallery', request, response.headers),
+    handler: async ({ loaderData, query, response }) => renderValidatedEmbedProgram({ program: loaderData.program, view: 'gallery', query, headers: response.headers }),
   })
   .get('/public/:eventSlug/schedule.json', async ({ params, query }) => {
       const program = await loadPublicProgram(params.eventSlug)
-      if (!program) return json({ error: 'not_found' }, { status: 404 })
+      if (!program) return json({ message: 'Program not found', code: 'not_found' }, { status: 404 })
       return json({ event: program.event, sessions: filterPublicSessions(program.sessions, query) }, { headers: publicFeedHeaders('application/json; charset=utf-8') })
     }, { query: publicProgramQuerySchema })
   .get('/public/:eventSlug/speakers.json', async ({ params }) => {
     const program = await loadPublicProgram(params.eventSlug)
-    if (!program) return json({ error: 'not_found' }, { status: 404 })
+    if (!program) return json({ message: 'Program not found', code: 'not_found' }, { status: 404 })
     return json({ event: program.event, speakers: program.speakers }, { headers: publicFeedHeaders('application/json; charset=utf-8') })
   })
+  .get('/public/:eventSlug/widget.json', async ({ params, query }) => {
+    const program = await loadPublicProgram(params.eventSlug)
+    if (!program) return json({ message: 'Program not found', code: 'not_found' }, { status: 404 })
+    const { widget, accent: _accent, compact: _compact, fields: _fields, ...filters } = query
+    return json(selectPublicWidgetData({ program, view: widget, filters }), { headers: publicFeedHeaders('application/json; charset=utf-8') })
+  }, { query: widgetOutputQuerySchema })
+  .get('/public/:eventSlug/widget.xml', async ({ params, query }) => {
+    const program = await loadPublicProgram(params.eventSlug)
+    if (!program) return new Response('Not found', { status: 404, headers: publicFeedHeaders('text/plain; charset=utf-8') })
+    const { widget, accent: _accent, compact: _compact, fields: _fields, ...filters } = query
+    return new Response(renderPublicWidgetXml({ program, view: widget, filters }), { headers: publicFeedHeaders('application/xml; charset=utf-8') })
+  }, { query: widgetOutputQuerySchema })
+  .get('/public/:eventSlug/widget.html', async ({ params, query }) => {
+    const program = await loadPublicProgram(params.eventSlug)
+    if (!program) return new Response('Not found', { status: 404, headers: publicFeedHeaders('text/plain; charset=utf-8') })
+    const { widget, accent: _accent, compact: _compact, fields, ...filters } = query
+    return new Response(renderPublicWidgetHtml({ program, view: widget, filters, fields: parsePublicWidgetFields(fields) }), { headers: publicFeedHeaders('text/html; charset=utf-8') })
+  }, { query: widgetOutputQuerySchema })
+  .get('/public/:eventSlug/widget.js', async ({ params, query, request }) => {
+    const program = await loadPublicProgram(params.eventSlug)
+    if (!program) return new Response('Not found', { status: 404, headers: publicFeedHeaders('text/plain; charset=utf-8') })
+    const { widget, ...embedQuery } = query
+    const search = new URLSearchParams(Object.entries(embedQuery).flatMap(([key, value]) => value ? [[key, value]] : []))
+    const suffix = search.size ? `?${search}` : ''
+    const iframeUrl = new URL(`/embed/${encodeURIComponent(params.eventSlug)}/${widget}${suffix}`, request.url).href
+    return new Response(buildPublicWidgetScript({ iframeUrl, title: `${program.event.name} ${widget}` }), { headers: publicFeedHeaders('text/javascript; charset=utf-8') })
+  }, { query: widgetOutputQuerySchema })
   .get('/public/:eventSlug/schedule.ics', async ({ params, query }) => {
       const program = await loadPublicProgram(params.eventSlug)
       if (!program) return new Response('Not found', { status: 404 })
-      return publicCalendarResponse(program, filterPublicSessions(program.sessions, query), `${program.event.slug}-schedule.ics`)
+      return publicCalendarResponse({ program, sessions: filterPublicSessions(program.sessions, query), fileName: `${program.event.slug}-schedule.ics` })
     }, { query: publicProgramQuerySchema })
   .get('/public/:eventSlug/personal.ics', async ({ params, query }) => {
       const program = await loadPublicProgram(params.eventSlug)
       if (!program) return new Response('Not found', { status: 404 })
       const selected = new Set(query.session)
-      return publicCalendarResponse(program, program.sessions.filter((session) => selected.has(session.id)), `${program.event.slug}-my-schedule.ics`)
+      return publicCalendarResponse({ program, sessions: program.sessions.filter((session) => selected.has(session.id)), fileName: `${program.event.slug}-my-schedule.ics` })
     }, { query: personalIcsQuerySchema })
 
   // ── Org dashboard (/org/:orgId/*) ─────────────────────────────────
@@ -1095,7 +1175,7 @@ export const app = new Spiceflow()
   // (tracks/formats/rooms) in ONE db.query. Events from other orgs (or
   // stale ids) bounce back to the org index.
 
-  .loader('/org/:orgId/e/:eventId/*', async ({ params }) => {
+  .loader('/org/:orgId/e/:eventId/*', async ({ params, request }) => {
     const db = getDb()
     const found = await db.query.event.findFirst({
       where: { id: params.eventId, orgId: params.orgId },
@@ -1107,7 +1187,7 @@ export const app = new Spiceflow()
     })
     if (!found) throw redirect(`/org/${params.orgId}`)
     const { tracks, formats, rooms, ...event } = found
-    return { event, tracks, formats, rooms, appUrl: env.APP_URL }
+    return { event, tracks, formats, rooms, appUrl: request.parsedUrl.origin }
   })
 
   .layout('/org/:orgId/e/:eventId/*', async ({ children }) => {
@@ -1121,21 +1201,169 @@ export const app = new Spiceflow()
   })
 
   // ── Event dashboard (index) ───────────────────────────────────────
-  // Simple overview for now: name, dates, status, count row. The full
-  // KPI dashboard (per-form progress, nudges) is a later task.
-
   .page('/org/:orgId/e/:eventId', async ({ loaderData }) => {
-    const { event } = loaderData
+    const { event, tracks, formats, rooms } = loaderData
     const db = getDb()
-    const [sessions, speakers, forms] = await db.batch([
-      db.query.eventSession.findMany({ where: { eventId: event.id }, columns: { id: true } }),
-      db.query.speaker.findMany({ where: { eventId: event.id }, columns: { id: true } }),
-      db.query.form.findMany({ where: { eventId: event.id }, columns: { id: true } }),
+    const [sessions, forms, assignments] = await db.batch([
+      db.query.eventSession.findMany({
+        where: { eventId: event.id, kind: 'CONTENT' },
+        with: {
+          participants: true,
+          reviews: { with: { response: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+        limit: 1000,
+      }),
+      db.query.form.findMany({
+        where: { eventId: event.id },
+        with: { versions: { orderBy: { createdAt: 'desc', id: 'desc' }, limit: 1 } },
+        orderBy: { createdAt: 'desc' },
+        limit: 100,
+      }),
+      db.query.taskAssignment.findMany({
+        where: { eventId: event.id },
+        orderBy: { createdAt: 'desc' },
+        limit: 1000,
+      }),
     ] as const)
+    const now = Date.now()
+    const libraryReady = tracks.length > 0 && formats.length > 0 && rooms.length > 0
+    const missingLibraryItems = [
+      tracks.length === 0 ? 'tracks' : null,
+      formats.length === 0 ? 'formats' : null,
+      rooms.length === 0 ? 'rooms' : null,
+    ].filter(Boolean).join(', ')
+    const cfpForms = forms.filter((form) => form.purpose === 'CFP' && form.versions.length > 0)
+    const openCfp = event.status === 'ACTIVE'
+      ? cfpForms.find((form) => formScheduleBlock(form, now) == null)
+      : undefined
+    const submitted = sessions.filter((session) => session.status !== 'DRAFT' && session.status !== 'WITHDRAWN')
+    const collectionComplete = cfpForms.length > 0 && submitted.length > 0
+    const reviews = submitted.flatMap((session) => session.reviews)
+    const completedReviews = reviews.filter((review) => review.response?.status === 'SUBMITTED')
+    const resolvedReviews = reviews.filter((review) => review.recusedAt != null || review.response?.status === 'SUBMITTED')
+    const evaluationComplete = submitted.length > 0
+      && reviews.length > 0
+      && resolvedReviews.length === reviews.length
+      && submitted.every((session) => session.reviews.some((review) => review.response?.status === 'SUBMITTED'))
+    const decisionRows = submitted.filter((session) => session.status !== 'WITHDRAWN')
+    const finalDecisions = decisionRows.filter((session) => session.status === 'ACCEPTED' || session.status === 'DECLINED')
+    const queuedDecisions = decisionRows.filter((session) => session.status === 'ACCEPT_QUEUE' || session.status === 'DECLINE_QUEUE')
+    const unnotifiedDecisions = finalDecisions.filter((session) => session.notifiedAt == null)
+    const decisionsComplete = decisionRows.length > 0
+      && finalDecisions.length === decisionRows.length
+      && unnotifiedDecisions.length === 0
+    const accepted = sessions.filter((session) => session.status === 'ACCEPTED')
+    const acceptedSessionIds = new Set(accepted.map((session) => session.id))
+    const acceptedSpeakerIds = new Set(accepted.flatMap((session) => session.participants.map((row) => row.speakerId)))
+    const relevantAssignments = assignments.filter((assignment) => assignment.sessionId
+      ? acceptedSessionIds.has(assignment.sessionId)
+      : acceptedSpeakerIds.has(assignment.speakerId))
+    const taskProgress = summarizeAssignmentProgress(relevantAssignments)
+    const onboardingComplete = accepted.length > 0
+      && taskProgress.total > 0
+      && taskProgress.completed === taskProgress.total
+    const approved = accepted.filter((session) => session.visibility === 'PUBLIC')
+    const scheduled = accepted.filter((session) => session.roomId && session.startsAt != null && session.endsAt != null)
+    const agendaReady = accepted.length > 0 && accepted.every((session) => (
+      session.visibility === 'PUBLIC'
+      && session.roomId != null
+      && session.startsAt != null
+      && session.endsAt != null
+    ))
+    const publicationComplete = event.status === 'ACTIVE'
+      && event.programPublishedAt != null
+      && agendaReady
+
+    type LifecycleStatus = 'completed' | 'current' | 'blocked'
+    const lifecycle: Array<{
+      label: string
+      detail: string
+      status: LifecycleStatus
+      href: string
+      action: string
+    }> = [
+      {
+        label: 'Set up the event library',
+        detail: libraryReady
+          ? `${tracks.length} track${tracks.length === 1 ? '' : 's'}, ${formats.length} format${formats.length === 1 ? '' : 's'}, and ${rooms.length} room${rooms.length === 1 ? '' : 's'} are ready.`
+          : `Add ${missingLibraryItems} before opening collection.`,
+        status: libraryReady ? 'completed' : 'current',
+        href: router.href(`/org/${event.orgId}/e/${event.id}/settings`, { tab: 'tracks' }),
+        action: 'Configure library',
+      },
+      {
+        label: 'Open CFP collection',
+        detail: collectionComplete
+          ? `${submitted.length} submitted proposal${submitted.length === 1 ? '' : 's'} collected${openCfp ? '; the CFP is still open' : '; collection is now closed'}.`
+          : openCfp
+            ? 'The CFP is open. Share it and collect the first submitted proposal.'
+            : 'Activate the event and open a versioned CFP form so speakers can submit.',
+        status: !libraryReady ? 'blocked' : collectionComplete ? 'completed' : 'current',
+        href: router.href('/org/:orgId/e/:eventId/forms', { orgId: event.orgId, eventId: event.id }),
+        action: openCfp ? 'Manage CFP' : 'Open CFP',
+      },
+      {
+        label: 'Complete evaluation',
+        detail: submitted.length === 0
+          ? 'Evaluation starts after the first submitted proposal.'
+          : reviews.length === 0
+            ? `${submitted.length} proposal${submitted.length === 1 ? '' : 's'} need reviewer assignments.`
+            : `${completedReviews.length} of ${reviews.length} assigned review${reviews.length === 1 ? ' is' : 's are'} submitted; every proposal needs a completed review.`,
+        status: !collectionComplete ? 'blocked' : evaluationComplete ? 'completed' : 'current',
+        href: router.href(`/org/${event.orgId}/e/${event.id}/evaluation`),
+        action: 'Open evaluation',
+      },
+      {
+        label: 'Finalize and notify decisions',
+        detail: decisionRows.length === 0
+          ? 'No submitted proposals are ready for a decision.'
+          : decisionsComplete
+            ? `${finalDecisions.length} final decision${finalDecisions.length === 1 ? '' : 's'} sent to speakers.`
+            : `${decisionRows.length - finalDecisions.length} awaiting a final decision, ${queuedDecisions.length} in decision queues, and ${unnotifiedDecisions.length} final but not notified.`,
+        status: !evaluationComplete ? 'blocked' : decisionsComplete ? 'completed' : 'current',
+        href: router.href(`/org/${event.orgId}/e/${event.id}/abstracts`, { status: 'all' }),
+        action: 'Review decision queues',
+      },
+      {
+        label: 'Complete speaker onboarding',
+        detail: accepted.length === 0
+          ? 'Speaker tasks start after at least one proposal is accepted.'
+          : taskProgress.total === 0
+            ? `${accepted.length} accepted session${accepted.length === 1 ? ' has' : 's have'} no speaker task assignments yet.`
+            : `${taskProgress.completed} of ${taskProgress.total} speaker task${taskProgress.total === 1 ? ' is' : 's are'} complete.`,
+        status: accepted.length === 0 ? 'blocked' : onboardingComplete ? 'completed' : 'current',
+        href: router.href(`/org/${event.orgId}/e/${event.id}/tasks`),
+        action: 'Track speaker tasks',
+      },
+      {
+        label: 'Prepare the agenda',
+        detail: accepted.length === 0
+          ? 'The agenda needs accepted sessions.'
+          : `${approved.length} of ${accepted.length} accepted session${accepted.length === 1 ? ' is' : 's are'} approved for public use; ${scheduled.length} ${scheduled.length === 1 ? 'is' : 'are'} scheduled.`,
+        status: accepted.length === 0 ? 'blocked' : agendaReady ? 'completed' : 'current',
+        href: router.href(`/org/${event.orgId}/e/${event.id}/agenda`),
+        action: 'Prepare agenda',
+      },
+      {
+        label: 'Publish the program',
+        detail: publicationComplete
+          ? `${accepted.length} approved and scheduled session${accepted.length === 1 ? ' is' : 's are'} available in the public program.`
+          : event.programPublishedAt != null
+            ? 'The publication flag is on, but accepted sessions still need public approval and schedule slots.'
+            : 'Publish only after accepted content is public, scheduled, and ready for attendees.',
+        status: !agendaReady ? 'blocked' : publicationComplete ? 'completed' : 'current',
+        href: router.href(`/org/${event.orgId}/e/${event.id}/agenda`),
+        action: 'Review publication',
+      },
+    ]
+    const nextStepIndex = lifecycle.findIndex((step) => step.status === 'current')
     const stats = [
-      { label: 'Sessions', value: sessions.length },
-      { label: 'Speakers', value: speakers.length },
-      { label: 'Forms', value: forms.length },
+      { label: 'Submitted', value: submitted.length },
+      { label: 'Reviews complete', value: `${completedReviews.length}/${reviews.length}` },
+      { label: 'Accepted / public', value: `${accepted.length}/${approved.length}` },
+      { label: 'Accepted scheduled', value: `${scheduled.length}/${accepted.length}` },
+      { label: 'Open speaker tasks', value: taskProgress.total - taskProgress.completed },
     ]
     return (
       <div className="flex flex-col gap-6">
@@ -1151,7 +1379,7 @@ export const app = new Spiceflow()
             {event.location ? ` · ${event.location}` : ''}
           </p>
         </div>
-        <div className="flex gap-10">
+        <div className="flex flex-wrap gap-x-10 gap-y-4 border-y border-border py-4">
           {stats.map((stat) => (
             <div key={stat.label} className="flex flex-col gap-0.5">
               <span className="text-2xl font-semibold tabular-nums">{stat.value}</span>
@@ -1159,9 +1387,41 @@ export const app = new Spiceflow()
             </div>
           ))}
         </div>
-        <p className="text-sm text-muted-foreground">
-          Publish a CFP form to start collecting submissions, then review abstracts and build the agenda.
-        </p>
+        <div className="flex flex-col gap-2">
+          <div className="flex flex-col gap-1">
+            <h2 className="text-base font-semibold">Program lifecycle</h2>
+            <p className="text-sm text-muted-foreground">Data from the event, CFP, reviews, decisions, speaker tasks, and agenda determines each state.</p>
+          </div>
+          <ol className="flex flex-col divide-y divide-border border-y border-border">
+            {lifecycle.map((step, index) => {
+              const next = index === nextStepIndex
+              return (
+                <li key={step.label} className={cn('flex flex-col gap-3 py-4 sm:flex-row sm:items-center sm:justify-between', next && 'bg-primary/5 px-4')}>
+                  <div className="flex min-w-0 items-start gap-3">
+                    <span className={cn(
+                      'mt-1.5 size-2.5 shrink-0 rounded-full',
+                      step.status === 'completed' && 'bg-success',
+                      step.status === 'current' && 'bg-primary',
+                      step.status === 'blocked' && 'bg-muted-foreground/30',
+                    )} />
+                    <div className="flex min-w-0 flex-col gap-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="font-medium">{step.label}</span>
+                        <Badge variant={step.status === 'completed' ? 'success' : step.status === 'current' ? 'default' : 'secondary'}>
+                          {next ? 'Next' : step.status}
+                        </Badge>
+                      </div>
+                      <p className="text-sm text-muted-foreground">{step.detail}</p>
+                    </div>
+                  </div>
+                  <Link href={step.href} className={cn('shrink-0 text-sm font-medium no-underline hover:underline', next ? 'text-primary' : 'text-foreground')}>
+                    {step.action}
+                  </Link>
+                </li>
+              )
+            })}
+          </ol>
+        </div>
       </div>
     )
   })
@@ -1170,9 +1430,8 @@ export const app = new Spiceflow()
 
   .loader('/org/:orgId/e/:eventId/abstracts', async ({ params, request }) => {
     const db = getDb()
-    const url = new URL(request.url)
-    const statusTab = parseAbstractsStatusTab(url.searchParams.get('status'))
-    const q = url.searchParams.get('q') ?? ''
+    const statusTab = parseAbstractsStatusTab(request.parsedUrl.searchParams.get('status'))
+    const q = request.parsedUrl.searchParams.get('q') ?? ''
 
     const rows = await db.query.eventSession.findMany({
       where: { eventId: params.eventId, kind: 'CONTENT' },
@@ -1207,6 +1466,10 @@ export const app = new Spiceflow()
         formatName: row.format?.name ?? null,
         speakerNames,
         formName: submittedResponse?.form?.name ?? null,
+        avgRating: null,
+        yes: 0,
+        maybe: 0,
+        no: 0,
         notifiedAt: row.notifiedAt,
         submittedAt: row.submittedAt,
       }
@@ -1221,25 +1484,12 @@ export const app = new Spiceflow()
 
   .page({
     path: '/org/:orgId/e/:eventId/abstracts',
-    query: z.object({
-      status: z
-        .enum([
-          'all',
-          'pending',
-          'accept-queue',
-          'accepted',
-          'decline-queue',
-          'declined',
-          'withdrawn',
-          'drafts',
-        ])
-        .optional(),
-      q: z.string().optional(),
-    }),
+    query: abstractsQuerySchema,
     handler: async ({ query }) => {
       const { AbstractsPage } = await import('./components/abstracts-page.tsx')
       return (
         <AbstractsPage
+          key={`${query.status ?? 'all'}:${query.q ?? ''}`}
           status={query.status ?? 'all'}
           q={query.q ?? ''}
         />
@@ -1339,6 +1589,7 @@ export const app = new Spiceflow()
       participants: found.participants.map((p) => ({
         id: p.id,
         role: p.role,
+        roleLabel: participantRoleLabel(p.role, p.sortOrder),
         firstName: p.speaker?.firstName ?? '',
         lastName: p.speaker?.lastName ?? '',
         email: p.speaker?.email ?? '',
@@ -1366,21 +1617,20 @@ export const app = new Spiceflow()
     return <AbstractDetailPage />
   })
 
-  .get('/org/:orgId/e/:eventId/abstracts.csv', async ({ params, request }) => {
+  .get('/org/:orgId/e/:eventId/abstracts.csv', async ({ params, query, request }) => {
     const sessionUser = await getSession(request)
-    if (!sessionUser) throw redirect('/login')
+    if (!sessionUser) return json({ message: 'Not authenticated' }, { status: 401 })
     const member = await lookupOrgMember(sessionUser.userId, params.orgId)
-    if (!member) throw redirect('/login')
+    if (!member) return json({ message: 'Not authorized' }, { status: 403 })
     const db = getDb()
     const event = await db.query.event.findFirst({
       where: { id: params.eventId, orgId: params.orgId },
       columns: { id: true },
     })
-    if (!event) throw redirect(`/org/${params.orgId}`)
+    if (!event) return json({ message: 'Event not found' }, { status: 404 })
 
-    const url = new URL(request.url)
-    const statusTab = parseAbstractsStatusTab(url.searchParams.get('status'))
-    const q = url.searchParams.get('q') ?? ''
+    const statusTab = parseAbstractsStatusTab(query.status ?? null)
+    const q = query.q ?? ''
 
     const rows = await db.query.eventSession.findMany({
       where: { eventId: params.eventId, kind: 'CONTENT' },
@@ -1407,6 +1657,10 @@ export const app = new Spiceflow()
         formatName: row.format?.name ?? null,
         speakerNames,
         formName: submittedResponse?.form?.name ?? null,
+        avgRating: null,
+        yes: 0,
+        maybe: 0,
+        no: 0,
         notifiedAt: row.notifiedAt,
         submittedAt: row.submittedAt,
       }
@@ -1421,7 +1675,7 @@ export const app = new Spiceflow()
         'content-disposition': `attachment; filename="abstracts-${params.eventId}.csv"`,
       },
     })
-  })
+  }, { query: abstractsQuerySchema })
 
   // ── Sessions (ACCEPTED content + SERVICE blocks) ──────────────────
   // Times are converted to the event timezone HERE (server-side Intl) and
@@ -1478,32 +1732,24 @@ export const app = new Spiceflow()
       )
     },
   })
-  // ── Forms (CFP) list + MDX editor ─────────────────────────────────
-  // The live MDX of a form is the newest FormVersion. List counts come
-  // from ONE db.query (responses relation aggregated in JS — form counts
-  // are small).
+  // ── Forms list (CFP + PORTAL) + MDX editor ────────────────────────
+  // List counts come from
+  // ONE db.query (responses relation aggregated in JS — form counts are
+  // small). Legacy /portal-forms redirects here.
 
   .loader('/org/:orgId/e/:eventId/forms', async ({ params }) => {
     const db = getDb()
     const rows = await db.query.form.findMany({
-      where: { eventId: params.eventId, purpose: 'CFP' },
+      where: { eventId: params.eventId, purpose: { in: ['CFP', 'PORTAL'] } },
       with: { responses: { columns: { id: true, status: true } } },
       orderBy: { createdAt: 'desc' },
     })
     return { forms: rows.map(toFormListRow) }
   })
 
-  .page({
-    path: '/org/:orgId/e/:eventId/forms',
-    query: z.object({
-      // NOTE: zod .default() is not applied by spiceflow query validation —
-      // use .optional() and normalize in the handler.
-      status: z.enum(['all', 'draft', 'open', 'closed', 'archived']).optional(),
-    }),
-    handler: async ({ query }) => {
-      const { FormsListPage } = await import('./components/forms-list.tsx')
-      return <FormsListPage status={query.status ?? 'all'} />
-    },
+  .page('/org/:orgId/e/:eventId/forms', async () => {
+    const { FormsListPage } = await import('./components/forms-list.tsx')
+    return <FormsListPage />
   })
 
   .loader('/org/:orgId/e/:eventId/forms/:formId', async ({ params }) => {
@@ -1585,6 +1831,7 @@ export const app = new Spiceflow()
         formatName: row.format?.name ?? null,
       }
     })
+
     return {
       sessions: sessionRows,
       rounds: rounds.map((round) => {
@@ -1650,7 +1897,7 @@ export const app = new Spiceflow()
   .get('/org/:orgId/e/:eventId/evaluation/:formId/results.csv', async ({ params, request }) => {
     const sessionUser = await requireSession(request)
     const member = await lookupOrgMember(sessionUser.userId, params.orgId)
-    if (!member) return new Response('Forbidden', { status: 403 })
+    if (!member) return json({ message: 'Not authorized' }, { status: 403 })
     const db = getDb()
     const [event, form, sessions, assignments] = await db.batch([
       db.query.event.findFirst({ where: { id: params.eventId, orgId: params.orgId } }),
@@ -1658,7 +1905,7 @@ export const app = new Spiceflow()
       db.query.eventSession.findMany({ where: { eventId: params.eventId, kind: 'CONTENT' } }),
       db.query.review.findMany({ where: { eventId: params.eventId, formId: params.formId }, with: { reviewer: true, response: { with: { fieldValues: true } } } }),
     ] as const)
-    if (!event || !form?.versions[0]) return new Response('Not found', { status: 404 })
+    if (!event || !form?.versions[0]) return json({ message: 'Evaluation not found' }, { status: 404 })
     const fields = collectFields({ mdxSource: form.versions[0].mdxSource, scope: { values: {} } }).fields
     const normalized = assignments.map((assignment) => ({
       ...assignment,
@@ -1687,7 +1934,7 @@ export const app = new Spiceflow()
     const sessions = rows.map((row) => toAgendaRow(row, event.timezone))
     const byId = new Map(sessions.map((row) => [row.id, row]))
     const days = eventDayKeys(event.startsAt, event.endsAt, event.timezone)
-    const requestedDay = new URL(request.url).searchParams.get('day')
+    const requestedDay = request.parsedUrl.searchParams.get('day')
     const selectedDay = requestedDay && days.includes(requestedDay)
       ? requestedDay
       : (days[0] ?? '')
@@ -1819,27 +2066,9 @@ export const app = new Spiceflow()
       return <TasksPage tab={query.tab ?? 'all'} />
     },
   })
-  // ── Portal forms (?tab=speaker|submission) — same editor route ────
-
-  .loader('/org/:orgId/e/:eventId/portal-forms', async ({ params }) => {
-    const db = getDb()
-    const rows = await db.query.form.findMany({
-      where: { eventId: params.eventId, purpose: 'PORTAL' },
-      with: { responses: { columns: { id: true, status: true } } },
-      orderBy: { createdAt: 'desc' },
-    })
-    return { forms: rows.map(toFormListRow) }
-  })
-
-  .page({
-    path: '/org/:orgId/e/:eventId/portal-forms',
-    query: z.object({
-      tab: z.enum(['speaker', 'submission']).optional(),
-    }),
-    handler: async ({ query }) => {
-      const { PortalFormsPage } = await import('./components/forms-list.tsx')
-      return <PortalFormsPage tab={query.tab ?? 'speaker'} />
-    },
+  // Legacy Portal Forms route → unified Forms list.
+  .page('/org/:orgId/e/:eventId/portal-forms', async ({ params }) => {
+    throw redirect(`/org/${params.orgId}/e/${params.eventId}/forms`)
   })
   .loader('/org/:orgId/e/:eventId/speakers', async ({ params }) => {
     const db = getDb()
@@ -1872,26 +2101,9 @@ export const app = new Spiceflow()
     },
   })
   .loader('/org/:orgId/e/:eventId/speakers/:speakerId', async ({ params, response }) => {
-    const db = getDb()
-    const [speaker, sessions] = await db.batch([
-      db.query.speaker.findFirst({
-        where: { id: params.speakerId, eventId: params.eventId },
-        with: {
-          headshotFile: true,
-          participations: { orderBy: { sortOrder: 'asc' }, with: { session: true } },
-          taskAssignments: { with: { taskDefinition: true, session: true }, orderBy: { createdAt: 'asc' } },
-          uploadedFiles: { orderBy: { createdAt: 'desc' } },
-          emailMessages: { orderBy: { createdAt: 'desc' }, limit: 100 },
-        },
-      }),
-      db.query.eventSession.findMany({
-        where: { eventId: params.eventId, kind: 'CONTENT' },
-        with: { participants: { orderBy: { sortOrder: 'asc' }, with: { speaker: true } } },
-        orderBy: { title: 'asc' },
-      }),
-    ] as const)
-    if (!speaker) response.status = 404
-    return { speaker, sessions }
+    const detail = await loadOrganizerSpeakerDetail(params.eventId, params.speakerId)
+    if (!detail.speaker) response.status = 404
+    return detail
   })
   .page('/org/:orgId/e/:eventId/speakers/:speakerId', async () => {
     const { SpeakerDetailPage } = await import('./components/speakers-page.tsx')
@@ -2014,28 +2226,28 @@ export async function loadPublicProgram(eventSlug: string): Promise<PublicProgra
   })
   if (!found) return null
   const { sessions, ...event } = found
-  return projectPublicProgram({ event, sessions } as PublicProgramSource)
+  return projectPublicProgram({ event, sessions })
 }
 
-async function renderPublicProgram(
+async function renderPublicProgram({ program, view, filters }: {
   program: PublicProgram | null,
   view: 'sessions' | 'speakers' | 'agenda' | 'itinerary' | 'gallery',
   filters: PublicProgramFilters,
-) {
+}) {
   if (!program) return <PublicUnavailable />
   const { PublicProgramPage } = await import('./components/public-program-page.tsx')
   return <PublicProgramPage program={program} view={view} initialFilters={filters} />
 }
 
-async function renderEmbedProgram(
+async function renderEmbedProgram({ program, view, query, headers }: {
   program: PublicProgram | null,
   view: 'sessions' | 'speakers' | 'agenda' | 'itinerary' | 'gallery',
   query: PublicProgramFilters & { accent?: string; compact?: '0' | '1'; fields?: string },
   headers: Headers,
-) {
+}) {
   headers.set('content-security-policy', 'frame-ancestors *')
   headers.set('referrer-policy', 'strict-origin-when-cross-origin')
-  headers.set('cache-control', 'public, max-age=60, stale-while-revalidate=300')
+  headers.set('cache-control', 'no-store')
   headers.set('access-control-allow-origin', '*')
   if (!program) return <PublicUnavailable />
   const { accent, compact, fields, ...filters } = query
@@ -2048,36 +2260,38 @@ async function renderEmbedProgram(
       initialFilters={filters}
       accent={accent}
       compact={compact === '1'}
-      visibleFields={fields?.split(',')}
+      visibleFields={parsePublicWidgetFields(fields)}
     />
   )
 }
 
-async function renderValidatedEmbedProgram(
+async function renderValidatedEmbedProgram({ program, view, query, headers }: {
   program: PublicProgram | null,
   view: 'sessions' | 'speakers' | 'agenda' | 'itinerary' | 'gallery',
-  request: Request,
+  query: z.input<typeof embedProgramQuerySchema>,
   headers: Headers,
-) {
-  const query = validatedEmbedQuery(request)
-  if (!query) return json({ error: 'invalid_embed_query' }, { status: 400 })
-  return renderEmbedProgram(program, view, query, headers)
+}) {
+  const parsed = embedProgramQuerySchema.safeParse(query)
+  if (!parsed.success) {
+    return json({ message: 'Invalid embed options', code: 'invalid_embed_query' }, { status: 400 })
+  }
+  return renderEmbedProgram({ program, view, query: parsed.data, headers })
 }
 
 function publicFeedHeaders(contentType: string): HeadersInit {
   return {
     'content-type': contentType,
-    'cache-control': 'public, max-age=60, stale-while-revalidate=300',
+    'cache-control': 'no-store',
     'access-control-allow-origin': '*',
     'x-content-type-options': 'nosniff',
   }
 }
 
-function publicCalendarResponse(
+function publicCalendarResponse({ program, sessions, fileName }: {
   program: PublicProgram,
   sessions: PublicProgram['sessions'],
   fileName: string,
-) {
+}) {
   let appDomain = 'opensession.dev'
   try {
     appDomain = new URL(env.APP_URL).host
@@ -2105,13 +2319,19 @@ function publicCalendarResponse(
   })
 }
 
+
+/** Map a form row (with its responses relation) to the list-row shape the
+ *  forms table renders: response rows collapse to counts. */
 async function loadReviewerRound(request: Request, formId: string) {
-  const sessionUser = await requireSession(request)
+  const sessionUser = await getSession(request)
+  if (!sessionUser) {
+    throw redirect(`/login?callbackURL=${encodeURIComponent(`/review/${formId}`)}`)
+  }
   const db = getDb()
   const membership = await db.query.evaluationReviewer.findFirst({
     where: { formId, userId: sessionUser.userId },
   })
-  if (!membership) throw json({ error: 'not_found' }, { status: 404 })
+  if (!membership) throw json({ message: 'Organization not found', code: 'not_found' }, { status: 404 })
   const [form, rows] = await db.batch([
     db.query.form.findFirst({
       where: { id: formId, eventId: membership.eventId, purpose: 'EVALUATION' },
@@ -2137,7 +2357,7 @@ async function loadReviewerRound(request: Request, formId: string) {
       orderBy: { createdAt: 'asc' },
     }),
   ] as const)
-  if (!form?.event || !form.versions[0]) throw json({ error: 'not_found' }, { status: 404 })
+  if (!form?.event || !form.versions[0]) throw json({ message: 'Form not found', code: 'not_found' }, { status: 404 })
   const currentVersion = form.versions[0]
   const assignments = rows.flatMap((row) => {
     if (!row.session) return []
@@ -2154,6 +2374,7 @@ async function loadReviewerRound(request: Request, formId: string) {
       formatName: row.session.format?.name ?? null,
       participants: row.session.participants.flatMap((participant) => participant.speaker ? [{
         role: participant.role,
+        roleLabel: participantRoleLabel(participant.role, participant.sortOrder),
         firstName: participant.speaker.firstName,
         lastName: participant.speaker.lastName,
         email: participant.speaker.email,
@@ -2196,8 +2417,11 @@ async function loadReviewerRound(request: Request, formId: string) {
   }
 }
 
-/** Map a form row (with its responses relation) to the list-row shape the
- *  forms/portal-forms tables render: response rows collapse to counts. */
+function participantRoleLabel(role: 'SPEAKER' | 'MODERATOR', sortOrder: number) {
+  if (role === 'MODERATOR') return 'Moderator'
+  return sortOrder === 0 ? 'Primary speaker' : 'Co-speaker'
+}
+
 function toFormListRow<T extends { responses: { status: 'DRAFT' | 'SUBMITTED' }[] }>({ responses, ...form }: T) {
   return {
     ...form,
@@ -2251,13 +2475,16 @@ function EventStatusBadge({ status }: { status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED' 
   )
 }
 
-function PublicUnavailable() {
+function PublicUnavailable({ reason }: { reason?: PublicCfpBlockReason | null }) {
+  const detail = reason
+    ? publicCfpBlockMessage(reason)
+    : 'The event or form may be closed, archived, or no longer public.'
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-16">
-      <div className="flex max-w-sm flex-col items-center gap-5 text-center text-balance">
+      <div className="flex max-w-md flex-col items-center gap-5 text-center text-balance">
         <OpenSessionLogo imageClassName="h-8" />
         <h1 className="text-xl font-semibold">This page is not available</h1>
-        <p className="text-sm text-muted-foreground">The event or form may be closed, archived, or no longer public.</p>
+        <p className="text-sm text-muted-foreground">{detail}</p>
       </div>
     </main>
   )
@@ -2537,7 +2764,7 @@ function DashboardNavbar({ orgId, orgSlot, eventSlot, userSlot }: {
                 re-run session + org resolution on every logo click. */}
             {/* self-end: the logo is shorter than the org/event switcher
                 buttons, so bottom-align it with their baseline row. */}
-            <Link href={`/org/${orgId}`} className="self-end hover:opacity-80 transition-opacity">
+            <Link href={router.href('/org/:orgId', { orgId })} className="self-end hover:opacity-80 transition-opacity">
               <OpenSessionLogo />
             </Link>
             {orgSlot}
@@ -2546,9 +2773,7 @@ function DashboardNavbar({ orgId, orgSlot, eventSlot, userSlot }: {
           </div>
           <div className="flex items-center gap-4">
             <Link
-              // @ts-ignore -- '/' is served by the mounted holocron app,
-              // not a registered app route, so router.href can't type it.
-              href="/"
+              href={router.href('/')}
               className="hidden sm:block text-sm text-muted-foreground hover:text-foreground transition-colors"
             >
               Home
@@ -2563,9 +2788,9 @@ function DashboardNavbar({ orgId, orgSlot, eventSlot, userSlot }: {
 
 function DashboardTabBar({ pathname, orgId }: { pathname: string; orgId: string }) {
   const tabs = [
-    { label: 'Overview', href: `/org/${orgId}` },
-    { label: 'Speaker CRM', href: `/org/${orgId}/crm` },
-    { label: 'Members', href: `/org/${orgId}/members` },
+    { label: 'Overview', href: router.href('/org/:orgId', { orgId }) },
+    { label: 'Speaker CRM', href: router.href(`/org/${orgId}/crm`) },
+    { label: 'Members', href: router.href('/org/:orgId/members', { orgId }) },
   ] as const
 
   return (

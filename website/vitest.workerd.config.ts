@@ -7,6 +7,7 @@ import {
   cloudflareTest,
   readD1Migrations,
 } from '@cloudflare/vitest-pool-workers'
+import spiceflow from 'spiceflow/vite'
 import { defineConfig } from 'vitest/config'
 
 const migrationsPath = path.resolve(import.meta.dirname, '../db/drizzle')
@@ -26,8 +27,8 @@ const migrations = (await Promise.all(
 )).flat()
 
 export default defineConfig({
-  // Holocron owns the Spiceflow plugin, but its workerd environment does not
-  // inherit Spiceflow's Vitest condition. This enables direct page rendering.
+  // Cloudflare's worker build does not inherit Spiceflow's Vitest condition
+  // from Holocron's nested plugin. Page routes need it to return test responses.
   resolve: { conditions: ['spiceflow-vitest'] },
   plugins: [
     cloudflareTest({
@@ -46,6 +47,10 @@ export default defineConfig({
         },
       },
     }),
+    // The direct plugin call activates Spiceflow's Vitest transforms. In
+    // particular, it strips `use server` so actions are plain functions for
+    // runAction(), as documented in Spiceflow's testing guide.
+    spiceflow({ entry: './src/app.tsx' }),
     holocron({ entry: './src/app.tsx', pagesDir: 'src/pages' }),
   ],
   test: {

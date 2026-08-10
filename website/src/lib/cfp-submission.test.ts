@@ -7,9 +7,12 @@ import {
   assertCfpResponseLimit,
   canAccessFile,
   flattenSubmissionValues,
+  formScheduleBlock,
+  isFormScheduleOpen,
   isResumableCfpDraft,
   shouldCreateCfpDraft,
   validatePinnedSubmission,
+  type FormScheduleInput,
 } from './cfp-submission.ts'
 
 describe('assertCfpResponseLimit', () => {
@@ -177,5 +180,37 @@ describe('validatePinnedSubmission', () => {
         "participantFields": [],
       }
     `)
+  })
+})
+
+describe('formScheduleBlock', () => {
+  const open: FormScheduleInput = {
+    status: 'OPEN',
+    opensAt: null,
+    closesAt: null,
+  }
+  const now = 1_700_000_000_000
+
+  test('null opensAt and closesAt means open forever while status is OPEN', () => {
+    expect(formScheduleBlock(open, now)).toBeNull()
+    expect(isFormScheduleOpen(open, now)).toBe(true)
+  })
+
+  test('future opensAt blocks until that time; past opensAt does not', () => {
+    expect(formScheduleBlock({ ...open, opensAt: now + 1 }, now)).toBe('not_yet_open')
+    expect(formScheduleBlock({ ...open, opensAt: now - 1 }, now)).toBeNull()
+  })
+
+  test('past closesAt blocks; future closesAt does not; null never blocks', () => {
+    expect(formScheduleBlock({ ...open, closesAt: now }, now)).toBe('past_deadline')
+    expect(formScheduleBlock({ ...open, closesAt: now - 1 }, now)).toBe('past_deadline')
+    expect(formScheduleBlock({ ...open, closesAt: now + 1 }, now)).toBeNull()
+    expect(formScheduleBlock({ ...open, closesAt: null }, now)).toBeNull()
+  })
+
+  test('status draft/closed/archived always blocks even with null dates', () => {
+    expect(formScheduleBlock({ ...open, status: 'DRAFT' }, now)).toBe('status_draft')
+    expect(formScheduleBlock({ ...open, status: 'CLOSED' }, now)).toBe('status_closed')
+    expect(formScheduleBlock({ ...open, status: 'ARCHIVED' }, now)).toBe('status_archived')
   })
 })

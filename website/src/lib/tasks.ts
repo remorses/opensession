@@ -99,7 +99,7 @@ export function assertTaskDefinitionShape(input: {
   source: TaskSource
   target: TaskTarget
   formId: string | null
-  form?: { purpose: 'CFP' | 'PORTAL' | 'EVALUATION'; target: 'SPEAKER' | 'SUBMISSION' } | null
+  form?: { purpose: 'CFP' | 'PORTAL'; target: 'SPEAKER' | 'SUBMISSION' } | null
 }): void {
   if (input.source === 'MANUAL') {
     if (input.formId != null) {
@@ -158,28 +158,30 @@ export function defaultFormTaskDefinitions({
   speakerProfileFormId: string
   sessionMaterialsFormId: string
 }) {
+  const instructionsHtml: string | null = null
+  const dueAt: number | null = null
   return [
     {
       eventId,
       title: 'Complete Speaker Profile',
-      instructionsHtml: null as string | null,
+      instructionsHtml,
       target: 'SPEAKER' as const,
       source: 'FORM' as const,
       assignmentPolicy: 'ALL_ACCEPTED' as const,
       formId: speakerProfileFormId,
-      dueAt: null as number | null,
+      dueAt,
       sortOrder: 0,
       createdAt: now,
     },
     {
       eventId,
       title: 'Upload Session Materials',
-      instructionsHtml: null as string | null,
+      instructionsHtml,
       target: 'SUBMISSION' as const,
       source: 'FORM' as const,
       assignmentPolicy: 'ALL_ACCEPTED' as const,
       formId: sessionMaterialsFormId,
-      dueAt: null as number | null,
+      dueAt,
       sortOrder: 1,
       createdAt: now,
     },
@@ -188,26 +190,29 @@ export function defaultFormTaskDefinitions({
 
 /** @deprecated use defaultFormTaskDefinitions — kept only if a caller needs MANUAL seeds. */
 export function defaultManualTaskDefinitions(eventId: string, now: number) {
+  const instructionsHtml: string | null = null
+  const formId: string | null = null
+  const dueAt: number | null = null
   return [
     {
       eventId,
       title: 'Complete Speaker Profile',
-      instructionsHtml: null as string | null,
+      instructionsHtml,
       target: 'SPEAKER' as const,
       source: 'MANUAL' as const,
-      formId: null as string | null,
-      dueAt: null as number | null,
+      formId,
+      dueAt,
       sortOrder: 0,
       createdAt: now,
     },
     {
       eventId,
       title: 'Upload Session Materials',
-      instructionsHtml: null as string | null,
+      instructionsHtml,
       target: 'SUBMISSION' as const,
       source: 'MANUAL' as const,
-      formId: null as string | null,
-      dueAt: null as number | null,
+      formId,
+      dueAt,
       sortOrder: 1,
       createdAt: now,
     },

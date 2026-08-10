@@ -45,7 +45,9 @@ export function Textarea({ className, ...props }: React.ComponentProps<'textarea
 // ── NativeSelect ────────────────────────────────────────────────────
 
 const nativeSelectVariants = cva(
-  'relative inline-flex min-h-9 w-full min-w-36 items-center rounded-lg border border-input bg-background px-[calc(--spacing(3)-1px)] pr-8 text-left text-base text-foreground shadow-xs/5 outline-none ring-ring/24 transition-shadow focus-visible:border-ring focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-64 sm:min-h-8 sm:text-sm dark:bg-input/32',
+  // min-w-0 (not min-w-36): w-full selects in tight grids (e.g. Place session
+  // Day/Start/Minutes) must shrink with the column instead of overflowing.
+  'relative inline-flex min-h-9 w-full min-w-0 items-center rounded-lg border border-input bg-background px-[calc(--spacing(3)-1px)] pr-8 text-left text-base text-foreground shadow-xs/5 outline-none ring-ring/24 transition-shadow focus-visible:border-ring focus-visible:ring-[3px] disabled:pointer-events-none disabled:opacity-64 sm:min-h-8 sm:text-sm dark:bg-input/32',
 )
 
 export function NativeSelect({

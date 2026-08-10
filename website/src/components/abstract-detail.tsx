@@ -11,7 +11,7 @@ import {
   setSessionVisibility,
   updateSessionStatus,
 } from '../actions.tsx'
-import { runAction, toastActionError } from './ui/toast.tsx'
+import { runAction, toast, toastActionError } from './ui/toast.tsx'
 import type { SessionStatus } from '../lib/submissions.ts'
 import { formatDateTimeUTC } from '../lib/utils.ts'
 import { SessionStatusBadge } from './abstracts-page.tsx'
@@ -41,7 +41,7 @@ export function AbstractDetailPage() {
           <ArrowLeftIcon className="size-3.5" />
           Abstracts
         </Link>
-        <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex flex-wrap items-start justify-between gap-4">
           <div className="flex flex-col gap-2">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-semibold tracking-tight text-balance">
@@ -54,36 +54,22 @@ export function AbstractDetailPage() {
               {session.submittedAt ? ` · submitted ${formatDateTimeUTC(session.submittedAt)}` : ''}
             </p>
           </div>
-          <DecisionActions
-            orgId={currentOrgId}
-            eventId={event.id}
-            sessionId={session.id}
-            status={session.status}
-          />
-          <div className="flex flex-wrap items-center justify-end gap-2">
-            <NativeSelect
-              aria-label="Content approval"
-              className="w-36"
-              disabled={visibilityPending}
-              value={session.visibility}
-              onChange={(change) => startVisibility(async () => {
-                await runAction(() => setSessionVisibility({
-                  orgId: currentOrgId,
-                  eventId: event.id,
-                  sessionId: session.id,
-                  visibility: change.target.value === 'PUBLIC' ? 'PUBLIC' : 'PRIVATE',
-                }), { fallbackError: 'Could not update content approval' })
-              })}
-            >
-              <option value="PRIVATE">Not approved</option>
-              <option value="PUBLIC">Approved</option>
-            </NativeSelect>
-            <Button size="sm" variant="outline" onClick={() => setEditOpen(true)}>
-              <PencilIcon data-icon="inline-start" />
-              Edit content
-            </Button>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="flex flex-col items-start gap-2"><span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Decision</span><DecisionActions orgId={currentOrgId} eventId={event.id} sessionId={session.id} status={session.status} /></div>
+            <div className="flex flex-col items-start gap-2"><span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Public visibility</span><div className="flex flex-wrap items-center gap-2"><NativeSelect aria-label="Content approval" className="w-36" disabled={visibilityPending} value={session.visibility} onChange={(change) => startVisibility(async () => {
+              const visibility = change.target.value === 'PUBLIC' ? 'PUBLIC' : 'PRIVATE'
+              const result = await runAction(() => setSessionVisibility({ orgId: currentOrgId, eventId: event.id, sessionId: session.id, visibility }), { fallbackError: 'Could not update content approval' })
+              if (result) toast.success(visibility === 'PUBLIC' ? 'Content approved for public output' : 'Content returned to private')
+            })}><option value="PRIVATE">Not approved</option><option value="PUBLIC">Approved</option></NativeSelect><Button size="sm" variant="outline" onClick={() => setEditOpen(true)}><PencilIcon data-icon="inline-start" />Edit content</Button></div></div>
           </div>
         </div>
+      </div>
+
+      <div className="grid overflow-hidden rounded-lg border border-border sm:grid-cols-4">
+        <div className="border-b border-border px-3 py-2.5 sm:border-b-0 sm:border-r"><span className="text-sm font-medium">Accepted</span><p className="text-xs text-muted-foreground">{session.status === 'ACCEPTED' ? 'The proposal is now a program session.' : 'Requires a final accepted decision.'}</p></div>
+        <div className="border-b border-border px-3 py-2.5 sm:border-b-0 sm:border-r"><span className="text-sm font-medium">Notified</span><p className="text-xs text-muted-foreground">Decision email reached the speaker{session.notifiedAt ? ` on ${formatDateTimeUTC(session.notifiedAt)}` : ': not yet'}.</p></div>
+        <div className="border-b border-border px-3 py-2.5 sm:border-b-0 sm:border-r"><span className="text-sm font-medium">Approved</span><p className="text-xs text-muted-foreground">Content is allowed in public output: {session.visibility === 'PUBLIC' ? 'yes' : 'no'}.</p></div>
+        <div className="px-3 py-2.5"><span className="text-sm font-medium">Published</span><p className="text-xs text-muted-foreground">The event program must also be published and the session scheduled.</p></div>
       </div>
 
       <div className="grid gap-5 lg:grid-cols-[1fr_20rem]">
@@ -132,7 +118,7 @@ export function AbstractDetailPage() {
                       <span className="font-medium">
                         {[p.firstName, p.lastName].filter(Boolean).join(' ') || p.email || 'Speaker'}
                         <span className="ml-1.5 text-xs font-normal text-muted-foreground">
-                          {p.role.toLowerCase()}
+                          {p.roleLabel}
                         </span>
                       </span>
                       <span className="text-muted-foreground">
@@ -342,6 +328,7 @@ function DecisionActions({
     startTransition(async () => {
       try {
         await updateSessionStatus({ orgId, eventId, sessionId, status: next })
+        toast.success(`Moved to ${next.replaceAll('_', ' ').toLowerCase()}`, 'Decision updated')
       } catch (err) {
         setError(toastActionError(err, 'Status update failed'))
       }
@@ -349,8 +336,8 @@ function DecisionActions({
   }
 
   return (
-    <div className="flex flex-col items-end gap-2">
-      <div className="flex flex-wrap justify-end gap-2">
+    <div className="flex flex-col items-start gap-2">
+      <div className="flex flex-wrap gap-2">
         {status === 'PENDING' || status === 'DECLINE_QUEUE' ? (
           <Button size="sm" disabled={pending} onClick={() => move('ACCEPT_QUEUE')}>
             Accept queue
@@ -361,14 +348,14 @@ function DecisionActions({
             Decline queue
           </Button>
         ) : null}
-        {status === 'ACCEPT_QUEUE' ? (
-          <Button size="sm" disabled={pending} onClick={() => move('ACCEPTED')}>
-            Accept now
+        {status === 'ACCEPTED' ? (
+          <Button size="sm" variant="outline" disabled={pending} onClick={() => move('DECLINE_QUEUE')}>
+            Reconsider for decline
           </Button>
         ) : null}
-        {status === 'DECLINE_QUEUE' ? (
-          <Button size="sm" variant="outline" disabled={pending} onClick={() => move('DECLINED')}>
-            Decline now
+        {status === 'DECLINED' ? (
+          <Button size="sm" disabled={pending} onClick={() => move('ACCEPT_QUEUE')}>
+            Reconsider for acceptance
           </Button>
         ) : null}
         {status === 'ACCEPT_QUEUE' || status === 'DECLINE_QUEUE' ? (
@@ -382,6 +369,7 @@ function DecisionActions({
           </Button>
         ) : null}
       </div>
+      {status === 'ACCEPT_QUEUE' || status === 'DECLINE_QUEUE' ? <p className="max-w-sm text-xs text-muted-foreground">This is a draft decision. Finalize it and inform speakers from the matching queue on the Abstracts page.</p> : null}
       {error ? <p className="text-xs text-destructive">{error}</p> : null}
     </div>
   )

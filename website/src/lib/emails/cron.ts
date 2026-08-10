@@ -105,7 +105,8 @@ export async function runCron({ now }: { now: number }): Promise<CronReport> {
   return report
 }
 
-/** OPEN forms past closesAt stop accepting submissions. */
+/** OPEN forms with a closesAt in the past stop accepting submissions.
+ *  Forms with null closesAt stay OPEN forever until status changes. */
 async function closeExpiredForms(db: Db, now: number): Promise<number> {
   const expired = await db.query.form.findMany({
     where: { status: 'OPEN', closesAt: { lte: now, isNotNull: true } },

@@ -2,7 +2,7 @@
 // conditionals, participants expansion, error surfacing.
 import { describe, expect, test } from 'vitest'
 import dedent from 'string-dedent'
-import { collectFields, libraryOptions, normalizeOptions } from './collect-fields.ts'
+import { collectFields, formatOptionValue, libraryOptions, normalizeOptions } from './collect-fields.ts'
 
 const scopeWith = (values: Record<string, string | string[]>) => ({
   values,
@@ -111,6 +111,21 @@ describe('collectFields', () => {
     expect(visible.fields.map((f) => f.name)).toEqual(['needsAV', 'avDetails'])
   })
 
+  test('Show can compare dynamic option labels while submitted values remain ids', () => {
+    const MDX = dedent`
+      <Select name="format" options={formats} />
+
+      <Show when={selected.format === 'Workshop'}>
+        <TextField name="workshopPrerequisites" required />
+      </Show>
+    `
+    const hidden = collectFields({ mdxSource: MDX, scope: scopeWith({ format: 'fmt_1' }) })
+    const visible = collectFields({ mdxSource: MDX, scope: scopeWith({ format: 'fmt_2' }) })
+
+    expect(hidden.fields.map((field) => field.name)).toEqual(['format'])
+    expect(visible.fields.map((field) => field.name)).toEqual(['format', 'workshopPrerequisites'])
+  })
+
   test('fields nested in sections and markdown containers are found', () => {
     const MDX = dedent`
       <Section title="Your session">
@@ -177,7 +192,7 @@ describe('collectFields', () => {
         },
         {
           "line": 3,
-          "message": "Failed to evaluate expression: missingVar.foo. missingVar is not defined. Available variables: values, tracks, formats",
+          "message": "Failed to evaluate expression: missingVar.foo. missingVar is not defined. Available variables: values, tracks, formats, selected",
           "type": "expression",
         },
       ]
@@ -267,5 +282,25 @@ describe('option helpers', () => {
 
   test('libraryOptions maps rows to id/name options', () => {
     expect(libraryOptions([{ id: 'trk_1', name: 'AI' }])).toEqual([{ value: 'trk_1', label: 'AI' }])
+  })
+
+  test('formats stored option ids as labels without changing the values', () => {
+    const values = ['trk_1', 'trk_2']
+    const options = scopeWith({}).tracks
+
+    expect({
+      single: formatOptionValue(values[0], options),
+      multiple: formatOptionValue(values, options),
+      stored: values,
+    }).toMatchInlineSnapshot(`
+      {
+        "multiple": "AI, Infra",
+        "single": "AI",
+        "stored": [
+          "trk_1",
+          "trk_2",
+        ],
+      }
+    `)
   })
 })

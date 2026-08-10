@@ -31,13 +31,15 @@ import {
   type AgendaSessionRow,
   type ZonedPlacement,
 } from '../lib/conflicts.ts'
+import { summarizeProgramPublication } from '../lib/public-program.ts'
 import { cn } from '../lib/utils.ts'
-import { runAction } from './ui/toast.tsx'
+import { runAction, toast } from './ui/toast.tsx'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
 import {
   Dialog,
   DialogDescription,
+  DialogFooter,
   DialogHeader,
   DialogPanel,
   DialogPopup,
@@ -49,7 +51,6 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '.
 export type AgendaView = 'list' | 'day' | 'week' | 'rooms' | 'conflicts'
 
 type AgendaRow = AgendaSessionRow
-type AgendaConflict = AgendaConflictRow
 
 const views: { value: AgendaView; label: string }[] = [
   { value: 'list', label: 'List' },
@@ -93,11 +94,16 @@ export function AgendaPage({ view }: { view: AgendaView }) {
   /** Rail selection: the next clicked cell places THIS session. */
   const [picked, setPicked] = useState<string | null>(null)
   const [plan, setPlan] = useState<Awaited<ReturnType<typeof previewAutoPlace>> | null>(null)
+  const [publicationOpen, setPublicationOpen] = useState(false)
   const [toolbarPending, startToolbarTransition] = useTransition()
 
   const conflicting = useMemo(() => conflictSessionIds(conflicts), [conflicts])
   const scheduled = sessions.filter(isScheduled)
   const unscheduled = sessions.filter((row) => !isScheduled(row))
+  const publication = summarizeProgramPublication(sessions)
+  const acceptedContent = sessions.filter((row) => row.kind === 'CONTENT' && row.status === 'ACCEPTED')
+  const acceptedUnscheduledCount = acceptedContent.filter((row) => !isScheduled(row)).length
+  const privateAcceptedCount = acceptedContent.filter((row) => row.visibility === 'PRIVATE').length
 
   function openPlacement(partial: Partial<PlacementDraft> & { sessionId?: string }) {
     const sessionId = partial.sessionId ?? picked ?? unscheduled[0]?.id ?? sessions[0]?.id ?? ''
@@ -121,7 +127,7 @@ export function AgendaPage({ view }: { view: AgendaView }) {
             {scheduled.length} scheduled · {unscheduled.length} unscheduled · times in {timezone}
           </p>
         </div>
-        <div className="flex flex-wrap items-center justify-end gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-3">
           {event.programPublishedAt ? (
             <Button
               variant="outline"
@@ -130,46 +136,76 @@ export function AgendaPage({ view }: { view: AgendaView }) {
               View public agenda
             </Button>
           ) : null}
-          <Button
-            variant="outline"
-            disabled={toolbarPending || rooms.length === 0 || unscheduled.length === 0}
-            onClick={() => {
-              startToolbarTransition(async () => {
-                const result = await runAction(
-                  () => previewAutoPlace({ orgId: currentOrgId, eventId: event.id }),
-                  { fallbackError: 'Could not build an automatic placement preview' },
-                )
-                if (result) setPlan(result)
-              })
-            }}
-          >
-            Auto-place
-          </Button>
-          <Button
-            variant={event.programPublishedAt ? 'outline' : 'default'}
-            disabled={toolbarPending}
-            onClick={() => {
-              startToolbarTransition(async () => {
-                await runAction(
-                  () => setProgramPublication({
-                    orgId: currentOrgId,
-                    eventId: event.id,
-                    published: !event.programPublishedAt,
-                  }),
-                  { fallbackError: event.programPublishedAt ? 'Could not unpublish the program' : 'Could not publish the program' },
-                )
-              })
-            }}
-          >
-            {event.programPublishedAt ? 'Unpublish' : 'Publish program'}
-          </Button>
-          <Button
-            disabled={rooms.length === 0 || sessions.length === 0}
-            onClick={() => openPlacement({})}
-          >
-            <CalendarDaysIcon />
-            Place a session
-          </Button>
+          <div className="flex items-center gap-2" aria-label="Build agenda actions">
+            <Button
+              variant="outline"
+              disabled={toolbarPending || rooms.length === 0 || unscheduled.length === 0}
+              onClick={() => {
+                startToolbarTransition(async () => {
+                  const result = await runAction(
+                    () => previewAutoPlace({ orgId: currentOrgId, eventId: event.id }),
+                    { fallbackError: 'Could not build an automatic placement preview' },
+                  )
+                  if (result) setPlan(result)
+                })
+              }}
+            >
+              Auto-place
+            </Button>
+            <Button
+              disabled={rooms.length === 0 || sessions.length === 0}
+              onClick={() => openPlacement({})}
+            >
+              <CalendarDaysIcon />
+              Place
+            </Button>
+          </div>
+          <div className="border-l border-border pl-3">
+            <Button
+              variant={event.programPublishedAt ? 'outline' : 'default'}
+              disabled={toolbarPending}
+              onClick={() => setPublicationOpen(true)}
+            >
+              {event.programPublishedAt ? 'Review unpublish' : 'Review and publish'}
+            </Button>
+          </div>
+        </div>
+      </div>
+
+      <div className="flex flex-col gap-3 border-y border-border py-3 text-sm">
+        <div className="flex flex-wrap items-center gap-x-2 gap-y-1" aria-label="Program lifecycle">
+          <LifecycleStep label="Accepted" complete={acceptedContent.length > 0} detail={`${acceptedContent.length}`} />
+          <span className="text-muted-foreground">→</span>
+          <LifecycleStep label="Public approval" complete={acceptedContent.length > 0 && privateAcceptedCount === 0} detail={`${acceptedContent.length - privateAcceptedCount}/${acceptedContent.length}`} />
+          <span className="text-muted-foreground">→</span>
+          <LifecycleStep label="Scheduled" complete={acceptedContent.length > 0 && acceptedUnscheduledCount === 0} detail={`${acceptedContent.length - acceptedUnscheduledCount}/${acceptedContent.length}`} />
+          <span className="text-muted-foreground">→</span>
+          <LifecycleStep label="Conflicts resolved" complete={conflicts.length === 0} detail={`${conflicts.length} warnings`} />
+          <span className="text-muted-foreground">→</span>
+          <LifecycleStep label="Published" complete={event.programPublishedAt != null} />
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <p className="text-muted-foreground">
+            Accepted sessions must be approved and scheduled. Public service blocks follow the same publication gate.
+            {' '}{publication.publicScheduledCount} agenda items will appear; {publication.privateScheduledCount} private scheduled items and {acceptedUnscheduledCount} accepted unscheduled sessions will not.
+          </p>
+          <div className="flex flex-wrap gap-3">
+            {privateAcceptedCount > 0 ? (
+              <Link href={router.href(`/org/${currentOrgId}/e/${event.id}/sessions`, { tab: 'all' })} className="text-foreground underline underline-offset-4">
+                Review public approval
+              </Link>
+            ) : null}
+            {conflicts.length > 0 ? (
+              <Link href={router.href(`/org/${currentOrgId}/e/${event.id}/agenda`, { view: 'conflicts' })} className="text-foreground underline underline-offset-4">
+                Review conflicts
+              </Link>
+            ) : null}
+            {event.programPublishedAt ? (
+              <Link href={router.href(`/public/${event.slug}/agenda`)} target="_blank" className="text-foreground underline underline-offset-4">
+                /public/{event.slug}/agenda
+              </Link>
+            ) : null}
+          </div>
         </div>
       </div>
 
@@ -261,7 +297,120 @@ export function AgendaPage({ view }: { view: AgendaView }) {
         orgId={currentOrgId}
         eventId={event.id}
       />
+      <PublicationDialog
+        open={publicationOpen}
+        onOpenChange={setPublicationOpen}
+        published={event.programPublishedAt != null}
+        orgId={currentOrgId}
+        eventId={event.id}
+        eventSlug={event.slug}
+        publicScheduledCount={publication.publicScheduledCount}
+        privateScheduledCount={publication.privateScheduledCount}
+        acceptedUnscheduledCount={acceptedUnscheduledCount}
+        conflictCount={conflicts.length}
+      />
     </div>
+  )
+}
+
+function LifecycleStep({ label, complete, detail }: { label: string; complete: boolean; detail?: string }) {
+  return (
+    <span className={cn('flex items-center gap-1 font-medium', complete ? 'text-success' : 'text-muted-foreground')}>
+      <span aria-hidden>{complete ? '●' : '○'}</span>
+      {label}{detail ? <span className="font-normal tabular-nums">({detail})</span> : null}
+    </span>
+  )
+}
+
+function PublicationDialog({
+  open,
+  onOpenChange,
+  published,
+  orgId,
+  eventId,
+  eventSlug,
+  publicScheduledCount,
+  privateScheduledCount,
+  acceptedUnscheduledCount,
+  conflictCount,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  published: boolean
+  orgId: string
+  eventId: string
+  eventSlug: string
+  publicScheduledCount: number
+  privateScheduledCount: number
+  acceptedUnscheduledCount: number
+  conflictCount: number
+}) {
+  const [pending, startTransition] = useTransition()
+  const destination = `/public/${eventSlug}/agenda`
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogPopup className="max-w-xl">
+        <DialogHeader>
+          <DialogTitle>{published ? 'Unpublish public program?' : 'Publish public program?'}</DialogTitle>
+          <DialogDescription>
+            Review what attendees will see. Conflicts are warnings and do not block publication.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <div className="flex flex-col gap-4">
+            <dl className="grid grid-cols-[1fr_auto] gap-x-6 gap-y-2 text-sm">
+              <dt>Public scheduled agenda items</dt><dd className="font-medium tabular-nums">{publicScheduledCount}</dd>
+              <dt>Private scheduled agenda items</dt><dd className="font-medium tabular-nums">{privateScheduledCount}</dd>
+              <dt>Accepted unscheduled sessions</dt><dd className="font-medium tabular-nums">{acceptedUnscheduledCount}</dd>
+              <dt>Conflict warnings</dt><dd className={cn('font-medium tabular-nums', conflictCount > 0 && 'text-warning')}>{conflictCount}</dd>
+            </dl>
+            <div className="flex flex-col gap-1 border-t border-border pt-3 text-sm">
+              <strong>Exact impact</strong>
+              <p className="text-muted-foreground">
+                {published
+                  ? `The public program, embeds, and feeds will stop returning attendee program data. Organizer schedule data stays unchanged.`
+                  : `${publicScheduledCount} public scheduled agenda item${publicScheduledCount === 1 ? '' : 's'} will become visible. Private and unscheduled items stay hidden.`}
+              </p>
+            </div>
+            <div className="flex flex-col gap-1 text-sm">
+              <strong>Public agenda destination</strong>
+              <Link href={router.href(`/public/${eventSlug}/agenda`)} target="_blank" className="w-fit text-foreground underline underline-offset-4">{destination}</Link>
+            </div>
+          </div>
+        </DialogPanel>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button
+            variant={published ? 'destructive' : 'default'}
+            disabled={pending}
+            onClick={() => {
+              startTransition(async () => {
+                const result = await runAction(
+                  () => setProgramPublication({ orgId, eventId, published: !published }),
+                  { fallbackError: published ? 'Could not unpublish the program' : 'Could not publish the program' },
+                )
+                if (!result) return
+                onOpenChange(false)
+                if (result.published) {
+                  const privateWarning = result.privateScheduledCount > 0
+                    ? ` ${result.privateScheduledCount} scheduled agenda item${result.privateScheduledCount === 1 ? ' remains' : 's remain'} private and will not appear.`
+                    : ''
+                  toast.success(
+                    `The public agenda is live with ${result.publicScheduledCount} agenda item${result.publicScheduledCount === 1 ? '' : 's'}.${privateWarning}`,
+                    'Program published',
+                  )
+                } else {
+                  toast.success('The attendee agenda is no longer public.', 'Program unpublished')
+                }
+              })
+            }}
+          >
+            {pending ? 'Updating…' : published ? 'Unpublish program' : 'Publish program'}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
   )
 }
 
@@ -459,9 +608,12 @@ function DayView({
                     // is exactly what the organizer must see).
                     width: `${100 / item.laneCount}%`,
                     marginLeft: `${(100 / item.laneCount) * item.lane}%`,
+                    borderInlineStartColor: conflicting.has(item.session.id)
+                      ? 'var(--destructive)'
+                      : (item.session.trackColor ?? undefined),
                   }}
                   className={cn(
-                    'z-10 m-px flex flex-col items-start gap-0.5 overflow-hidden rounded-md border px-1.5 py-1 text-left',
+                    'z-10 m-px flex flex-col items-start gap-0.5 overflow-hidden rounded-md border border-s-4 px-1.5 py-1 text-left',
                     item.session.kind === 'SERVICE'
                       ? 'border-border bg-muted text-muted-foreground'
                       : 'border-primary/30 bg-primary/10',
@@ -474,6 +626,9 @@ function DayView({
                   <span className="w-full truncate text-[11px] tabular-nums opacity-70">
                     {minutesToLabel(item.startMinute)}–{minutesToLabel(item.endMinute)}
                   </span>
+                  {item.session.trackName ? (
+                    <span className="w-full truncate text-[10px] opacity-70">{item.session.trackName}</span>
+                  ) : null}
                 </button>
               )),
             )}
@@ -498,8 +653,9 @@ function DayView({
                     key={row.id}
                     type="button"
                     onClick={() => onPick(picked === row.id ? null : row.id)}
+                    style={{ borderInlineStartColor: row.trackColor ?? undefined }}
                     className={cn(
-                      'flex flex-col items-start gap-0.5 rounded-md border px-2 py-1.5 text-left transition-colors',
+                      'flex flex-col items-start gap-0.5 rounded-md border border-s-4 px-2 py-1.5 text-left transition-colors',
                       picked === row.id
                         ? 'border-primary bg-primary/10'
                         : 'border-border hover:bg-accent/60',
@@ -668,8 +824,13 @@ function WeekView({
                   key={row.id}
                   type="button"
                   onClick={() => onPlace({ sessionId: row.id })}
+                  style={{
+                    borderInlineStartColor: conflicting.has(row.id)
+                      ? 'var(--destructive)'
+                      : (row.trackColor ?? undefined),
+                  }}
                   className={cn(
-                    'flex flex-col items-start gap-0.5 rounded-md border px-2 py-1.5 text-left transition-colors hover:bg-accent/60',
+                    'flex flex-col items-start gap-0.5 rounded-md border border-s-4 px-2 py-1.5 text-left transition-colors hover:bg-accent/60',
                     conflicting.has(row.id) ? 'border-destructive/60' : 'border-border',
                   )}
                 >
@@ -677,6 +838,7 @@ function WeekView({
                     {row.timeLabel} · {row.roomName}
                   </span>
                   <span className="w-full truncate text-sm font-medium">{row.title}</span>
+                  {row.trackName ? <span className="w-full truncate text-xs text-muted-foreground">{row.trackName}</span> : null}
                 </button>
               ))
             )}
@@ -767,7 +929,7 @@ function ConflictsView({
   orgId,
   eventId,
 }: {
-  conflicts: AgendaConflict[]
+  conflicts: AgendaConflictRow[]
   orgId: string
   eventId: string
 }) {
@@ -975,7 +1137,7 @@ function PlacementForm({
 
   return (
     <Dialog open onOpenChange={(next) => (next ? undefined : onClose())}>
-      <DialogPopup className="max-w-md">
+      <DialogPopup className="max-w-lg">
         <DialogHeader>
           <DialogTitle>Place session</DialogTitle>
           <DialogDescription>
@@ -1022,8 +1184,9 @@ function PlacementForm({
                 ))}
               </NativeSelect>
             </label>
-            <div className="grid grid-cols-3 gap-3">
-              <label className="flex flex-col gap-1.5 text-sm font-medium">
+            {/* Day needs more width than Start/Minutes ("Sun, Sep 22" vs "09:00" / "30"). */}
+            <div className="grid grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_5.5rem] gap-3">
+              <label className="flex min-w-0 flex-col gap-1.5 text-sm font-medium">
                 Day
                 <NativeSelect value={dayKey} onChange={(e) => setDayKey(e.target.value)}>
                   {days.map((day) => (
@@ -1033,7 +1196,7 @@ function PlacementForm({
                   ))}
                 </NativeSelect>
               </label>
-              <label className="flex flex-col gap-1.5 text-sm font-medium">
+              <label className="flex min-w-0 flex-col gap-1.5 text-sm font-medium">
                 Start
                 <Input
                   required
@@ -1041,9 +1204,10 @@ function PlacementForm({
                   step={900}
                   value={time}
                   onChange={(e) => setTime(e.target.value)}
+                  className="w-full"
                 />
               </label>
-              <label className="flex flex-col gap-1.5 text-sm font-medium">
+              <label className="flex min-w-0 flex-col gap-1.5 text-sm font-medium">
                 Minutes
                 <Input
                   required
@@ -1053,6 +1217,7 @@ function PlacementForm({
                   step={5}
                   value={duration}
                   onChange={(e) => setDuration(Number(e.target.value))}
+                  className="w-full"
                 />
               </label>
             </div>

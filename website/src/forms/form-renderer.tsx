@@ -19,6 +19,7 @@ import {
   type FieldValue,
   type FormSubmission,
   type ValuesRecord,
+  withSelectedOptionLabels,
 } from './collect-fields.ts'
 import { formComponents } from './components-map.tsx'
 import { FormValuesContext, type FormValuesState } from './field-components.tsx'
@@ -110,7 +111,7 @@ export function FormRenderer({
       markdown: mdxSource,
       mdast: mdast.ast,
       components: formComponents,
-      scope: { ...scope, values },
+      scope: withSelectedOptionLabels({ ...scope, values }),
       evaluateOptions: FORM_EVALUATE_OPTIONS,
     })
     rendered = visitor.run()

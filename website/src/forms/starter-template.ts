@@ -9,7 +9,8 @@
 // Conditional syntax: `<Show when={expr}>` — safe-mdx cannot evaluate JSX
 // inside `{cond && <.../>}` expressions, so Show is the supported way to
 // branch. Expressions read the live `values` record plus the `tracks` and
-// `formats` option arrays from scope.
+// `formats` option arrays from scope. `selected.track` and `selected.format`
+// expose readable labels while submitted values keep library row ids.
 
 import dedent from 'string-dedent'
 export const starterCfpTemplate = dedent`
@@ -101,6 +102,12 @@ export const starterSpeakerProfileTemplate = dedent`
   <TextField name="speaker.linkedinUrl" label="LinkedIn" maxLength={500} placeholder="https://linkedin.com/in/..." />
 
   <TextField name="speaker.twitterUrl" label="X / Twitter" maxLength={500} placeholder="https://x.com/..." />
+
+  </Step>
+
+  <Step title="Logistics">
+
+  <RichText name="speaker.travelLogistics" label="Travel and logistics" maxLength={2000} />
 
   </Step>
 `

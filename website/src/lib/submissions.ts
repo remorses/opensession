@@ -1,7 +1,7 @@
 // Pure session status transitions, queue helpers, status-tab filters, and
 // CSV export for the Abstracts admin flow.
-// notifiedAt is stamped by notifyQueue only after the decision email reaches
-// SENT, never at enqueue time — see actions.tsx.
+// notifiedAt is stamped by notifyQueue only after the current decision email
+// reaches SENT. Starting a redecision clears the obsolete delivery timestamp.
 
 export type SessionStatus =
   | 'DRAFT'
@@ -44,8 +44,8 @@ const TRANSITIONS: Readonly<Record<SessionStatus, readonly SessionStatus[]>> = {
   PENDING: ['ACCEPT_QUEUE', 'DECLINE_QUEUE', 'WITHDRAWN'],
   ACCEPT_QUEUE: ['ACCEPTED', 'PENDING', 'DECLINE_QUEUE', 'WITHDRAWN'],
   DECLINE_QUEUE: ['DECLINED', 'PENDING', 'ACCEPT_QUEUE', 'WITHDRAWN'],
-  ACCEPTED: [],
-  DECLINED: [],
+  ACCEPTED: ['DECLINE_QUEUE'],
+  DECLINED: ['ACCEPT_QUEUE'],
   WITHDRAWN: [],
 }
 
@@ -60,6 +60,7 @@ export type TransitionableSession = {
   submittedAt: number | null
   decidedAt: number | null
   withdrawnAt: number | null
+  notifiedAt?: number | null
 }
 
 export type SessionTransitionPatch = {
@@ -69,6 +70,8 @@ export type SessionTransitionPatch = {
   submittedAt: number | null
   decidedAt: number | null
   withdrawnAt: number | null
+  /** Cleared only when a finalized outcome enters the opposite decision queue. */
+  notifiedAt?: null
   updatedAt: number
 }
 
@@ -76,8 +79,8 @@ export type SessionTransitionPatch = {
  *  form without a well-known `title` field). Keeps the DB CHECK happy. */
 export const UNTITLED_SESSION_TITLE = 'Untitled'
 
-/** Apply a guarded status transition. Stamps lifecycle timestamps; never
- *  touches notifiedAt (that lands only after decision email SENT). */
+/** Apply a guarded status transition. Final outcomes can enter the opposite
+ *  queue for redecision; that clears timestamps for the obsolete outcome. */
 export function applyTransition(
   session: TransitionableSession,
   to: SessionStatus,
@@ -93,6 +96,7 @@ export function applyTransition(
   const existingTitle = session.title?.trim() ?? ''
   const needsTitle = to !== 'DRAFT' && !existingTitle
 
+  const reconsidering = session.status === 'ACCEPTED' || session.status === 'DECLINED'
   return {
     status: to,
     ...(needsTitle ? { title: UNTITLED_SESSION_TITLE } : {}),
@@ -100,33 +104,34 @@ export function applyTransition(
       to === 'PENDING' && session.submittedAt == null
         ? now
         : session.submittedAt,
-    decidedAt:
-      (to === 'ACCEPTED' || to === 'DECLINED') && session.decidedAt == null
+    decidedAt: reconsidering
+      ? null
+      : to === 'ACCEPTED' || to === 'DECLINED'
         ? now
         : session.decidedAt,
     withdrawnAt:
       to === 'WITHDRAWN' && session.withdrawnAt == null
         ? now
         : session.withdrawnAt,
+    ...(reconsidering ? { notifiedAt: null } : {}),
     updatedAt: now,
   }
 }
 
-/** Bulk move: only sessions with a legal edge to `to` are patched. Illegal
- *  rows are skipped (not thrown) so partial bulk ops stay useful. */
+/** Bulk move with all-or-nothing validation. Silent partial updates leave a
+ *  selected list in an unknowable state, so every invalid row is reported. */
 export function planBulkStatusUpdate(
   sessions: Array<TransitionableSession & { id: string }>,
   to: SessionStatus,
   now: number,
 ): Array<{ id: string } & SessionTransitionPatch> {
+  const invalid = sessions.filter((session) => !canTransition(session.status, to))
+  if (invalid.length > 0) {
+    throw new Error(`${invalid.length} selected session${invalid.length === 1 ? '' : 's'} cannot move to ${to}`)
+  }
   const out: Array<{ id: string } & SessionTransitionPatch> = []
   for (const session of sessions) {
-    if (!canTransition(session.status, to)) continue
-    try {
-      out.push({ id: session.id, ...applyTransition(session, to, now) })
-    } catch {
-      // title CHECK etc. — skip the bad row
-    }
+    out.push({ id: session.id, ...applyTransition(session, to, now) })
   }
   return out
 }
@@ -223,6 +228,10 @@ export function abstractsToCsv(
     formatName: string | null
     speakerNames: string[]
     formName: string | null
+    avgRating: number | null
+    yes: number
+    maybe: number
+    no: number
     notifiedAt: number | null
     submittedAt: number | null
   }>,
@@ -234,6 +243,10 @@ export function abstractsToCsv(
     'format',
     'speakers',
     'form',
+    'avg_rating',
+    'yes',
+    'maybe',
+    'no',
     'notified_at',
     'submitted_at',
   ].join(',')
@@ -245,6 +258,10 @@ export function abstractsToCsv(
       csvEscape(row.formatName),
       csvEscape(row.speakerNames.join('; ')),
       csvEscape(row.formName),
+      csvEscape(row.avgRating == null ? '' : row.avgRating.toFixed(2)),
+      csvEscape(row.yes),
+      csvEscape(row.maybe),
+      csvEscape(row.no),
       csvEscape(row.notifiedAt),
       csvEscape(row.submittedAt),
     ].join(','),

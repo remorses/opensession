@@ -304,6 +304,7 @@ export function FileUpload({
   const [uploadedName, setUploadedName] = React.useState<string | null>(null)
 
   const onChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const input = e.currentTarget
     const file = e.target.files?.[0]
     if (!file || !ctx.uploadFile) return
     setUploading(true)
@@ -315,7 +316,7 @@ export function FileUpload({
       setError(err instanceof Error ? err.message : 'Upload failed')
     } finally {
       setUploading(false)
-      e.currentTarget.value = ''
+      input.value = ''
     }
   }
 

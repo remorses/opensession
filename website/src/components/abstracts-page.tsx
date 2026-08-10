@@ -17,8 +17,17 @@ import {
   type SessionStatus,
 } from '../lib/submissions.ts'
 import { cn, formatDateTimeUTC } from '../lib/utils.ts'
-import { runAction, toastActionError } from './ui/toast.tsx'
+import { runAction, toast, toastActionError } from './ui/toast.tsx'
 import { Button } from './ui/button.tsx'
+import {
+  Dialog,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from './ui/dialog.tsx'
 import { Frame } from './ui/frame.tsx'
 import { Badge, EmptyState, Input, NativeSelect } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
@@ -33,6 +42,17 @@ export type AbstractListRow = {
   formName: string | null
   notifiedAt: number | null
   submittedAt: number | null
+}
+
+const queueContext: Record<AbstractsStatusTab, { title: string; description: string }> = {
+  all: { title: 'All submissions', description: 'See every proposal and its current decision state.' },
+  pending: { title: 'Pending review', description: 'Move reviewed proposals into an accept or decline queue. Queue moves are draft decisions.' },
+  'accept-queue': { title: 'Draft accept decisions', description: 'Speakers have not been informed. Review this shortlist, then Notify to finalize acceptance and send decision messages.' },
+  accepted: { title: 'Final accepted decisions', description: 'Acceptance is final. The notified marker confirms delivery. Content still needs public approval before it can appear in a published program.' },
+  'decline-queue': { title: 'Draft decline decisions', description: 'Speakers have not been informed. Review this list, then Notify to finalize declines and send decision messages.' },
+  declined: { title: 'Final declined decisions', description: 'The decline is final. The notified marker confirms delivery. Use the detail page only when a proposal needs reconsideration.' },
+  withdrawn: { title: 'Withdrawn submissions', description: 'These proposals are no longer in the active decision workflow.' },
+  drafts: { title: 'Speaker drafts', description: 'These proposals were started but not submitted for review.' },
 }
 
 export function SessionStatusBadge({ status }: { status: SessionStatus }) {
@@ -76,9 +96,11 @@ export function AbstractsPage({
   const [pending, startTransition] = useTransition()
   const [error, setError] = useState<string | null>(null)
   const [search, setSearch] = useState(q)
+  const [notifyDialog, setNotifyDialog] = useState<'accept' | 'decline' | null>(null)
 
   const allIds = useMemo(() => abstracts.map((row) => row.id), [abstracts])
   const allSelected = abstracts.length > 0 && abstracts.every((row) => selected.has(row.id))
+  const context = queueContext[status]
 
   function toggleAll() {
     setSelected(allSelected ? new Set() : new Set(allIds))
@@ -109,17 +131,6 @@ export function AbstractsPage({
       )
       if (result) setSelected(new Set())
       else setError('Bulk update failed')
-    })
-  }
-
-  function runNotify(queue: 'accept' | 'decline') {
-    setError(null)
-    startTransition(async () => {
-      const result = await runAction(
-        () => notifyQueue({ orgId: currentOrgId, eventId: event.id, queue }),
-        { fallbackError: 'Notify failed' },
-      )
-      if (result === null) setError('Notify failed')
     })
   }
 
@@ -179,6 +190,18 @@ export function AbstractsPage({
         ))}
       </div>
 
+      <div className="grid overflow-hidden rounded-lg border border-border sm:grid-cols-5">
+        {['Pending review', 'Accept queue', 'Decline queue', 'Notify speakers', 'Public approval'].map((label, index) => (
+          <div key={label} className="flex items-center gap-2 border-b border-border px-3 py-2.5 text-sm last:border-b-0 sm:border-b-0 sm:border-r sm:last:border-r-0"><span className="flex size-5 shrink-0 items-center justify-center rounded-full border border-border text-xs text-muted-foreground">{index + 1}</span><span>{label}</span></div>
+        ))}
+      </div>
+
+      <div className="flex flex-wrap items-start justify-between gap-4 border-l-2 border-primary pl-3">
+        <div className="flex max-w-3xl flex-col gap-1"><h2 className="text-sm font-medium">{context.title}</h2><p className="text-sm text-muted-foreground">{context.description}</p></div>
+        {status === 'accept-queue' ? <Button size="sm" disabled={pending || counts['accept-queue'] === 0} onClick={() => setNotifyDialog('accept')}>Review and notify {counts['accept-queue']} acceptance{counts['accept-queue'] === 1 ? '' : 's'}</Button> : null}
+        {status === 'decline-queue' ? <Button size="sm" variant="outline" disabled={pending || counts['decline-queue'] === 0} onClick={() => setNotifyDialog('decline')}>Review and notify {counts['decline-queue']} decline{counts['decline-queue'] === 1 ? '' : 's'}</Button> : null}
+      </div>
+
       <div className="flex flex-wrap items-center gap-2">
         <div className="relative min-w-[200px] grow max-w-sm">
           <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-3.5 -translate-y-1/2 text-muted-foreground" />
@@ -210,16 +233,6 @@ export function AbstractsPage({
               Move to pending
             </Button>
           </div>
-        ) : null}
-        {(status === 'accept-queue' || counts['accept-queue'] > 0) ? (
-          <Button size="sm" disabled={pending} onClick={() => runNotify('accept')}>
-            Notify accept queue
-          </Button>
-        ) : null}
-        {(status === 'decline-queue' || counts['decline-queue'] > 0) ? (
-          <Button size="sm" variant="outline" disabled={pending} onClick={() => runNotify('decline')}>
-            Notify decline queue
-          </Button>
         ) : null}
       </div>
 
@@ -304,7 +317,106 @@ export function AbstractsPage({
           </Table>
         </Frame>
       )}
+      <DecisionNotificationDialog
+        open={notifyDialog != null}
+        onOpenChange={(open) => { if (!open) setNotifyDialog(null) }}
+        queue={notifyDialog ?? 'accept'}
+        orgId={currentOrgId}
+        eventId={event.id}
+        eventName={event.name}
+        count={notifyDialog === 'decline' ? counts['decline-queue'] : counts['accept-queue']}
+        visibleRows={abstracts.filter((row) => row.status === (notifyDialog === 'decline' ? 'DECLINE_QUEUE' : 'ACCEPT_QUEUE'))}
+      />
     </div>
+  )
+}
+
+function DecisionNotificationDialog({
+  open,
+  onOpenChange,
+  queue,
+  orgId,
+  eventId,
+  eventName,
+  count,
+  visibleRows,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  queue: 'accept' | 'decline'
+  orgId: string
+  eventId: string
+  eventName: string
+  count: number
+  visibleRows: AbstractListRow[]
+}) {
+  const [pending, startTransition] = useTransition()
+  const accepted = queue === 'accept'
+  const subject = accepted
+    ? `Your talk was accepted for ${eventName}`
+    : `An update on your ${eventName} submission`
+  const body = accepted
+    ? 'Good news: your talk was accepted. Open the speaker portal to review your onboarding tasks.'
+    : 'Thank you for submitting. The program committee did not select this talk for the event.'
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogPopup>
+        <DialogHeader>
+          <DialogTitle>Preview {accepted ? 'acceptance' : 'decline'} notifications</DialogTitle>
+          <DialogDescription>
+            This will finalize {count} queued submission{count === 1 ? '' : 's'} and create one personalized outbox message per speaker.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel className="flex flex-col gap-4">
+          {visibleRows.length > 0 ? (
+            <div className="flex flex-col gap-1 text-sm text-muted-foreground">
+              {visibleRows.slice(0, 5).map((row) => (
+                <span key={row.id}>{row.title || 'Untitled'} · {row.speakerNames.join(', ') || 'No speaker'}</span>
+              ))}
+              {count > visibleRows.length ? <span>Plus {count - visibleRows.length} more in this queue</span> : null}
+            </div>
+          ) : null}
+          <Frame className="flex flex-col gap-3 p-4">
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium uppercase text-muted-foreground">Subject</span>
+              <strong className="text-sm">{subject}</strong>
+            </div>
+            <div className="flex flex-col gap-1">
+              <span className="text-xs font-medium uppercase text-muted-foreground">Message preview</span>
+              <p className="text-sm text-muted-foreground">{body}</p>
+              <p className="text-sm text-muted-foreground">Each email includes the submission title and speaker portal link.</p>
+            </div>
+          </Frame>
+          {accepted ? (
+            <p className="text-sm text-muted-foreground">
+              Accepted sessions become schedulable immediately. They remain private until an organizer explicitly approves their visibility, so unpublished content cannot leak into the attendee program.
+            </p>
+          ) : null}
+        </DialogPanel>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button>
+          <Button
+            loading={pending}
+            disabled={count === 0}
+            onClick={() => startTransition(async () => {
+              const result = await runAction(
+                () => notifyQueue({ orgId, eventId, queue }),
+                { fallbackError: 'Could not notify the queue' },
+              )
+              if (!result) return
+              toast.success(
+                `Finalized ${result.updated} submission${result.updated === 1 ? '' : 's'}. Created ${result.emailsQueued} outbox message${result.emailsQueued === 1 ? '' : 's'}; ${result.emailsSent} sent immediately.`,
+                'Decision notifications queued',
+              )
+              onOpenChange(false)
+            })}
+          >
+            Send {count} notification{count === 1 ? '' : 's'}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
   )
 }
 
@@ -332,6 +444,7 @@ function StatusCell({
     'WITHDRAWN',
   ]
   const options = all.filter((opt) => opt === status || canTransition(status, opt))
+    .filter((opt) => !(status === 'ACCEPT_QUEUE' && opt === 'ACCEPTED') && !(status === 'DECLINE_QUEUE' && opt === 'DECLINED'))
   const locked = options.length <= 1
 
   return (
@@ -350,8 +463,8 @@ function StatusCell({
           disabled={pending || locked}
           value={status}
           onChange={(e) => {
-            const next = e.target.value as SessionStatus
-            if (next === status) return
+            const next = options.find((option) => option === e.target.value)
+            if (!next || next === status) return
             startTransition(async () => {
               await runAction(
                 () => updateSessionStatus({ orgId, eventId, sessionId, status: next }),

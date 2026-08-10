@@ -37,7 +37,7 @@ Each form version stores one immutable `mdxSource` string. The public CFP page, 
 ```
 
 - **`name` is the data contract.** Every field reads and writes `values[name]` (or a participant record when inside `<Participants>`).
-- **Scope** injects live data into expressions: `values`, `tracks`, `formats`.
+- **Scope** injects live data into expressions: `values`, `tracks`, `formats`, and readable `selected` labels.
 - **Server and client use the same conditional logic.** On submit the server re-collects visible fields with the submitted values in scope, then validates.
 
 Submitted shape:
@@ -273,7 +273,7 @@ In the admin MDX preview, uploads stay disabled (no `uploadFile` callback).
 ```mdx
 <Select name="format" label="Format" options={formats} required />
 
-<Show when={values.format === 'workshop-id-here'}>
+<Show when={selected.format === 'Workshop (120 min)'}>
   <TextField name="maxAttendees" label="Max attendees" required />
 </Show>
 
@@ -291,6 +291,7 @@ In the admin MDX preview, uploads stay disabled (no `uploadFile` callback).
 | `values` | Current top-level field values |
 | `tracks` | Event track options `{ value, label }[]` |
 | `formats` | Event format options `{ value, label }[]` |
+| `selected` | Readable selected labels, such as `selected.track` and `selected.format` |
 
 Expressions can read plain scope data, compare values, and create inline arrays or objects. **Function and method calls are disabled**, including callbacks, constructors, and tagged templates. Put reusable behavior in an OpenSession form component instead of MDX code.
 
@@ -434,35 +435,15 @@ Renaming a well-known field (for example `title` → `sessionTitle`) stops the t
 
 ## Recipe: workshop-only questions
 
-Keep the well-known `format` select so agenda gets `formatId`. Add a separate custom radio when you need readable conditionals without hardcoding library ids:
+Keep the well-known `format` select so agenda gets `formatId`. Compare its readable label through `selected.format`; the stored answer remains the format row id:
 
 ```mdx
 <Select name="format" label="Format" options={formats} required />
 
-<Radio
-  name="sessionKind"
-  label="Session kind"
-  required
-  options={[
-    { value: 'talk', label: 'Talk' },
-    { value: 'workshop', label: 'Workshop' },
-  ]}
-/>
-
-<Show when={values.sessionKind === 'workshop'}>
+<Show when={selected.format === 'Workshop (120 min)'}>
   <TextField name="workshopDuration" label="Workshop length (hours)" required />
   <TextField name="maxAttendees" label="Max attendees" required />
   <Checkbox name="needsLaptops" label="Attendees should bring laptops" />
-</Show>
-```
-
-To branch on a real library format instead, compare against the format **row id**:
-
-```mdx
-<Select name="format" label="Format" options={formats} required />
-
-<Show when={values.format === '01hxxx_your_workshop_format_id'}>
-  <TextField name="maxAttendees" label="Max attendees" required />
 </Show>
 ```
 

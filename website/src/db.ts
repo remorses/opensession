@@ -128,7 +128,7 @@ export async function getSession(request: RequestHeaders): Promise<Session | nul
 export async function requireSession(request: RequestHeaders): Promise<Session> {
   const session = await getSession(request)
   if (!session) {
-    throw json({ error: 'unauthorized' }, { status: 401 })
+    throw json({ message: 'Not authenticated', code: 'unauthorized' }, { status: 401 })
   }
   return session
 }
@@ -175,7 +175,7 @@ export async function lookupOrgMember(userId: string, orgId: string): Promise<{
 export async function requireOrgMember(userId: string, orgId: string) {
   const member = await lookupOrgMember(userId, orgId)
   if (!member) {
-    throw json({ error: 'forbidden', message: 'You are not a member of this organization' }, { status: 403 })
+    throw json({ code: 'forbidden', message: 'You are not a member of this organization' }, { status: 403 })
   }
   return member
 }
@@ -183,7 +183,7 @@ export async function requireOrgMember(userId: string, orgId: string) {
 export async function requireAdminRole(userId: string, orgId: string) {
   const member = await requireOrgMember(userId, orgId)
   if (member.role !== 'admin') {
-    throw json({ error: 'forbidden', message: 'Only admins can do this' }, { status: 403 })
+    throw json({ code: 'forbidden', message: 'Only admins can do this' }, { status: 403 })
   }
   return member
 }

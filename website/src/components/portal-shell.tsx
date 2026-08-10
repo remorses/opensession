@@ -14,7 +14,7 @@ import {
   LogOutIcon,
   UserIcon,
 } from 'lucide-react'
-import { ErrorBoundary, Link, useLoaderData } from 'spiceflow/react'
+import { ErrorBoundary, Link, router, useLoaderData } from 'spiceflow/react'
 import {
   addTaskComment,
   completeManualTaskAssignment,
@@ -45,6 +45,7 @@ type PortalShellData = {
   portalMissing: boolean
   event: {
     id: string
+    orgId: string
     slug: string
     name: string
     startsAt: number
@@ -82,10 +83,11 @@ type PortalShellData = {
     sessionTitle: string | null
     dueAt: number | null
   }>
+  openCfp: { slug: string; name: string } | null
 }
 
 function usePortalShell(): PortalShellData {
-  return useLoaderData('/portal/:eventSlug/*') as PortalShellData
+  return useLoaderData('/portal/:eventSlug/*')
 }
 
 const navItems = [
@@ -95,8 +97,26 @@ const navItems = [
   { segment: 'tasks', label: 'Tasks' },
 ] as const
 
-function portalPath(eventSlug: string, segment = '') {
-  return segment ? `/portal/${eventSlug}/${segment}` : `/portal/${eventSlug}`
+function portalPath(
+  eventSlug: string,
+  segment: '' | 'submissions' | 'profile' | 'tasks' | `submissions/${string}` | `tasks/${string}` = '',
+) {
+  if (segment.startsWith('submissions/')) {
+    return router.href('/portal/:eventSlug/submissions/:sessionId', {
+      eventSlug,
+      sessionId: segment.slice('submissions/'.length),
+    })
+  }
+  if (segment.startsWith('tasks/')) {
+    return router.href('/portal/:eventSlug/tasks/:assignmentId', {
+      eventSlug,
+      assignmentId: segment.slice('tasks/'.length),
+    })
+  }
+  if (segment === 'submissions') return router.href('/portal/:eventSlug/submissions', { eventSlug })
+  if (segment === 'profile') return router.href('/portal/:eventSlug/profile', { eventSlug })
+  if (segment === 'tasks') return router.href(`/portal/${eventSlug}/tasks`)
+  return router.href('/portal/:eventSlug', { eventSlug })
 }
 
 export function PortalShell({
@@ -141,7 +161,7 @@ export function PortalShell({
             </div>
             <div className="flex flex-wrap items-center gap-2">
               {adminOrgPath ? (
-                <Button variant="outline" size="sm" render={<Link href={adminOrgPath} />}>
+                <Button variant="outline" size="sm" render={<Link href={router.href('/org/:orgId/e/:eventId', { orgId: event.orgId, eventId: event.id })} />}>
                   Back to Admin Mode
                   <ExternalLinkIcon data-icon="inline-end" />
                 </Button>
@@ -210,13 +230,25 @@ export function PortalHomePage() {
           icon={<FileTextIcon className="size-5 text-muted-foreground" />}
           title="No speaker profile yet"
           description="Submit a talk through the event CFP, or wait until an organizer adds you as a co-speaker. Your verified Google email must match."
-        />
+        >
+          {data.openCfp ? (
+            <Button render={<Link href={router.href('/submit/:eventSlug/:formSlug', { eventSlug: data.event.slug, formSlug: data.openCfp.slug })} />}>
+              Submit a talk
+            </Button>
+          ) : null}
+        </EmptyState>
       </PortalShell>
     )
   }
   const { event, speaker, submissions, assignments } = data
   const openTasks = countOpenAssignments(assignments.map((row) => ({ status: row.status })))
   const image = speakerDisplayImage(speaker)
+  const orderedAssignments = [...assignments].sort((a, b) => {
+    const statusOrder = Number(a.status === 'COMPLETED') - Number(b.status === 'COMPLETED')
+    if (statusOrder !== 0) return statusOrder
+    return (a.dueAt ?? Number.MAX_SAFE_INTEGER) - (b.dueAt ?? Number.MAX_SAFE_INTEGER)
+  })
+  const nextTask = orderedAssignments.find((row) => row.status !== 'COMPLETED')
 
   return (
     <PortalShell active="home">
@@ -244,7 +276,14 @@ export function PortalHomePage() {
               </Button>
             </div>
             {submissions.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No submissions yet.</p>
+              <div className="flex flex-col items-start gap-3">
+                <p className="text-sm text-muted-foreground">No submissions yet.</p>
+                {data.openCfp ? (
+                  <Button size="sm" render={<Link href={router.href('/submit/:eventSlug/:formSlug', { eventSlug: event.slug, formSlug: data.openCfp.slug })} />}>
+                    Submit a talk
+                  </Button>
+                ) : null}
+              </div>
             ) : (
               <ul className="flex flex-col divide-y divide-border">
                 {submissions.slice(0, 5).map((row) => (
@@ -306,11 +345,21 @@ export function PortalHomePage() {
               open
             </Badge>
           </div>
+          {nextTask ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
+              <div className="flex flex-col gap-1">
+                <span className="text-xs font-medium uppercase tracking-wide text-muted-foreground">Next incomplete task</span>
+                <Link href={portalPath(event.slug, `tasks/${nextTask.id}`)} className="font-medium no-underline hover:underline">{nextTask.title}</Link>
+                <span className="text-sm text-muted-foreground">{nextTask.dueAt ? `Due ${formatDateTimeUTC(nextTask.dueAt)}` : 'No due date'} · {nextTask.source === 'MANUAL' ? 'Mark complete' : 'Submit and complete'}</span>
+              </div>
+              <Button render={<Link href={portalPath(event.slug, `tasks/${nextTask.id}`)} />}>Continue</Button>
+            </div>
+          ) : null}
           {assignments.length === 0 ? (
             <p className="text-sm text-muted-foreground">No tasks assigned yet.</p>
           ) : (
             <ul className="flex flex-col divide-y divide-border">
-              {assignments.slice(0, 6).map((row) => (
+              {orderedAssignments.slice(0, 6).map((row) => (
                 <li key={row.id} className="flex items-center justify-between gap-3 py-3">
                   <Link
                     href={portalPath(event.slug, `tasks/${row.id}`)}
@@ -364,7 +413,13 @@ export function PortalSubmissionsPage() {
             icon={<FileTextIcon className="size-5 text-muted-foreground" />}
             title="No submissions"
             description="When you submit a CFP form, it will show up here."
-          />
+          >
+            {data.openCfp ? (
+              <Button render={<Link href={router.href('/submit/:eventSlug/:formSlug', { eventSlug: event.slug, formSlug: data.openCfp.slug })} />}>
+                Submit a talk
+              </Button>
+            ) : null}
+          </EmptyState>
         ) : (
           <Frame>
             <Table>
@@ -409,7 +464,7 @@ type SubmissionDetailData = {
     status: Parameters<typeof SessionStatusBadge>[0]['status']
     trackName: string | null
     formatName: string | null
-    speakers: Array<{ id: string; firstName: string; lastName: string; email: string }>
+    speakers: Array<{ id: string; firstName: string; lastName: string; email: string; roleLabel: string }>
   } | null
   draft: {
     mdxSource: string
@@ -420,6 +475,7 @@ type SubmissionDetailData = {
   } | null
   scope: { tracks: Array<{ value: string; label: string }>; formats: Array<{ value: string; label: string }> }
   canEdit: boolean
+  editBlockMessage: string | null
   canWithdraw: boolean
 }
 
@@ -430,6 +486,7 @@ export function PortalSubmissionDetailPage() {
     draft,
     scope,
     canEdit,
+    editBlockMessage,
     canWithdraw,
   } = useLoaderData('/portal/:eventSlug/submissions/:sessionId') as SubmissionDetailData
   const [error, setError] = React.useState<string | null>(null)
@@ -469,7 +526,7 @@ export function PortalSubmissionDetailPage() {
     try {
       await withdrawPortalSubmission({ eventId: event.id, sessionId: detail.id })
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : 'Could not withdraw')
+      setError(toastActionError(cause, 'Could not withdraw'))
     } finally {
       setWithdrawing(false)
     }
@@ -519,6 +576,11 @@ export function PortalSubmissionDetailPage() {
         </div>
 
         {error ? <p className="whitespace-pre-wrap text-sm text-destructive">{error}</p> : null}
+        {editBlockMessage ? (
+          <p className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-muted-foreground">
+            {editBlockMessage} Contact the event team if you need to make a change.
+          </p>
+        ) : null}
 
         {editing && draft ? (
           <PublicFormWizard
@@ -551,7 +613,8 @@ export function PortalSubmissionDetailPage() {
                   <li key={person.id}>
                     {person.firstName}
                     {' '}
-                    {person.lastName}
+                     {person.lastName}
+                    <Badge variant="secondary" className="ml-2 px-1.5">{person.roleLabel}</Badge>
                     <span className="text-muted-foreground">
                       {' '}
                       ·
@@ -594,6 +657,7 @@ export function PortalProfilePage() {
   }
   const { event, speaker, userEmail, userName } = shell
   const uploadFile = makeUpload({ eventId: event.id })
+  const profileImage = speakerDisplayImage(speaker)
 
   if (!profileForm || !profileMdx) {
     return (
@@ -610,14 +674,23 @@ export function PortalProfilePage() {
   if (done) {
     return (
       <PortalShell active="profile">
-        <SubmittedSuccess
-          title={`${speaker.firstName} ${speaker.lastName}`}
-          footer={(
-            <Button variant="outline" render={<Link href={portalPath(event.slug)} />}>
-              Back to home
-            </Button>
-          )}
-        />
+        <div className="flex flex-col items-center gap-4">
+          {profileImage ? (
+            <img
+              src={profileImage}
+              alt={`${speaker.firstName} ${speaker.lastName} saved headshot`}
+              className="size-24 rounded-full object-cover"
+            />
+          ) : null}
+          <SubmittedSuccess
+            title={`${speaker.firstName} ${speaker.lastName}`}
+            footer={(
+              <Button variant="outline" render={<Link href={portalPath(event.slug)} />}>
+                Back to home
+              </Button>
+            )}
+          />
+        </div>
       </PortalShell>
     )
   }
@@ -625,11 +698,16 @@ export function PortalProfilePage() {
   return (
     <PortalShell active="profile">
       <div className="flex flex-col gap-6">
-        <div className="flex flex-col gap-1">
-          <h1 className="text-xl font-semibold tracking-tight">Profile</h1>
-          <p className="text-sm text-muted-foreground">
-            Update the details organizers show on the schedule and speaker pages.
-          </p>
+        <div className="flex items-center gap-4">
+          {profileImage ? (
+            <img src={profileImage} alt={`${speaker.firstName} ${speaker.lastName} headshot`} className="size-20 rounded-full object-cover" />
+          ) : null}
+          <div className="flex flex-col gap-1">
+            <h1 className="text-xl font-semibold tracking-tight">Profile</h1>
+            <p className="text-sm text-muted-foreground">
+              Update the details organizers show on the schedule and speaker pages.
+            </p>
+          </div>
         </div>
         {error ? <p className="whitespace-pre-wrap text-sm text-destructive">{error}</p> : null}
         <PublicFormWizard
@@ -638,7 +716,7 @@ export function PortalProfilePage() {
           authenticated
           accountEmail={userEmail}
           accountName={userName}
-          signInHref="/"
+          signInHref={router.href('/')}
           uploadFile={uploadFile}
           submitLabel="Save profile"
           onSubmit={async (submission) => {
@@ -685,20 +763,25 @@ export function PortalTasksPage({ tab }: { tab: PortalTasksTab }) {
     formId: row.formId,
   }))
   const visibleIds = new Set(filterPortalAssignments(portalRows, tab).map((row) => row.id))
-  const visible = assignments.filter((row) => visibleIds.has(row.id))
+  const visible = assignments.filter((row) => visibleIds.has(row.id)).sort((a, b) => {
+    const statusOrder = Number(a.status === 'COMPLETED') - Number(b.status === 'COMPLETED')
+    if (statusOrder !== 0) return statusOrder
+    return (a.dueAt ?? Number.MAX_SAFE_INTEGER) - (b.dueAt ?? Number.MAX_SAFE_INTEGER)
+  })
+  const nextTaskId = visible.find((row) => row.status !== 'COMPLETED')?.id
 
   return (
     <PortalShell active="tasks">
       <div className="flex flex-col gap-5">
         <div className="flex flex-col gap-1">
           <h1 className="text-xl font-semibold tracking-tight">Tasks</h1>
-          <p className="text-sm text-muted-foreground">Complete onboarding items for this event.</p>
+          <p className="text-sm text-muted-foreground">Start with the first incomplete task. Manual tasks use Mark complete; form tasks use Submit and complete.</p>
         </div>
         <div className="flex items-center gap-1 border-b border-border">
           {PORTAL_TASKS_TABS.map((item) => (
             <Link
               key={item.value}
-              href={`/portal/${event.slug}/tasks?tab=${item.value}` as `/portal/${string}/tasks`}
+              href={router.href(`/portal/${event.slug}/tasks`, { tab: item.value })}
               className={cn(
                 'relative -mb-px px-2.5 py-2 text-sm no-underline transition-colors',
                 item.value === tab ? 'font-medium text-foreground' : 'text-muted-foreground hover:text-foreground',
@@ -730,19 +813,20 @@ export function PortalTasksPage({ tab }: { tab: PortalTasksTab }) {
               </TableHeader>
               <TableBody>
                 {visible.map((row) => (
-                  <TableRow key={row.id}>
+                  <TableRow key={row.id} className={row.id === nextTaskId ? 'bg-muted/40' : undefined}>
                     <TableCell>
                       <Link
                         href={portalPath(event.slug, `tasks/${row.id}`)}
                         className="font-medium no-underline hover:underline"
                       >
                         {row.title}
+                        {row.id === nextTaskId ? <Badge variant="warning" className="ml-2 px-1.5">Next</Badge> : null}
                       </Link>
                       {row.sessionTitle ? (
                         <div className="text-xs text-muted-foreground">{row.sessionTitle}</div>
                       ) : null}
                     </TableCell>
-                    <TableCell className="text-muted-foreground capitalize">{row.target.toLowerCase()}</TableCell>
+                    <TableCell className="text-muted-foreground"><span className="capitalize">{row.target.toLowerCase()}</span><span className="block text-xs">{row.source === 'MANUAL' ? 'Mark complete' : 'Submit and complete'}</span></TableCell>
                     <TableCell className="text-muted-foreground">
                       {row.dueAt ? formatDateTimeUTC(row.dueAt) : '—'}
                     </TableCell>
@@ -786,6 +870,7 @@ export function PortalTaskDetailPage() {
     useLoaderData('/portal/:eventSlug/tasks/:assignmentId')
   const [error, setError] = React.useState<string | null>(null)
   const [done, setDone] = React.useState(false)
+  const [pending, startTransition] = React.useTransition()
   const [uploaded, setUploaded] = React.useState<Record<string, TaskDetailData['deliverables'][number]['versions']>>({})
 
   if (shell.portalMissing || !shell.event) {
@@ -857,19 +942,30 @@ export function PortalTaskDetailPage() {
         </div>
         {error ? <p className="whitespace-pre-wrap text-sm text-destructive">{error}</p> : null}
 
+        <p className="border-y border-border py-3 text-sm text-muted-foreground">
+          {assignment.source === 'MANUAL'
+            ? 'This is a manual task. Use Mark complete when you have finished the requested work.'
+            : 'This is a form task. Use Submit and complete. A replacement upload keeps the task complete and preserves every earlier file version.'}
+        </p>
+
         {completed ? (
-          <SubmittedSuccess
-            title={assignment.title}
-            footer={(
-              <Button variant="outline" render={<Link href={portalPath(event.slug, 'tasks')} />}>
-                Back to tasks
-              </Button>
-            )}
-          />
-        ) : assignment.source === 'MANUAL' ? (
+          <Frame className="flex flex-col gap-1 p-4">
+            <div className="flex items-center gap-2 text-sm font-medium text-success">
+              <CheckCircle2Icon className="size-4" />
+              Task complete
+            </div>
+            {assignment.source === 'FORM' ? (
+              <p className="text-sm text-muted-foreground">
+                You can upload and submit a replacement below. The task will stay complete and earlier file versions will remain available.
+              </p>
+            ) : null}
+          </Frame>
+        ) : null}
+        {assignment.source === 'MANUAL' ? (!completed ? (
           <Button
             className="self-start"
-            onClick={async () => {
+            loading={pending}
+            onClick={() => startTransition(async () => {
               setError(null)
               try {
                 await completeManualTaskAssignment({
@@ -878,13 +974,13 @@ export function PortalTaskDetailPage() {
                 })
                 setDone(true)
               } catch (cause) {
-                setError(cause instanceof Error ? cause.message : 'Could not complete task')
+                setError(toastActionError(cause, 'Could not complete task'))
               }
-            }}
+            })}
           >
             Mark complete
           </Button>
-        ) : formMdx ? (
+        ) : null) : formMdx ? (
           <PublicFormWizard
             mdxSource={formMdx}
             scope={scope}
@@ -893,9 +989,9 @@ export function PortalTaskDetailPage() {
             authenticated
             accountEmail={userEmail}
             accountName={userName}
-            signInHref="/"
+            signInHref={router.href('/')}
             uploadFile={uploadFile}
-            submitLabel="Submit and complete"
+            submitLabel={completed ? 'Submit replacement' : 'Submit and complete'}
             onSubmit={async (submission) => {
               setError(null)
               try {
@@ -979,7 +1075,7 @@ function TaskDeliverableThread({ eventId, assignmentId, slot }: {
         {slot.versions.map((file, index) => (
           <div key={file.id} className="flex items-center justify-between gap-3 border-b border-border pb-2 last:border-0">
             <div className="min-w-0">
-              <Link href={`/files/${file.id}`} className="text-sm font-medium no-underline hover:underline">
+              <Link href={router.href('/files/:fileId', { fileId: file.id })} className="text-sm font-medium no-underline hover:underline">
                 {file.fileName}
               </Link>
               <p className="text-xs text-muted-foreground">

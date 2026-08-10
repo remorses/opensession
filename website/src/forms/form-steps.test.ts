@@ -55,7 +55,7 @@ describe('extractFormSteps', () => {
   test('starter speaker profile has Profile and Socials steps', () => {
     const result = extractFormSteps(starterSpeakerProfileTemplate)
     expect(result.errors).toEqual([])
-    expect(result.contentSteps.map((step) => step.title)).toEqual(['Profile', 'Socials'])
+    expect(result.contentSteps.map((step) => step.title)).toEqual(['Profile', 'Socials', 'Logistics'])
   })
 })
 

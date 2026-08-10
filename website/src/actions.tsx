@@ -1,13 +1,15 @@
+'use server'
+
 // Server actions for the OpenSession website.
 // Org management (create, rename, invites, member roles) is ported from
 // akarso/sigillo's access implementation. Event actions are OpenSession's.
 //
 // SECURITY: server actions are public POST endpoints — every action
 // authenticates via getActionRequest() + requireSession/requireOrgAccess.
-'use server'
 
 import { env } from 'cloudflare:workers'
 import { getActionRequest, redirect } from 'spiceflow'
+import { router } from 'spiceflow/react'
 import { z } from 'zod'
 import * as orm from 'drizzle-orm'
 import * as schema from 'db/schema'
@@ -29,8 +31,9 @@ import {
   starterSpeakerProfileTemplate,
 } from './forms/starter-template.ts'
 import { validateSubmission } from './forms/validate.ts'
-import { flattenSubmissionValues } from './lib/cfp-submission.ts'
+import { flattenSubmissionValues, formScheduleBlock, formScheduleBlockMessage } from './lib/cfp-submission.ts'
 import {
+  applyAutoPlacementPlan,
   clearSessionSlot,
   loadAgendaSessions,
   scheduleSessionSlot,
@@ -41,11 +44,13 @@ import {
   getOrCreateCfpDraft,
   getPublicCfp,
   linkSpeakerToOrgContact,
+  resetCfpDraft,
   saveCfpDraft,
   submitCfpResponse,
 } from './lib/cfp-server.ts'
 import {
   completeManualTaskAssignment as completeManualTaskAssignmentServer,
+  saveOrganizerSpeakerProfile as saveOrganizerSpeakerProfileServer,
   savePortalProfile as savePortalProfileServer,
   savePortalSubmission as savePortalSubmissionServer,
   submitPortalFormTask as submitPortalFormTaskServer,
@@ -59,7 +64,7 @@ import {
   sendEmailMessage,
 } from './lib/emails/send.ts'
 import { eventDayKeys, toZonedSlot, zonedEpoch } from './lib/conflicts.ts'
-import { autoPlaceSessions } from './lib/public-program.ts'
+import { autoPlaceSessions, summarizeProgramPublication } from './lib/public-program.ts'
 import { invitationAcceptanceDecision } from './lib/reviews.ts'
 import {
   applyTransition,
@@ -124,7 +129,7 @@ export async function createOrg(input: { name: string }) {
     db.insert(schema.org).values({ orgId, ownerUserId: session.userId, kind: 'team', name }),
     db.insert(schema.orgMember).values({ orgId, userId: session.userId, role: 'admin' }),
   ] as const)
-  throw redirect(`/org/${orgId}`)
+  throw redirect(router.href('/org/:orgId', { orgId }))
 }
 
 const renameOrgSchema = z.object({
@@ -168,7 +173,6 @@ export async function createInvite(input: { orgId: string }) {
     .insert(schema.orgInvitation)
     .values({
       orgId: org.orgId,
-      purpose: 'ORG_MEMBER',
       createdBy: session.userId,
       expiresAt: Date.now() + INVITE_EXPIRY_MS,
     })
@@ -205,7 +209,7 @@ export async function acceptInvite(input: { invitationId: string }) {
       formId: invite.formId,
       userId: session.userId,
     }).onConflictDoNothing({ target: [schema.evaluationReviewer.formId, schema.evaluationReviewer.userId] })
-    throw redirect(`/review/${invite.formId}`)
+    throw redirect(router.href('/review/:formId', { formId: invite.formId }))
   }
   // onConflictDoNothing handles the already-member case (unique index on
   // org_id + user_id prevents duplicates).
@@ -213,7 +217,7 @@ export async function acceptInvite(input: { invitationId: string }) {
     .insert(schema.orgMember)
     .values({ orgId: invite.orgId, userId: session.userId, role: invite.role })
     .onConflictDoNothing({ target: [schema.orgMember.orgId, schema.orgMember.userId] })
-  throw redirect(`/org/${invite.orgId}`)
+  throw redirect(router.href('/org/:orgId', { orgId: invite.orgId }))
 }
 
 const inviteReviewerSchema = z.object({
@@ -265,6 +269,7 @@ export async function inviteEvaluationReviewer(input: z.input<typeof inviteRevie
   })
   return { invitationId, inviteUrl }
 }
+
 
 // ── Member management ───────────────────────────────────────────────
 
@@ -422,12 +427,15 @@ export async function createEvent(input: z.input<typeof createEventSchema>) {
   try {
     // Event + default OPEN forms (CFP, speaker profile, materials) + FORM
     // tasks + a starter track/format so CFP selects work immediately.
+    // Event ACTIVE + CFP OPEN on create so the public share link works without
+    // a second settings pass.
     await db.batch([
       db.insert(schema.event).values({
         id: eventId,
         orgId: parsed.orgId,
         name: parsed.name,
         slug,
+        status: 'ACTIVE',
         timezone: parsed.timezone,
         startsAt: bounds.startsAt,
         endsAt: bounds.endsAt,
@@ -457,8 +465,7 @@ export async function createEvent(input: z.input<typeof createEventSchema>) {
         target: 'SUBMISSION',
         name: 'Call for speakers',
         slug: 'cfp',
-        // DRAFT until the organizer reviews and opens the CFP.
-        status: 'DRAFT',
+        status: 'OPEN',
       }),
       db.insert(schema.formVersion).values({ formId: cfpFormId, mdxSource: starterCfpTemplate }),
       db.insert(schema.form).values({
@@ -493,7 +500,7 @@ export async function createEvent(input: z.input<typeof createEventSchema>) {
     // Global unique slug — the most likely failure mode.
     throw new Error(`The slug "${slug}" is already taken. Pick another one.`)
   }
-  throw redirect(`/org/${parsed.orgId}/e/${eventId}`)
+  throw redirect(router.href('/org/:orgId/e/:eventId', { orgId: parsed.orgId, eventId }))
 }
 
 // ── Event settings actions ──────────────────────────────────────────
@@ -779,6 +786,7 @@ export async function createForm(input: z.input<typeof createFormSchema>) {
         target: parsed.purpose === 'PORTAL' ? (parsed.target ?? 'SUBMISSION') : 'SUBMISSION',
         name: parsed.name,
         slug,
+        status: 'OPEN',
         opensAt: parsed.opensAt ?? null,
         closesAt: parsed.closesAt ?? null,
         blind: parsed.purpose === 'EVALUATION' ? (parsed.blind ?? false) : false,
@@ -789,7 +797,11 @@ export async function createForm(input: z.input<typeof createFormSchema>) {
     // Per-event unique slug — the most likely failure mode.
     throw new Error(`The slug "${slug}" is already used by another form of this event`)
   }
-  throw redirect(`/org/${parsed.orgId}/e/${parsed.eventId}/forms/${formId}`)
+  throw redirect(router.href('/org/:orgId/e/:eventId/forms/:formId', {
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+    formId,
+  }))
 }
 
 const saveFormVersionSchema = z.object({
@@ -910,8 +922,10 @@ export async function deleteForm(input: z.input<typeof deleteFormSchema>) {
     throw new Error('This form has responses and cannot be deleted. Archive it instead.')
   }
   await db.delete(schema.form).where(orm.eq(schema.form.id, parsed.formId)).limit(1)
-  const listSegment = form.purpose === 'PORTAL' ? 'portal-forms' : form.purpose === 'EVALUATION' ? 'evaluation' : 'forms'
-  throw redirect(`/org/${parsed.orgId}/e/${parsed.eventId}/${listSegment}`)
+  throw redirect(router.href('/org/:orgId/e/:eventId/forms', {
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  }))
 }
 
 // ── Public CFP actions ───────────────────────────────────────────────
@@ -936,7 +950,19 @@ export async function startPublicCfpSubmission(input: z.input<typeof startPublic
   if (!cfp) throw new Error('This CFP is not open')
   const draft = await getOrCreateCfpDraft({ cfp, session, explicitlyRequested: true })
   if (!draft) throw new Error('Could not start a submission')
-  throw redirect(`/submit/${parsed.eventSlug}/${parsed.formSlug}`)
+  throw redirect(router.href('/submit/:eventSlug/:formSlug', {
+    eventSlug: parsed.eventSlug,
+    formSlug: parsed.formSlug,
+  }))
+}
+
+export async function resetPublicCfpDraft(input: z.input<typeof startPublicCfpSchema>) {
+  const actionRequest = getActionRequest()
+  const session = await requireSession(actionRequest)
+  const parsed = startPublicCfpSchema.parse(input)
+  const cfp = await getPublicCfp(parsed.eventSlug, parsed.formSlug)
+  if (!cfp) throw new Error('This CFP is not open')
+  return resetCfpDraft({ cfp, session })
 }
 
 /** Save an incomplete CFP response. Authentication happens before parsing
@@ -993,6 +1019,21 @@ export async function savePortalProfile(input: z.input<typeof savePortalProfileS
   const session = await requireSession(actionRequest)
   const parsed = savePortalProfileSchema.parse(input)
   return savePortalProfileServer({ ...parsed, session })
+}
+
+const saveOrganizerSpeakerProfileSchema = savePortalProfileSchema.extend({
+  orgId: z.string().min(1),
+  speakerId: z.string().min(1),
+})
+
+export async function saveOrganizerSpeakerProfile(
+  input: z.input<typeof saveOrganizerSpeakerProfileSchema>,
+) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = saveOrganizerSpeakerProfileSchema.parse(input)
+  await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
+  return saveOrganizerSpeakerProfileServer(parsed)
 }
 
 const portalAssignmentActionSchema = z.object({
@@ -1080,6 +1121,7 @@ export async function updateSessionStatus(input: z.input<typeof updateSessionSta
       submittedAt: row.submittedAt,
       decidedAt: row.decidedAt,
       withdrawnAt: row.withdrawnAt,
+      notifiedAt: row.notifiedAt,
     },
     parsed.status,
     now,
@@ -1128,6 +1170,7 @@ export async function bulkUpdateSessionStatus(
   const rows = await db.query.eventSession.findMany({
     where: { eventId: parsed.eventId, id: { in: parsed.sessionIds } },
   })
+  if (rows.length !== parsed.sessionIds.length) throw new Error('Some selected sessions no longer exist')
   const now = Date.now()
   const planned = planBulkStatusUpdate(
     rows.map((row) => ({
@@ -1137,6 +1180,7 @@ export async function bulkUpdateSessionStatus(
       submittedAt: row.submittedAt,
       decidedAt: row.decidedAt,
       withdrawnAt: row.withdrawnAt,
+      notifiedAt: row.notifiedAt,
     })),
     parsed.status,
     now,
@@ -1152,6 +1196,7 @@ export async function bulkUpdateSessionStatus(
         submittedAt: patch.submittedAt,
         decidedAt: patch.decidedAt,
         withdrawnAt: patch.withdrawnAt,
+        ...(patch.notifiedAt !== undefined ? { notifiedAt: patch.notifiedAt } : {}),
         updatedAt: patch.updatedAt,
       })
       .where(
@@ -1230,11 +1275,12 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
       submittedAt: row.submittedAt,
       decidedAt: row.decidedAt,
       withdrawnAt: row.withdrawnAt,
+      notifiedAt: row.notifiedAt,
     })),
     parsed.queue,
     now,
   )
-  if (planned.length === 0) return { updated: 0, emailsQueued: 0 }
+  if (planned.length === 0) return { updated: 0, emailsQueued: 0, emailsSent: 0 }
 
   const updates = planned.map((patch) =>
     db
@@ -1245,17 +1291,30 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
         submittedAt: patch.submittedAt,
         decidedAt: patch.decidedAt,
         withdrawnAt: patch.withdrawnAt,
+        ...(patch.notifiedAt !== undefined ? { notifiedAt: patch.notifiedAt } : {}),
         updatedAt: patch.updatedAt,
       })
       .where(
         orm.and(
           orm.eq(schema.eventSession.id, patch.id),
           orm.eq(schema.eventSession.eventId, parsed.eventId),
+          orm.eq(schema.eventSession.status, patch.from),
         ),
       )
       .limit(1),
   )
   await db.batch(updates as [any, ...any[]])
+  const finalizedRows = await db.query.eventSession.findMany({
+    where: { eventId: parsed.eventId, id: { in: planned.map((patch) => patch.id) } },
+  })
+  const finalizedIds = new Set(finalizedRows
+    .filter((row) => planned.some((patch) =>
+      patch.id === row.id
+      && patch.status === row.status
+      && patch.decidedAt === row.decidedAt,
+    ))
+    .map((row) => row.id))
+  const finalized = planned.filter((patch) => finalizedIds.has(patch.id))
 
   let emailsQueued = 0
   let emailsSent = 0
@@ -1275,7 +1334,7 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
    *  only for sessions whose decision mail reached SENT — never at enqueue. */
   const notifiedSessionIds: string[] = []
 
-  for (const patch of planned) {
+  for (const patch of finalized) {
     const row = rows.find((item) => item.id === patch.id)
     if (!row) continue
     const title = row.title?.trim() || 'your submission'
@@ -1330,6 +1389,7 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
     }
 
     const kind = patch.status === 'ACCEPTED' ? 'DECISION_ACCEPTED' : 'DECISION_DECLINED'
+    if (patch.decidedAt == null) throw new Error('Final decision is missing its timestamp')
     let decisionDelivered = false
     for (const part of row.participants) {
       const speaker = part.speaker
@@ -1340,7 +1400,7 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
         toEmail: speaker.email,
         speakerId: speaker.id,
         sessionId: row.id,
-        dedupeKey: dedupeKeys.decision(row.id, speaker.id),
+        dedupeKey: dedupeKeys.decision(row.id, speaker.id, patch.decidedAt),
         replyTo,
         now,
         payload: {
@@ -1370,7 +1430,7 @@ export async function notifyQueue(input: z.input<typeof notifyQueueSchema>) {
       )
   }
 
-  return { updated: planned.length, emailsQueued, emailsSent }
+  return { updated: finalized.length, emailsQueued, emailsSent }
 }
 
 // ── Agenda: sessions list + schedule placement ──────────────────────
@@ -1497,23 +1557,13 @@ export async function applyAutoPlace(input: z.input<typeof agendaPlanSchema>) {
   const parsed = agendaPlanSchema.parse(input)
   const { db, event } = await requireEventAccess({ actionRequest, ...parsed })
   const plan = await buildAgendaPlan({ db, event })
-  let emailsQueued = 0
-  for (const placement of plan.placements) {
-    const result = await scheduleSessionSlot({
-      db,
-      event,
-      sessionId: placement.sessionId,
-      roomId: placement.roomId,
-      dayKey: placement.dayKey,
-      startMinute: placement.startMinute,
-      durationMinutes: placement.durationMinutes,
-      confirmConflicts: false,
-      now: Date.now(),
-    })
-    if (!result.scheduled) throw new Error(`Schedule changed while placing ${placement.title}. Preview again.`)
-    emailsQueued += result.emailsQueued
-  }
-  return { ...plan, applied: plan.placements.length, emailsQueued }
+  const result = await applyAutoPlacementPlan({
+    db,
+    event,
+    placements: plan.placements,
+    now: Date.now(),
+  })
+  return { ...plan, ...result }
 }
 
 const setProgramPublicationSchema = agendaPlanSchema.extend({ published: z.boolean() })
@@ -1527,12 +1577,16 @@ export async function setProgramPublication(input: z.input<typeof setProgramPubl
     orgId: parsed.orgId,
     eventId: parsed.eventId,
   })
+  const sessions = await db.query.eventSession.findMany({
+    where: { eventId: parsed.eventId, status: 'ACCEPTED' },
+  })
+  const summary = summarizeProgramPublication(sessions)
   const programPublishedAt = parsed.published ? Date.now() : null
   await db.update(schema.event)
     .set({ programPublishedAt, updatedAt: Date.now() })
     .where(orm.eq(schema.event.id, parsed.eventId))
     .limit(1)
-  return { published: parsed.published, programPublishedAt }
+  return { published: parsed.published, programPublishedAt, ...summary }
 }
 
 const setSessionVisibilitySchema = z.object({
@@ -1732,6 +1786,8 @@ async function insertAssignmentsIdempotent({
   return created
 }
 
+
+
 const assignReviewsSchema = z.object({
   orgId: z.string().min(1),
   eventId: z.string().min(1),
@@ -1845,7 +1901,7 @@ export async function saveEvaluationReview(input: z.input<typeof reviewResponseS
         submittedAt: parsed.submit ? now : null,
         createdAt: now,
         updatedAt: now,
-      })
+    })
   const statements = [
     responseStatement,
     ...(assignment.response ? [db.delete(schema.formFieldValue).where(orm.eq(schema.formFieldValue.responseId, responseId))] : []),
@@ -1880,36 +1936,47 @@ export async function recuseEvaluationReview(input: z.input<typeof recuseReviewS
 }
 
 const remindReviewerSchema = z.object({
-  orgId: z.string().min(1), eventId: z.string().min(1), formId: z.string().min(1), reviewerId: z.string().min(1),
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  formId: z.string().min(1),
+  reviewerIds: z.array(z.string().min(1)).min(1).max(100),
 })
 
-export async function remindEvaluationReviewer(input: z.input<typeof remindReviewerSchema>) {
+export async function remindEvaluationReviewers(input: z.input<typeof remindReviewerSchema>) {
   const actionRequest = getActionRequest()
   await requireSession(actionRequest)
   const parsed = remindReviewerSchema.parse(input)
   const { db, event } = await requireEventAccess({ actionRequest, orgId: parsed.orgId, eventId: parsed.eventId })
-  const pool = await db.query.evaluationReviewer.findFirst({
-    where: { eventId: parsed.eventId, formId: parsed.formId, userId: parsed.reviewerId },
+  const reviewerIds = [...new Set(parsed.reviewerIds)]
+  const pool = await db.query.evaluationReviewer.findMany({
+    where: { eventId: parsed.eventId, formId: parsed.formId, userId: { in: reviewerIds } },
     with: { user: true, form: true, assignments: { with: { response: true } } },
   })
-  if (!pool?.user || !pool.form) throw new Error('Reviewer not found')
-  const pendingCount = pool.assignments.filter((row) => row.recusedAt == null && row.response?.status !== 'SUBMITTED').length
-  if (pendingCount === 0) throw new Error('This reviewer has no outstanding reviews')
+  if (pool.length !== reviewerIds.length || pool.some((row) => !row.user || !row.form)) {
+    throw new Error('Reviewer not found')
+  }
+  const pending = pool.map((row) => ({
+    row,
+    pendingCount: row.assignments.filter((assignment) => assignment.recusedAt == null && assignment.response?.status !== 'SUBMITTED').length,
+  })).filter((item) => item.pendingCount > 0)
+  if (pending.length === 0) throw new Error('The selected reviewers have no outstanding reviews')
   const now = Date.now()
-  await enqueueAndSend({
-    db,
-    eventId: event.id,
-    toEmail: pool.user.email,
-    dedupeKey: dedupeKeys.reviewReminder(pool.formId, pool.userId, dayBucket(now, event.timezone)),
-    replyTo: replyToFor(event.contactEmail),
-    now,
-    payload: {
-      kind: 'REVIEW_REMINDER',
-      context: { eventName: event.name, eventSlug: event.slug, appUrl: env.APP_URL, timezone: event.timezone, recipientName: pool.user.name },
-      data: { roundName: pool.form.name, reviewUrl: new URL(`/review/${pool.formId}`, env.APP_URL).href, pendingCount, closesAt: pool.form.closesAt },
-    },
-  })
-  return { pendingCount }
+  for (const { row, pendingCount } of pending) {
+    await enqueueAndSend({
+      db,
+      eventId: event.id,
+      toEmail: row.user!.email,
+      dedupeKey: dedupeKeys.reviewReminder(row.formId, row.userId, dayBucket(now, event.timezone)),
+      replyTo: replyToFor(event.contactEmail),
+      now,
+      payload: {
+        kind: 'REVIEW_REMINDER',
+        context: { eventName: event.name, eventSlug: event.slug, appUrl: env.APP_URL, timezone: event.timezone, recipientName: row.user!.name },
+        data: { roundName: row.form!.name, reviewUrl: new URL(`/review/${row.formId}`, env.APP_URL).href, pendingCount, closesAt: row.form!.closesAt },
+      },
+    })
+  }
+  return { reminded: pending.length, pendingCount: pending.reduce((sum, item) => sum + item.pendingCount, 0) }
 }
 
 // ── Speaker roster, participants, and communications ────────────────
@@ -2686,13 +2753,13 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
   })
   const formId = parsed.source === 'FORM' ? (parsed.formId ?? null) : null
   const form = formId
-    ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId } })
+    ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId, purpose: 'PORTAL' } })
     : null
   assertTaskDefinitionShape({
     source: parsed.source,
     target: parsed.target,
     formId,
-    form: form ? { purpose: form.purpose, target: form.target } : null,
+    form: form?.purpose === 'PORTAL' ? { purpose: form.purpose, target: form.target } : null,
   })
   const existing = await db.query.taskDefinition.findMany({
     where: { eventId: parsed.eventId },
@@ -2793,13 +2860,13 @@ export async function updateTaskDefinition(input: z.input<typeof updateTaskDefin
   }
   const formId = parsed.source === 'FORM' ? (parsed.formId ?? null) : null
   const form = formId
-    ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId } })
+    ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId, purpose: 'PORTAL' } })
     : null
   assertTaskDefinitionShape({
     source: parsed.source,
     target: parsed.target,
     formId,
-    form: form ? { purpose: form.purpose, target: form.target } : null,
+    form: form?.purpose === 'PORTAL' ? { purpose: form.purpose, target: form.target } : null,
   })
   await db
     .update(schema.taskDefinition)

@@ -39,10 +39,6 @@ type OccupiedSlot = {
   speakerIds: string[]
 }
 
-function overlaps(a: Pick<OccupiedSlot, 'startMinute' | 'endMinute'>, b: Pick<OccupiedSlot, 'startMinute' | 'endMinute'>) {
-  return a.startMinute < b.endMinute && b.startMinute < a.endMinute
-}
-
 /**
  * Stable first-fit packing. Existing placements are fixed. Unscheduled rows,
  * days, rooms, and 15-minute candidates are all traversed in a defined order.
@@ -95,7 +91,11 @@ export function autoPlaceSessions({
             speakerIds: [...new Set(session.speakerIds)].sort(),
           }
           const conflict = occupied.some((slot) => {
-            if (slot.dayKey !== candidate.dayKey || !overlaps(slot, candidate)) return false
+            if (
+              slot.dayKey !== candidate.dayKey
+              || slot.startMinute >= candidate.endMinute
+              || candidate.startMinute >= slot.endMinute
+            ) return false
             if (slot.roomId === candidate.roomId) return true
             return candidate.speakerIds.some((speakerId) => slot.speakerIds.includes(speakerId))
           })
@@ -240,6 +240,28 @@ export function isPublicProgramSession(
     && session.endsAt > session.startsAt
 }
 
+type ProgramPublicationSession = Pick<
+  PublicProgramSource['sessions'][number],
+  'status' | 'visibility' | 'roomId' | 'startsAt' | 'endsAt'
+>
+
+/** Counts accepted scheduled rows by the visibility gate used by public output. */
+export function summarizeProgramPublication(sessions: ProgramPublicationSession[]) {
+  let publicScheduledCount = 0
+  let privateScheduledCount = 0
+  for (const session of sessions) {
+    const scheduled = session.status === 'ACCEPTED'
+      && session.roomId != null
+      && session.startsAt != null
+      && session.endsAt != null
+      && session.endsAt > session.startsAt
+    if (!scheduled) continue
+    if (session.visibility === 'PUBLIC') publicScheduledCount += 1
+    else privateScheduledCount += 1
+  }
+  return { publicScheduledCount, privateScheduledCount }
+}
+
 /** ACTIVE + published event, then ACCEPTED + PUBLIC + scheduled rows only. */
 export function projectPublicProgram(source: PublicProgramSource): PublicProgram | null {
   if (source.event.status !== 'ACTIVE' || source.event.programPublishedAt == null) return null
@@ -342,6 +364,14 @@ export type PublicProgramFilters = {
   room?: string
 }
 
+export type PublicWidgetView = 'sessions' | 'speakers' | 'agenda' | 'itinerary' | 'gallery'
+export const PUBLIC_WIDGET_FIELDS = [
+  'description', 'speakers', 'track', 'format', 'room', 'time',
+  'photo', 'jobTitle', 'company', 'bio', 'sessions',
+] as const
+export type PublicWidgetField = (typeof PUBLIC_WIDGET_FIELDS)[number]
+const publicWidgetFieldSet: ReadonlySet<string> = new Set(PUBLIC_WIDGET_FIELDS)
+
 export function filterPublicSessions(sessions: PublicSession[], filters: PublicProgramFilters): PublicSession[] {
   const query = filters.q?.trim().toLocaleLowerCase('en-US') ?? ''
   return sessions.filter((session) => {
@@ -352,4 +382,78 @@ export function filterPublicSessions(sessions: PublicSession[], filters: PublicP
     return [session.title, session.description, ...session.speakers.map((speaker) => speaker.name)]
       .some((value) => value?.toLocaleLowerCase('en-US').includes(query))
   })
+}
+
+export function filterPublicSpeakers(speakers: PublicSpeaker[], query?: string): PublicSpeaker[] {
+  const normalized = query?.trim().toLocaleLowerCase('en-US') ?? ''
+  return normalized
+    ? speakers.filter((speaker) => speaker.name.toLocaleLowerCase('en-US').includes(normalized))
+    : speakers
+}
+
+export function parsePublicWidgetFields(fields?: string): PublicWidgetField[] | undefined {
+  return fields?.split(',').filter((field): field is PublicWidgetField => publicWidgetFieldSet.has(field))
+}
+
+export function selectPublicWidgetData({ program, view, filters }: {
+  program: PublicProgram
+  view: PublicWidgetView
+  filters: PublicProgramFilters
+}) {
+  if (view === 'speakers' || view === 'gallery') {
+    return { event: program.event, speakers: filterPublicSpeakers(program.speakers, filters.q) }
+  }
+  return { event: program.event, sessions: filterPublicSessions(program.sessions, filters) }
+}
+
+function escapeMarkup(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function fieldIsVisible(fields: PublicWidgetField[] | undefined, field: PublicWidgetField): boolean {
+  return !fields || fields.includes(field)
+}
+
+/** Basic, unstyled HTML output for websites that do not want the interactive widget. */
+export function renderPublicWidgetHtml(
+  { program, view, filters, fields }: {
+    program: PublicProgram
+    view: PublicWidgetView
+    filters: PublicProgramFilters
+    fields?: PublicWidgetField[]
+  },
+): string {
+  const title = `${program.event.name} ${view}`
+  const body = view === 'speakers' || view === 'gallery'
+    ? filterPublicSpeakers(program.speakers, filters.q).map((speaker) => {
+        const sessions = program.sessions.filter((session) => speaker.sessionIds.includes(session.id))
+        return `<article><h2>${escapeMarkup(speaker.name)}</h2>${fieldIsVisible(fields, 'jobTitle') && speaker.jobTitle ? `<p>${escapeMarkup(speaker.jobTitle)}</p>` : ''}${fieldIsVisible(fields, 'company') && speaker.companyName ? `<p>${escapeMarkup(speaker.companyName)}</p>` : ''}${fieldIsVisible(fields, 'bio') && speaker.bio ? `<p>${escapeMarkup(speaker.bio)}</p>` : ''}${fieldIsVisible(fields, 'sessions') ? `<ul>${sessions.map((session) => `<li>${escapeMarkup(session.title)}${fieldIsVisible(fields, 'time') ? ` · ${escapeMarkup(session.dayLabel)} · ${escapeMarkup(session.timeLabel)}` : ''}${fieldIsVisible(fields, 'room') ? ` · ${escapeMarkup(session.room.name)}` : ''}</li>`).join('')}</ul>` : ''}</article>`
+      }).join('')
+    : filterPublicSessions(program.sessions, filters).map((session) => `<article><h2>${escapeMarkup(session.title)}</h2>${fieldIsVisible(fields, 'description') && session.description ? `<p>${escapeMarkup(session.description)}</p>` : ''}${fieldIsVisible(fields, 'time') ? `<p>${escapeMarkup(session.dayLabel)} · ${escapeMarkup(session.timeLabel)}</p>` : ''}${fieldIsVisible(fields, 'room') ? `<p>${escapeMarkup(session.room.name)}</p>` : ''}${fieldIsVisible(fields, 'speakers') ? `<p>${session.speakers.map((speaker) => escapeMarkup(speaker.name)).join(', ')}</p>` : ''}${fieldIsVisible(fields, 'track') && session.track ? `<p>Track: ${escapeMarkup(session.track.name)}</p>` : ''}${fieldIsVisible(fields, 'format') && session.format ? `<p>Format: ${escapeMarkup(session.format.name)}</p>` : ''}</article>`).join('')
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeMarkup(title)}</title></head><body><main><h1>${escapeMarkup(program.event.name)}</h1>${body}</main></body></html>`
+}
+
+/** XML feed output built from the same projected rows as pages, JSON, and iCal. */
+export function renderPublicWidgetXml({ program, view, filters }: {
+  program: PublicProgram
+  view: PublicWidgetView
+  filters: PublicProgramFilters
+}): string {
+  const event = `<event id="${escapeMarkup(program.event.id)}"><name>${escapeMarkup(program.event.name)}</name><slug>${escapeMarkup(program.event.slug)}</slug></event>`
+  if (view === 'speakers' || view === 'gallery') {
+    const speakers = filterPublicSpeakers(program.speakers, filters.q).map((speaker) => `<speaker id="${escapeMarkup(speaker.id)}"><name>${escapeMarkup(speaker.name)}</name><bio>${escapeMarkup(speaker.bio ?? '')}</bio><jobTitle>${escapeMarkup(speaker.jobTitle ?? '')}</jobTitle><company>${escapeMarkup(speaker.companyName ?? '')}</company><sessionIds>${speaker.sessionIds.map((id) => `<sessionId>${escapeMarkup(id)}</sessionId>`).join('')}</sessionIds></speaker>`).join('')
+    return `<?xml version="1.0" encoding="UTF-8"?><program>${event}<speakers>${speakers}</speakers></program>`
+  }
+  const sessions = filterPublicSessions(program.sessions, filters).map((session) => `<session id="${escapeMarkup(session.id)}"><title>${escapeMarkup(session.title)}</title><description>${escapeMarkup(session.description ?? '')}</description><startsAt>${session.startsAt}</startsAt><endsAt>${session.endsAt}</endsAt><room>${escapeMarkup(session.room.name)}</room><track>${escapeMarkup(session.track?.name ?? '')}</track><format>${escapeMarkup(session.format?.name ?? '')}</format><speakers>${session.speakers.map((speaker) => `<speaker id="${escapeMarkup(speaker.id)}">${escapeMarkup(speaker.name)}</speaker>`).join('')}</speakers></session>`).join('')
+  return `<?xml version="1.0" encoding="UTF-8"?><program>${event}<sessions>${sessions}</sessions></program>`
+}
+
+/** Single external script output. It inserts the live iframe after its script tag. */
+export function buildPublicWidgetScript({ iframeUrl, title }: { iframeUrl: string; title: string }): string {
+  return `(()=>{const s=document.currentScript;if(!s)return;const f=document.createElement('iframe');f.src=${JSON.stringify(iframeUrl)};f.title=${JSON.stringify(title)};f.loading='lazy';f.style.cssText='width:100%;height:720px;border:0';f.allow='clipboard-write';s.insertAdjacentElement('afterend',f)})();`
 }

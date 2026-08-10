@@ -11,6 +11,7 @@ import {
   type PublicProgramFilters,
   type PublicSession,
   type PublicSpeaker,
+  type PublicWidgetField,
 } from '../lib/public-program.ts'
 import { formatDayLabel, layoutDayColumns, minutesToLabel } from '../lib/conflicts.ts'
 import { cn } from '../lib/utils.ts'
@@ -27,16 +28,20 @@ type Props = {
   initialFilters?: PublicProgramFilters
   accent?: string
   compact?: boolean
-  visibleFields?: string[]
+  visibleFields?: PublicWidgetField[]
 }
 
-const views: Array<{ value: PublicProgramView; label: string }> = [
-  { value: 'sessions', label: 'Sessions' },
-  { value: 'speakers', label: 'Speakers' },
-  { value: 'agenda', label: 'Agenda' },
-  { value: 'itinerary', label: 'Itinerary' },
-  { value: 'gallery', label: 'Gallery' },
+const views: Array<{ value: PublicProgramView; label: string; description: string }> = [
+  { value: 'sessions', label: 'Session list', description: 'Browse every published session.' },
+  { value: 'speakers', label: 'Speaker directory', description: 'Find speakers and their sessions.' },
+  { value: 'agenda', label: 'Schedule grid', description: 'Compare rooms and times by day.' },
+  { value: 'itinerary', label: 'My itinerary', description: 'Select sessions for a personal plan on this browser.' },
+  { value: 'gallery', label: 'Speaker gallery', description: 'Browse speakers in a visual grid.' },
 ]
+
+function isFieldVisible(fields: PublicWidgetField[] | undefined, field: PublicWidgetField) {
+  return !fields || fields.includes(field)
+}
 
 type PersonalStore = {
   getSnapshot: () => string[]
@@ -117,7 +122,13 @@ export function PublicProgramPage({
     const q = filters.q?.trim().toLocaleLowerCase('en-US') ?? ''
     return !q || speaker.name.toLocaleLowerCase('en-US').includes(q)
   })
-  const accentStyle = accent ? { '--primary': accent } as React.CSSProperties : undefined
+  const accentStyle: (React.CSSProperties & { '--primary'?: string }) | undefined = accent
+    ? { '--primary': accent }
+    : undefined
+  const currentView = views.find((item) => item.value === view)!
+  const hasFilters = Boolean(filters.q || filters.track || filters.format || filters.room)
+  const resultCount = view === 'speakers' || view === 'gallery' ? visibleSpeakers.length : visibleSessions.length
+  const totalCount = view === 'speakers' || view === 'gallery' ? program.speakers.length : program.sessions.length
 
   return (
     <main
@@ -152,6 +163,7 @@ export function PublicProgramPage({
                 </Link>
               ))}
             </nav>
+            <p className="text-sm text-muted-foreground"><strong className="font-medium text-foreground">{currentView.label}.</strong> {currentView.description}</p>
           </header>
         ) : (
           <div className="flex items-baseline justify-between gap-4 border-b border-border pb-3">
@@ -167,10 +179,17 @@ export function PublicProgramPage({
           speakerOnly={view === 'speakers' || view === 'gallery'}
         />
 
+        <div className="flex flex-wrap items-center justify-between gap-2 text-sm">
+          <p className="text-muted-foreground">
+            Showing <strong className="font-medium text-foreground tabular-nums">{resultCount}</strong> of {totalCount} {view === 'speakers' || view === 'gallery' ? 'speakers' : 'published sessions'}{hasFilters ? ' for the current search and filters' : ''}.
+          </p>
+          {hasFilters ? <Button size="sm" variant="ghost" onClick={() => setFilters({})}>Clear filters</Button> : null}
+        </div>
+
         {view === 'sessions' ? (
           <SessionsList sessions={visibleSessions} onOpen={setSessionDetail} visibleFields={visibleFields} />
         ) : view === 'speakers' ? (
-          <SpeakersList speakers={visibleSpeakers} sessions={program.sessions} onOpen={setSpeakerDetail} />
+          <SpeakersList speakers={visibleSpeakers} sessions={program.sessions} onOpen={setSpeakerDetail} visibleFields={visibleFields} />
         ) : view === 'agenda' ? (
           <PublicAgenda
             program={program}
@@ -178,9 +197,10 @@ export function PublicProgramPage({
             selectedDay={selectedDay}
             onDayChange={setSelectedDay}
             onOpen={setSessionDetail}
+            visibleFields={visibleFields}
           />
         ) : view === 'gallery' ? (
-          <SpeakerGallery speakers={visibleSpeakers} onOpen={setSpeakerDetail} />
+          <SpeakerGallery speakers={visibleSpeakers} onOpen={setSpeakerDetail} visibleFields={visibleFields} />
         ) : (
           <Itinerary
             program={program}
@@ -192,15 +212,17 @@ export function PublicProgramPage({
             onPersonalOnlyChange={setPersonalOnly}
             onToggle={personalStore.toggle}
             onOpen={setSessionDetail}
+            visibleFields={visibleFields}
           />
         )}
       </div>
 
-      <SessionDetail session={sessionDetail} onClose={() => setSessionDetail(null)} />
+      <SessionDetail session={sessionDetail} onClose={() => setSessionDetail(null)} visibleFields={visibleFields} />
       <SpeakerDetail
         speaker={speakerDetail}
         sessions={program.sessions}
         onClose={() => setSpeakerDetail(null)}
+        visibleFields={visibleFields}
       />
     </main>
   )
@@ -259,7 +281,7 @@ function FilterSelect({
   )
 }
 
-function SessionsList({ sessions, onOpen, visibleFields }: { sessions: PublicSession[]; onOpen: (session: PublicSession) => void; visibleFields?: string[] }) {
+function SessionsList({ sessions, onOpen, visibleFields }: { sessions: PublicSession[]; onOpen: (session: PublicSession) => void; visibleFields?: PublicWidgetField[] }) {
   if (sessions.length === 0) return <ProgramEmpty />
   return (
     <div className="flex flex-col gap-3">
@@ -269,23 +291,22 @@ function SessionsList({ sessions, onOpen, visibleFields }: { sessions: PublicSes
   )
 }
 
-function SessionCard({ session, onOpen, visibleFields }: { session: PublicSession; onOpen: (session: PublicSession) => void; visibleFields?: string[] }) {
+function SessionCard({ session, onOpen, visibleFields }: { session: PublicSession; onOpen: (session: PublicSession) => void; visibleFields?: PublicWidgetField[] }) {
   const [expanded, setExpanded] = useState(false)
-  const shown = (field: string) => !visibleFields || visibleFields.includes(field)
   return (
     <article className="grid gap-3 border-b border-border pb-5 sm:grid-cols-[9rem_1fr_auto]">
       <div className="flex flex-col gap-1 text-sm tabular-nums">
         <span className="font-medium">{session.dayLabel}</span>
-        {shown('time') ? <span className="text-muted-foreground">{session.timeLabel}</span> : null}
-        {shown('room') ? <span className="text-muted-foreground">{session.room.name}</span> : null}
+        {isFieldVisible(visibleFields, 'time') ? <span className="text-muted-foreground">{session.timeLabel}</span> : null}
+        {isFieldVisible(visibleFields, 'room') ? <span className="text-muted-foreground">{session.room.name}</span> : null}
       </div>
       <div className="flex min-w-0 flex-col gap-2">
         <div className="flex flex-wrap gap-1.5">
-          {shown('track') && session.track ? <Badge variant="outline">{session.track.name}</Badge> : null}
-          {shown('format') && session.format ? <Badge variant="secondary">{session.format.name}</Badge> : null}
+          {isFieldVisible(visibleFields, 'track') && session.track ? <Badge variant="outline">{session.track.name}</Badge> : null}
+          {isFieldVisible(visibleFields, 'format') && session.format ? <Badge variant="secondary">{session.format.name}</Badge> : null}
         </div>
         <h2 className="text-lg font-semibold tracking-tight">{session.title}</h2>
-        {shown('description') && session.description ? (
+        {isFieldVisible(visibleFields, 'description') && session.description ? (
           <div className="flex flex-col items-start gap-1">
             <p className={cn('text-sm leading-6 text-muted-foreground', !expanded && 'line-clamp-2')}>{session.description}</p>
             <button type="button" className="text-sm font-medium hover:underline" onClick={() => setExpanded(!expanded)}>
@@ -293,7 +314,7 @@ function SessionCard({ session, onOpen, visibleFields }: { session: PublicSessio
             </button>
           </div>
         ) : null}
-        {shown('speakers') ? <SpeakerNames speakers={session.speakers} /> : null}
+        {isFieldVisible(visibleFields, 'speakers') ? <SpeakerNames speakers={session.speakers} /> : null}
       </div>
       <Button size="sm" variant="outline" onClick={() => onOpen(session)}>Details</Button>
     </article>
@@ -319,23 +340,32 @@ function SpeakersList({
   speakers,
   sessions,
   onOpen,
+  visibleFields,
 }: {
   speakers: PublicSpeaker[]
   sessions: PublicSession[]
   onOpen: (speaker: PublicSpeaker) => void
+  visibleFields?: PublicWidgetField[]
 }) {
   if (speakers.length === 0) return <ProgramEmpty />
   return (
     <div className="flex flex-col divide-y divide-border">
       {speakers.map((speaker) => (
         <button key={speaker.id} type="button" className="grid gap-4 py-4 text-left sm:grid-cols-[3rem_1fr_auto]" onClick={() => onOpen(speaker)}>
-          <SpeakerPhoto speaker={speaker} />
+          {isFieldVisible(visibleFields, 'photo') ? <SpeakerPhoto speaker={speaker} /> : <span />}
           <span className="flex min-w-0 flex-col gap-1">
             <strong>{speaker.name}</strong>
-            <span className="text-sm text-muted-foreground">{[speaker.jobTitle, speaker.companyName].filter(Boolean).join(' · ') || 'Speaker'}</span>
-            {speaker.bio ? <span className="line-clamp-2 text-sm text-muted-foreground">{speaker.bio}</span> : null}
+            {isFieldVisible(visibleFields, 'jobTitle') || isFieldVisible(visibleFields, 'company') ? (
+              <span className="text-sm text-muted-foreground">
+                {[
+                  isFieldVisible(visibleFields, 'jobTitle') ? speaker.jobTitle : null,
+                  isFieldVisible(visibleFields, 'company') ? speaker.companyName : null,
+                ].filter(Boolean).join(' · ') || 'Speaker'}
+              </span>
+            ) : null}
+            {isFieldVisible(visibleFields, 'bio') && speaker.bio ? <span className="line-clamp-2 text-sm text-muted-foreground">{speaker.bio}</span> : null}
           </span>
-          <span className="text-sm tabular-nums text-muted-foreground">{speaker.sessionIds.filter((id) => sessions.some((session) => session.id === id)).length} sessions</span>
+          {isFieldVisible(visibleFields, 'sessions') ? <span className="text-sm tabular-nums text-muted-foreground">{speaker.sessionIds.filter((id) => sessions.some((session) => session.id === id)).length} sessions</span> : null}
         </button>
       ))}
     </div>
@@ -348,12 +378,14 @@ function PublicAgenda({
   selectedDay,
   onDayChange,
   onOpen,
+  visibleFields,
 }: {
   program: PublicProgram
   sessions: PublicSession[]
   selectedDay: string
   onDayChange: (day: string) => void
   onOpen: (session: PublicSession) => void
+  visibleFields?: PublicWidgetField[]
 }) {
   const daySessions = sessions.filter((session) => session.dayKey === selectedDay)
   const grid = layoutDayColumns({
@@ -378,15 +410,19 @@ function PublicAgenda({
               gridTemplateRows: `2.5rem repeat(${grid.slots.length}, 1.35rem)`,
             }}
           >
-            {program.rooms.map((room, index) => <strong key={room.id} className="border-b border-l border-border px-2 py-2 text-xs" style={{ gridColumn: index + 2 }}>{room.name}</strong>)}
-            {grid.slots.map((minute, index) => minute % 60 === 0 ? <span key={minute} className="pr-2 text-right text-[11px] tabular-nums text-muted-foreground" style={{ gridRow: index + 2 }}>{minutesToLabel(minute)}</span> : null)}
+            {program.rooms.map((room, index) => <strong key={room.id} className="border-b border-l border-border px-2 py-2 text-xs" style={{ gridColumn: index + 2 }}>{isFieldVisible(visibleFields, 'room') ? room.name : `Room ${index + 1}`}</strong>)}
+            {grid.slots.map((minute, index) => minute % 60 === 0 ? <span key={minute} className="pr-2 text-right text-[11px] tabular-nums text-muted-foreground" style={{ gridRow: index + 2 }}>{isFieldVisible(visibleFields, 'time') ? minutesToLabel(minute) : null}</span> : null)}
             {program.rooms.flatMap((room, roomIndex) => grid.slots.map((minute, slotIndex) => <span key={`${room.id}-${minute}`} className="border-b border-l border-border/50" style={{ gridColumn: roomIndex + 2, gridRow: slotIndex + 2 }} />))}
             {grid.columns.flatMap((column, columnIndex) => column.items.map((item) => (
               <button
                 key={item.session.id}
                 type="button"
                 onClick={() => onOpen(item.session)}
-                className="z-10 m-0.5 flex flex-col gap-0.5 overflow-hidden rounded-md border border-primary/30 bg-primary/10 px-2 py-1 text-left"
+                data-agenda-density={item.rowSpan === 1 ? 'title-only' : 'full'}
+                className={cn(
+                  'z-10 m-0.5 flex flex-col overflow-hidden rounded-md border border-primary/30 bg-primary/10 text-left',
+                  item.rowSpan === 1 ? 'justify-center px-1 py-0' : 'gap-0.5 px-2 py-1',
+                )}
                 style={{
                   gridColumn: columnIndex + 2,
                   gridRow: `${item.startRow + 2} / span ${item.rowSpan}`,
@@ -395,7 +431,8 @@ function PublicAgenda({
                 }}
               >
                 <strong className="w-full truncate text-xs">{item.session.title}</strong>
-                <span className="w-full truncate text-[11px] text-muted-foreground">{item.session.track?.name ?? item.session.format?.name}</span>
+                {item.rowSpan > 1 && isFieldVisible(visibleFields, 'track') && item.session.track ? <span className="w-full truncate text-[11px] text-muted-foreground">{item.session.track.name}</span> : null}
+                {item.rowSpan > 1 && isFieldVisible(visibleFields, 'format') && item.session.format ? <span className="w-full truncate text-[11px] text-muted-foreground">{item.session.format.name}</span> : null}
               </button>
             )))}
           </div>
@@ -415,6 +452,7 @@ function Itinerary({
   onPersonalOnlyChange,
   onToggle,
   onOpen,
+  visibleFields,
 }: {
   program: PublicProgram
   sessions: PublicSession[]
@@ -425,32 +463,64 @@ function Itinerary({
   onPersonalOnlyChange: (value: boolean) => void
   onToggle: (id: string) => void
   onOpen: (session: PublicSession) => void
+  visibleFields?: PublicWidgetField[]
 }) {
+  const [exportState, setExportState] = useState<
+    | { status: 'idle' | 'loading' | 'error' }
+    | { status: 'success'; sessionCount: number }
+  >({ status: 'idle' })
   const daySessions = personalOnly
     ? sessions
     : sessions.filter((session) => session.dayKey === selectedDay)
   const exportHref = `/public/${encodeURIComponent(program.event.slug)}/personal.ics?${new URLSearchParams(personalIds.map((id) => ['session', id])).toString()}`
+
+  async function exportCalendar() {
+    const sessionCount = personalIds.length
+    setExportState({ status: 'loading' })
+    try {
+      const response = await fetch(exportHref, { cache: 'no-store' })
+      if (!response.ok) throw new Error(`Calendar export failed with status ${response.status}`)
+      const href = URL.createObjectURL(await response.blob())
+      const link = document.createElement('a')
+      link.href = href
+      link.download = `${program.event.slug}-my-schedule.ics`
+      link.click()
+      URL.revokeObjectURL(href)
+      setExportState({ status: 'success', sessionCount })
+    } catch {
+      setExportState({ status: 'error' })
+    }
+  }
+
   return (
     <div className="flex flex-col gap-4">
+      <div className="flex flex-col gap-1 border-y border-border py-3 text-sm">
+        <strong>Your personal itinerary</strong>
+        <p className="text-muted-foreground">
+          Add sessions to plan your visit. This list is saved only in this browser and does not change the official event schedule made by the organizer.
+        </p>
+      </div>
       <div className="flex flex-wrap items-center justify-between gap-3">
         {personalOnly
           ? <span className="text-sm font-medium">All event days</span>
           : <DayTabs days={program.days} selectedDay={selectedDay} onChange={onDayChange} />}
         <div className="flex items-center gap-2">
           <Button size="sm" variant={personalOnly ? 'default' : 'outline'} onClick={() => onPersonalOnlyChange(!personalOnly)}>
-            My schedule ({personalIds.length})
+            {personalOnly ? 'Show full schedule' : `Show my itinerary (${personalIds.length})`}
           </Button>
-          {personalIds.length > 0 ? <Button size="sm" variant="outline" render={<a href={exportHref} download />}>Export ICS</Button> : null}
+          {personalIds.length > 0 ? <Button size="sm" variant="outline" disabled={exportState.status === 'loading'} onClick={exportCalendar}>{exportState.status === 'loading' ? 'Exporting…' : 'Export ICS'}</Button> : null}
         </div>
       </div>
+      {exportState.status === 'success' ? <p role="status" className="text-sm text-success">Calendar exported. The download contains {exportState.sessionCount} selected session{exportState.sessionCount === 1 ? '' : 's'}.</p> : null}
+      {exportState.status === 'error' ? <p role="alert" className="text-sm text-destructive">Calendar export failed. Try again.</p> : null}
       {daySessions.length === 0 ? <ProgramEmpty /> : daySessions.map((session) => (
         <article key={session.id} className="grid gap-3 border-b border-border pb-4 sm:grid-cols-[7rem_1fr_auto]">
-          <div className="flex flex-col gap-1 tabular-nums"><strong>{session.timeLabel}</strong><span className="text-sm text-muted-foreground">{session.dayLabel}</span><span className="text-sm text-muted-foreground">{session.room.name}</span></div>
+          <div className="flex flex-col gap-1 tabular-nums">{isFieldVisible(visibleFields, 'time') ? <><strong>{session.timeLabel}</strong><span className="text-sm text-muted-foreground">{session.dayLabel}</span></> : null}{isFieldVisible(visibleFields, 'room') ? <span className="text-sm text-muted-foreground">{session.room.name}</span> : null}</div>
           <div className="flex flex-col gap-2">
-            <span className="flex flex-wrap gap-1.5">{session.track ? <Badge variant="outline">{session.track.name}</Badge> : null}{session.format ? <Badge variant="secondary">{session.format.name}</Badge> : null}</span>
+            <span className="flex flex-wrap gap-1.5">{isFieldVisible(visibleFields, 'track') && session.track ? <Badge variant="outline">{session.track.name}</Badge> : null}{isFieldVisible(visibleFields, 'format') && session.format ? <Badge variant="secondary">{session.format.name}</Badge> : null}</span>
             <button type="button" className="text-left text-lg font-semibold hover:underline" onClick={() => onOpen(session)}>{session.title}</button>
-            {session.description ? <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">{session.description}</p> : null}
-            <SpeakerNames speakers={session.speakers} />
+            {isFieldVisible(visibleFields, 'description') && session.description ? <p className="line-clamp-2 text-sm leading-6 text-muted-foreground">{session.description}</p> : null}
+            {isFieldVisible(visibleFields, 'speakers') ? <SpeakerNames speakers={session.speakers} /> : null}
           </div>
           <Button size="sm" variant={personalIds.includes(session.id) ? 'default' : 'outline'} onClick={() => onToggle(session.id)}>
             <CalendarPlusIcon />
@@ -462,17 +532,17 @@ function Itinerary({
   )
 }
 
-function SpeakerGallery({ speakers, onOpen }: { speakers: PublicSpeaker[]; onOpen: (speaker: PublicSpeaker) => void }) {
+function SpeakerGallery({ speakers, onOpen, visibleFields }: { speakers: PublicSpeaker[]; onOpen: (speaker: PublicSpeaker) => void; visibleFields?: PublicWidgetField[] }) {
   if (speakers.length === 0) return <ProgramEmpty />
   return (
     <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-4">
       {speakers.map((speaker) => (
         <button key={speaker.id} type="button" className="flex min-w-0 flex-col gap-3 text-left" onClick={() => onOpen(speaker)}>
-          <SpeakerPhoto speaker={speaker} large />
+          {isFieldVisible(visibleFields, 'photo') ? <SpeakerPhoto speaker={speaker} large /> : null}
           <span className="flex min-w-0 flex-col gap-0.5">
             <strong className="truncate">{speaker.name}</strong>
-            <span className="truncate text-sm text-muted-foreground">{speaker.jobTitle || 'Speaker'}</span>
-            <span className="truncate text-sm text-muted-foreground">{speaker.companyName || 'Independent'}</span>
+            {isFieldVisible(visibleFields, 'jobTitle') ? <span className="truncate text-sm text-muted-foreground">{speaker.jobTitle || 'Speaker'}</span> : null}
+            {isFieldVisible(visibleFields, 'company') ? <span className="truncate text-sm text-muted-foreground">{speaker.companyName || 'Independent'}</span> : null}
           </span>
         </button>
       ))}
@@ -497,7 +567,7 @@ function DayTabs({ days, selectedDay, onChange }: { days: string[]; selectedDay:
   )
 }
 
-function SessionDetail({ session, onClose }: { session: PublicSession | null; onClose: () => void }) {
+function SessionDetail({ session, onClose, visibleFields }: { session: PublicSession | null; onClose: () => void; visibleFields?: PublicWidgetField[] }) {
   if (!session) return null
   return (
     <Dialog open onOpenChange={(open) => (open ? undefined : onClose())}>
@@ -505,10 +575,10 @@ function SessionDetail({ session, onClose }: { session: PublicSession | null; on
         <DialogHeader><DialogTitle>{session.title}</DialogTitle></DialogHeader>
         <DialogPanel>
           <div className="flex flex-col gap-4">
-            <div className="flex flex-wrap gap-2 text-sm text-muted-foreground"><span>{session.dayLabel} · {session.timeLabel}</span><span>·</span><span>{session.room.name}</span></div>
-            <div className="flex flex-wrap gap-1.5">{session.track ? <Badge variant="outline">{session.track.name}</Badge> : null}{session.format ? <Badge variant="secondary">{session.format.name}</Badge> : null}</div>
-            {session.description ? <p className="whitespace-pre-wrap text-sm leading-6">{session.description}</p> : null}
-            <SpeakerNames speakers={session.speakers} />
+            <div className="flex flex-wrap gap-2 text-sm text-muted-foreground">{isFieldVisible(visibleFields, 'time') ? <span>{session.dayLabel} · {session.timeLabel}</span> : null}{isFieldVisible(visibleFields, 'room') ? <span>{session.room.name}</span> : null}</div>
+            <div className="flex flex-wrap gap-1.5">{isFieldVisible(visibleFields, 'track') && session.track ? <Badge variant="outline">{session.track.name}</Badge> : null}{isFieldVisible(visibleFields, 'format') && session.format ? <Badge variant="secondary">{session.format.name}</Badge> : null}</div>
+            {isFieldVisible(visibleFields, 'description') && session.description ? <p className="whitespace-pre-wrap text-sm leading-6">{session.description}</p> : null}
+            {isFieldVisible(visibleFields, 'speakers') ? <SpeakerNames speakers={session.speakers} /> : null}
             <div className="flex justify-end"><Button variant="outline" onClick={onClose}><XIcon />Close</Button></div>
           </div>
         </DialogPanel>
@@ -517,12 +587,12 @@ function SessionDetail({ session, onClose }: { session: PublicSession | null; on
   )
 }
 
-function SpeakerDetail({ speaker, sessions, onClose }: { speaker: PublicSpeaker | null; sessions: PublicSession[]; onClose: () => void }) {
+function SpeakerDetail({ speaker, sessions, onClose, visibleFields }: { speaker: PublicSpeaker | null; sessions: PublicSession[]; onClose: () => void; visibleFields?: PublicWidgetField[] }) {
   if (!speaker) return null
-  return <SpeakerDetailContent key={speaker.id} speaker={speaker} sessions={sessions} onClose={onClose} />
+  return <SpeakerDetailContent key={speaker.id} speaker={speaker} sessions={sessions} onClose={onClose} visibleFields={visibleFields} />
 }
 
-function SpeakerDetailContent({ speaker, sessions, onClose }: { speaker: PublicSpeaker; sessions: PublicSession[]; onClose: () => void }) {
+function SpeakerDetailContent({ speaker, sessions, onClose, visibleFields }: { speaker: PublicSpeaker; sessions: PublicSession[]; onClose: () => void; visibleFields?: PublicWidgetField[] }) {
   const [bioExpanded, setBioExpanded] = useState(false)
   const speakerSessions = sessions.filter((session) => speaker.sessionIds.includes(session.id))
   return (
@@ -531,8 +601,10 @@ function SpeakerDetailContent({ speaker, sessions, onClose }: { speaker: PublicS
         <DialogHeader><DialogTitle>{speaker.name}</DialogTitle></DialogHeader>
         <DialogPanel>
           <div className="flex flex-col gap-5">
-            <div className="grid gap-4 sm:grid-cols-[5rem_1fr]"><SpeakerPhoto speaker={speaker} /><div className="flex flex-col items-start gap-1"><strong>{speaker.jobTitle || 'Speaker'}</strong><span className="text-sm text-muted-foreground">{speaker.companyName || 'Independent'}</span>{speaker.bio ? <><p className={cn('text-sm leading-6', !bioExpanded && 'line-clamp-4')}>{speaker.bio}</p><button type="button" className="text-sm font-medium hover:underline" onClick={() => setBioExpanded(!bioExpanded)}>{bioExpanded ? 'Show less' : 'Show more'}</button></> : null}</div></div>
-            <div className="flex flex-col gap-2"><strong>Sessions ({speakerSessions.length})</strong>{speakerSessions.map((session) => <div key={session.id} className="flex flex-col border-b border-border pb-2 text-sm"><span className="font-medium">{session.title}</span><span className="text-muted-foreground">{session.dayLabel} · {session.timeLabel} · {session.room.name}</span></div>)}</div>
+            <div className="grid gap-4 sm:grid-cols-[5rem_1fr]">{isFieldVisible(visibleFields, 'photo') ? <SpeakerPhoto speaker={speaker} /> : <span />}
+              <div className="flex flex-col items-start gap-1">{isFieldVisible(visibleFields, 'jobTitle') ? <strong>{speaker.jobTitle || 'Speaker'}</strong> : null}{isFieldVisible(visibleFields, 'company') ? <span className="text-sm text-muted-foreground">{speaker.companyName || 'Independent'}</span> : null}{isFieldVisible(visibleFields, 'bio') && speaker.bio ? <><p className={cn('text-sm leading-6', !bioExpanded && 'line-clamp-4')}>{speaker.bio}</p><button type="button" className="text-sm font-medium hover:underline" onClick={() => setBioExpanded(!bioExpanded)}>{bioExpanded ? 'Show less' : 'Show more'}</button></> : null}</div>
+            </div>
+            {isFieldVisible(visibleFields, 'sessions') ? <div className="flex flex-col gap-2"><strong>Sessions ({speakerSessions.length})</strong>{speakerSessions.map((session) => <div key={session.id} className="flex flex-col border-b border-border pb-2 text-sm"><span className="font-medium">{session.title}</span>{isFieldVisible(visibleFields, 'time') || isFieldVisible(visibleFields, 'room') ? <span className="text-muted-foreground">{[isFieldVisible(visibleFields, 'time') ? `${session.dayLabel} · ${session.timeLabel}` : null, isFieldVisible(visibleFields, 'room') ? session.room.name : null].filter(Boolean).join(' · ')}</span> : null}</div>)}</div> : null}
             <div className="flex justify-end"><Button variant="outline" onClick={onClose}>Close</Button></div>
           </div>
         </DialogPanel>
