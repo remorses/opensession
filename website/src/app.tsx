@@ -1918,9 +1918,9 @@ export const app = new Spiceflow()
     return new Response(csv, { headers: { 'content-type': 'text/csv; charset=utf-8', 'content-disposition': `attachment; filename="evaluation-${params.formId}.csv"` } })
   })
 
-  // ── Agenda (?view=list|day|week|rooms|conflicts&day=YYYY-MM-DD) ───
+  // ── Agenda (?view=list|week|rooms|conflicts) ──────────────────────
 
-  .loader('/org/:orgId/e/:eventId/agenda', async ({ params, request }) => {
+  .loader('/org/:orgId/e/:eventId/agenda', async ({ params }) => {
     const db = getDb()
     const [event, rows] = await Promise.all([
       db.query.event.findFirst({
@@ -1934,10 +1934,6 @@ export const app = new Spiceflow()
     const sessions = rows.map((row) => toAgendaRow(row, event.timezone))
     const byId = new Map(sessions.map((row) => [row.id, row]))
     const days = eventDayKeys(event.startsAt, event.endsAt, event.timezone)
-    const requestedDay = request.parsedUrl.searchParams.get('day')
-    const selectedDay = requestedDay && days.includes(requestedDay)
-      ? requestedDay
-      : (days[0] ?? '')
 
     const conflicts = findConflicts(
       rows.map((row) => ({
@@ -1973,18 +1969,17 @@ export const app = new Spiceflow()
       }
     })
 
-    return { sessions, days, selectedDay, conflicts, timezone: event.timezone }
+    return { sessions, days, conflicts, timezone: event.timezone }
   })
 
   .page({
     path: '/org/:orgId/e/:eventId/agenda',
     query: z.object({
-      view: z.enum(['list', 'day', 'week', 'rooms', 'conflicts']).optional(),
-      day: z.string().optional(),
+      view: z.enum(['list', 'week', 'rooms', 'conflicts']).optional(),
     }),
     handler: async ({ query }) => {
       const { AgendaPage } = await import('./components/agenda-page.tsx')
-      return <AgendaPage view={query.view ?? 'list'} />
+      return <AgendaPage view={query.view ?? 'week'} />
     },
   })
 

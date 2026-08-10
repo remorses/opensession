@@ -71,7 +71,7 @@ export function SessionsPage({ tab }: { tab: SessionsTab }) {
             <Button
               variant="outline"
               render={
-                <Link href={router.href(`/org/${currentOrgId}/e/${event.id}/agenda`, { view: 'day' })} />
+                <Link href={router.href(`/org/${currentOrgId}/e/${event.id}/agenda`, { view: 'week' })} />
               }
             >
               <CalendarPlusIcon />

@@ -1,5 +1,5 @@
 // Agenda builder ('use client') — /org/:orgId/e/:eventId/agenda.
-// Views are query params (?view=list|day|week|rooms|conflicts&day=YYYY-MM-DD).
+// Views are query params (?view=list|week|rooms|conflicts).
 //
 // TIME RULE: this component NEVER converts epochs. The loader resolves every
 // session to the event timezone and hands over { dayKey, startMinute,
@@ -7,9 +7,8 @@
 // durationMinutes }) and the server turns it into UTC ms. That keeps SSR and
 // the browser byte-identical and keeps DST logic in exactly one place.
 //
-// Placement is click-to-place: click a grid cell (optionally after picking a
-// session in the unscheduled rail) and the drawer opens pre-filled with the
-// format's default duration. Pointer drag-and-drop is deliberately not built.
+// Placement uses a drawer opened from the toolbar or a session row. It starts
+// with the format's default duration and sends wall-clock values to the server.
 'use client'
 
 import { useMemo, useState, useTransition } from 'react'
@@ -25,11 +24,9 @@ import {
 import {
   conflictSessionIds,
   formatDayLabel,
-  layoutDayColumns,
   minutesToLabel,
   type AgendaConflictRow,
   type AgendaSessionRow,
-  type ZonedPlacement,
 } from '../lib/conflicts.ts'
 import { summarizeProgramPublication } from '../lib/public-program.ts'
 import { cn } from '../lib/utils.ts'
@@ -48,13 +45,12 @@ import {
 import { Badge, EmptyState, Input, NativeSelect } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
 
-export type AgendaView = 'list' | 'day' | 'week' | 'rooms' | 'conflicts'
+export type AgendaView = 'list' | 'week' | 'rooms' | 'conflicts'
 
 type AgendaRow = AgendaSessionRow
 
 const views: { value: AgendaView; label: string }[] = [
   { value: 'list', label: 'List' },
-  { value: 'day', label: 'Day' },
   { value: 'week', label: 'Week' },
   { value: 'rooms', label: 'Rooms' },
   { value: 'conflicts', label: 'Conflicts' },
@@ -62,8 +58,6 @@ const views: { value: AgendaView; label: string }[] = [
 
 /** Fallback slot length when the session's format sets no default. */
 const FALLBACK_DURATION = 30
-const SLOT_MINUTES = 15
-const ROW_HEIGHT = '1.15rem'
 
 type PlacementDraft = {
   sessionId: string
@@ -87,12 +81,10 @@ function durationOf(row: AgendaRow): number {
 export function AgendaPage({ view }: { view: AgendaView }) {
   const { currentOrgId } = useLoaderData('/org/:orgId/*')
   const { event, rooms } = useLoaderData('/org/:orgId/e/:eventId/*')
-  const { sessions, days, selectedDay, conflicts, timezone } = useLoaderData(
+  const { sessions, days, conflicts, timezone } = useLoaderData(
     '/org/:orgId/e/:eventId/agenda',
   )
   const [draft, setDraft] = useState<PlacementDraft | null>(null)
-  /** Rail selection: the next clicked cell places THIS session. */
-  const [picked, setPicked] = useState<string | null>(null)
   const [plan, setPlan] = useState<Awaited<ReturnType<typeof previewAutoPlace>> | null>(null)
   const [publicationOpen, setPublicationOpen] = useState(false)
   const [toolbarPending, startToolbarTransition] = useTransition()
@@ -106,16 +98,15 @@ export function AgendaPage({ view }: { view: AgendaView }) {
   const privateAcceptedCount = acceptedContent.filter((row) => row.visibility === 'PRIVATE').length
 
   function openPlacement(partial: Partial<PlacementDraft> & { sessionId?: string }) {
-    const sessionId = partial.sessionId ?? picked ?? unscheduled[0]?.id ?? sessions[0]?.id ?? ''
+    const sessionId = partial.sessionId ?? unscheduled[0]?.id ?? sessions[0]?.id ?? ''
     const row = sessions.find((item) => item.id === sessionId)
     setDraft({
       sessionId,
       roomId: partial.roomId ?? row?.roomId ?? rooms[0]?.id ?? '',
-      dayKey: partial.dayKey ?? row?.dayKey ?? selectedDay,
+      dayKey: partial.dayKey ?? row?.dayKey ?? days[0] ?? '',
       startMinute: partial.startMinute ?? row?.startMinute ?? 9 * 60,
       durationMinutes: partial.durationMinutes ?? (row ? durationOf(row) : FALLBACK_DURATION),
     })
-    setPicked(null)
   }
 
   return (
@@ -215,7 +206,6 @@ export function AgendaPage({ view }: { view: AgendaView }) {
             key={item.value}
             href={router.href(`/org/${currentOrgId}/e/${event.id}/agenda`, {
               view: item.value,
-              ...(item.value === 'day' || item.value === 'week' ? { day: selectedDay } : {}),
             })}
             className={cn(
               'relative -mb-px flex items-center gap-1.5 px-2.5 py-2 text-sm no-underline transition-colors',
@@ -252,19 +242,6 @@ export function AgendaPage({ view }: { view: AgendaView }) {
             Add rooms
           </Button>
         </EmptyState>
-      ) : view === 'day' ? (
-        <DayView
-          orgId={currentOrgId}
-          eventId={event.id}
-          days={days}
-          selectedDay={selectedDay}
-          rooms={rooms}
-          sessions={sessions}
-          conflicting={conflicting}
-          picked={picked}
-          onPick={setPicked}
-          onPlace={openPlacement}
-        />
       ) : view === 'week' ? (
         <WeekView days={days} sessions={scheduled} conflicting={conflicting} onPlace={openPlacement} />
       ) : view === 'rooms' ? (
@@ -482,203 +459,7 @@ function AutoPlaceDialog({
   )
 }
 
-// ── Day grid ────────────────────────────────────────────────────────
-
-function DayView({
-  orgId,
-  eventId,
-  days,
-  selectedDay,
-  rooms,
-  sessions,
-  conflicting,
-  picked,
-  onPick,
-  onPlace,
-}: {
-  orgId: string
-  eventId: string
-  days: string[]
-  selectedDay: string
-  rooms: { id: string; name: string }[]
-  sessions: AgendaRow[]
-  conflicting: Set<string>
-  picked: string | null
-  onPick: (id: string | null) => void
-  onPlace: (partial: Partial<PlacementDraft> & { sessionId?: string }) => void
-}) {
-  const placements: ZonedPlacement<AgendaRow>[] = sessions.flatMap((row) =>
-    row.dayKey === selectedDay && row.roomId && row.startMinute != null && row.endMinute != null
-      ? [{ session: row, roomId: row.roomId, startMinute: row.startMinute, endMinute: row.endMinute }]
-      : [],
-  )
-  const grid = layoutDayColumns({
-    dayKey: selectedDay,
-    rooms,
-    placements,
-    slotMinutes: SLOT_MINUTES,
-  })
-  const rail = sessions.filter((row) => !isScheduled(row))
-
-  return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-wrap items-center gap-1">
-        {days.map((day) => (
-          <Link
-            key={day}
-            href={router.href(`/org/${orgId}/e/${eventId}/agenda`, { view: 'day', day })}
-            className={cn(
-              'rounded-md px-2.5 py-1 text-sm no-underline transition-colors',
-              day === selectedDay
-                ? 'bg-accent font-medium text-foreground'
-                : 'text-muted-foreground hover:bg-accent/60 hover:text-foreground',
-            )}
-          >
-            {formatDayLabel(day)}
-          </Link>
-        ))}
-      </div>
-
-      <div className="flex flex-col gap-4 lg:flex-row">
-        <Frame className="min-w-0 grow overflow-x-auto">
-          <div
-            className="grid min-w-[36rem] p-2"
-            style={{
-              gridTemplateColumns: `3.75rem repeat(${rooms.length}, minmax(8rem, 1fr))`,
-              gridTemplateRows: `auto repeat(${grid.slots.length}, ${ROW_HEIGHT})`,
-            }}
-          >
-            <div style={{ gridColumn: 1, gridRow: 1 }} />
-            {rooms.map((room, index) => (
-              <div
-                key={room.id}
-                style={{ gridColumn: index + 2, gridRow: 1 }}
-                className="truncate border-b border-border px-2 pb-1.5 text-xs font-medium"
-              >
-                {room.name}
-              </div>
-            ))}
-
-            {grid.slots.map((minute, index) =>
-              minute % 60 === 0 ? (
-                <div
-                  key={`t-${minute}`}
-                  style={{ gridColumn: 1, gridRow: index + 2 }}
-                  className="pr-2 text-right text-[11px] tabular-nums text-muted-foreground"
-                >
-                  {minutesToLabel(minute)}
-                </div>
-              ) : null,
-            )}
-
-            {rooms.map((room, roomIndex) =>
-              grid.slots.map((minute, slotIndex) => (
-                <button
-                  key={`${room.id}-${minute}`}
-                  type="button"
-                  aria-label={`Place at ${minutesToLabel(minute)} in ${room.name}`}
-                  onClick={() =>
-                    onPlace({
-                      roomId: room.id,
-                      dayKey: selectedDay,
-                      startMinute: minute,
-                      ...(picked ? { sessionId: picked } : {}),
-                    })
-                  }
-                  style={{ gridColumn: roomIndex + 2, gridRow: slotIndex + 2 }}
-                  className={cn(
-                    'border-b border-l border-border/40 transition-colors hover:bg-accent/60',
-                    minute % 60 === 0 && 'border-b-border/70',
-                  )}
-                />
-              )),
-            )}
-
-            {grid.columns.map((column, columnIndex) =>
-              column.items.map((item) => (
-                <button
-                  key={item.session.id}
-                  type="button"
-                  onClick={() => onPlace({ sessionId: item.session.id })}
-                  style={{
-                    gridColumn: columnIndex + 2,
-                    gridRow: `${item.startRow + 2} / span ${item.rowSpan}`,
-                    // Double-booked rooms split the column instead of stacking
-                    // blocks on top of each other (unreadable, and the overlap
-                    // is exactly what the organizer must see).
-                    width: `${100 / item.laneCount}%`,
-                    marginLeft: `${(100 / item.laneCount) * item.lane}%`,
-                    borderInlineStartColor: conflicting.has(item.session.id)
-                      ? 'var(--destructive)'
-                      : (item.session.trackColor ?? undefined),
-                  }}
-                  className={cn(
-                    'z-10 m-px flex flex-col items-start gap-0.5 overflow-hidden rounded-md border border-s-4 px-1.5 py-1 text-left',
-                    item.session.kind === 'SERVICE'
-                      ? 'border-border bg-muted text-muted-foreground'
-                      : 'border-primary/30 bg-primary/10',
-                    conflicting.has(item.session.id) && 'border-destructive/60 bg-destructive/10',
-                  )}
-                >
-                  <span className="w-full truncate text-xs font-medium leading-tight">
-                    {item.session.title}
-                  </span>
-                  <span className="w-full truncate text-[11px] tabular-nums opacity-70">
-                    {minutesToLabel(item.startMinute)}–{minutesToLabel(item.endMinute)}
-                  </span>
-                  {item.session.trackName ? (
-                    <span className="w-full truncate text-[10px] opacity-70">{item.session.trackName}</span>
-                  ) : null}
-                </button>
-              )),
-            )}
-          </div>
-        </Frame>
-
-        <div className="flex w-full shrink-0 flex-col gap-2 lg:w-64">
-          <div className="flex items-baseline justify-between gap-2">
-            <span className="text-sm font-medium">Unscheduled</span>
-            <span className="text-xs tabular-nums text-muted-foreground">{rail.length}</span>
-          </div>
-          {rail.length === 0 ? (
-            <p className="text-sm text-muted-foreground">Everything has a slot.</p>
-          ) : (
-            <>
-              <p className="text-xs text-muted-foreground">
-                Pick one, then click a slot in the grid.
-              </p>
-              <div className="flex flex-col gap-1">
-                {rail.map((row) => (
-                  <button
-                    key={row.id}
-                    type="button"
-                    onClick={() => onPick(picked === row.id ? null : row.id)}
-                    style={{ borderInlineStartColor: row.trackColor ?? undefined }}
-                    className={cn(
-                      'flex flex-col items-start gap-0.5 rounded-md border border-s-4 px-2 py-1.5 text-left transition-colors',
-                      picked === row.id
-                        ? 'border-primary bg-primary/10'
-                        : 'border-border hover:bg-accent/60',
-                    )}
-                  >
-                    <span className="w-full truncate text-sm font-medium">{row.title}</span>
-                    <span className="w-full truncate text-xs text-muted-foreground">
-                      {[row.formatName, row.trackName, row.speakerNames.join(', ')]
-                        .filter(Boolean)
-                        .join(' · ') || 'No details'}
-                    </span>
-                  </button>
-                ))}
-              </div>
-            </>
-          )}
-        </div>
-      </div>
-    </div>
-  )
-}
-
-// ── Other views ─────────────────────────────────────────────────────
+// ── Agenda views ──────────────────────────────────────────────────────
 
 function ListView({
   orgId,
@@ -995,13 +776,12 @@ function ConflictsView({
                       render={
                         <Link
                           href={router.href(`/org/${orgId}/e/${eventId}/agenda`, {
-                            view: 'day',
-                            day: conflict.dayKey,
+                            view: 'week',
                           })}
                         />
                       }
                     >
-                      Open day
+                      Open week
                     </Button>
                   ) : null}
                 </div>

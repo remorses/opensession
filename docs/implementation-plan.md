@@ -107,8 +107,7 @@ opensession/
         │   ├── status-badge.tsx       # colored status badges
         │   ├── abstracts-table.tsx    # status tabs + table (akarso *-tab pattern)
         │   ├── review-panel.tsx       # vote/rating/comment per session
-        │   ├── agenda-grid.tsx        # day×room grid + placement drawer
-        │   ├── agenda-list.tsx
+        │   ├── agenda-page.tsx        # week/list/room views + placement drawer
         │   ├── mdx-editor.tsx         # Monaco + live preview + version save
         │   ├── portal-shell.tsx       # speaker portal pill-nav layout
         │   ├── portal-tasks.tsx
@@ -295,7 +294,7 @@ resolved. Public URLs use the event **slug** only (never internal ids).
 │       ├─ /forms                           CFP + PORTAL forms (one list; purpose column)
 │       │   └─ /:formId                     Monaco MDX editor + versions + settings
 │       ├─ /evaluation      ?tab=rounds|reviewers|assignments|progress|results
-│       ├─ /agenda          ?view=list|day|week|rooms|conflicts&day=YYYY-MM-DD
+│       ├─ /agenda          ?view=list|week|rooms|conflicts
 │       ├─ /tasks           ?tab=all|speaker|submission
 │       │   └─ /:taskId                     definition + assignment progress
 │       ├─ /portal-forms                    legacy redirect → /forms
@@ -462,7 +461,7 @@ Requests are FORM tasks with `<FileUpload>`; Email Templates/Themes are hard-cod
 | **Files** (SUBMISSIONS) | single table | every event File: name, kind, size, uploader, usage (headshot/slides/cover/logo), download; orphans flagged for GC |
 | **Forms** (COLLECT & REVIEW) | single table (no type tabs) | One list for CFP + PORTAL forms. Columns: name/slug, purpose badge (CFP / Portal · Speaker / Portal · Submission), status, share link (CFP public submit URL or portal home), submissions/drafts, closesAt. Create dialog picks purpose + target. Row → MDX editor. Legacy `/portal-forms` redirects here |
 | **Evaluation** (COLLECT & REVIEW) | `Rounds` \| `Reviewers` \| `Assignments` \| `Progress` \| `Results` | Form-backed rounds with immutable scorecards, round-specific reviewer pools, selected/track-filtered capped assignment, restricted blind reviewer queues, reminders, weighted aggregates, sorting, and CSV export |
-| **Agenda** (COLLECT & REVIEW) | `List` \| `Day` \| `Week` \| `Rooms` \| `Conflicts` (img 24) | List: sortable table. Day: day-picker + rooms×time grid, unscheduled rail, click-to-place drawer (drag later). Week: all event days side by side, compact. Rooms: grouped by room. Conflicts: computed room/speaker overlaps with jump-to links. Placement bumps icsSequence + calendar emails |
+| **Agenda** (COLLECT & REVIEW) | `List` \| `Week` \| `Rooms` \| `Conflicts` (img 24) | List: sortable table. Week: all event days side by side in a compact, readable schedule. Rooms: grouped by room. Conflicts: computed room/speaker overlaps with jump-to links. Placement uses a drawer and bumps icsSequence + calendar emails |
 | **Tasks** (PORTAL) | `All` \| `Speaker Tasks` \| `Submission Tasks` (img 25) | TaskDefinition cards (title, MANUAL/FORM badge, target chip, dueAt, linked form), Add Task, per-task assignment progress bar (n of m complete), task detail lists assignments with per-speaker status |
 | **Speakers** (PORTAL) | `All` \| `Confirmed` \| `Pending` \| `Declined` (derived confirmation) | table: name, email, company, headshot, sessions, linked-user badge, outstanding tasks count; detail: profile fields, participations w/ per-session confirmation, task assignments, files, email history |
 | **Emails** (COMMUNICATIONS) | `All` \| `Queued` \| `Sent` \| `Failed` \| `Reminders` | outbox log (kind, to, subject, status, attempts, ICS badge), retry-now on FAILED, message preview; Reminders tab: read-only description of the hard-coded schedule (task −3d/−1d/overdue, draft −3d/−1d) + next cron run |
@@ -505,8 +504,8 @@ intact. First implementation step of milestone 1 is literally `cp` of this list:
 
 New components (no akarso counterpart): `status-badge.tsx` (color map: PENDING amber,
 ACCEPT_QUEUE/ACCEPTED green, DECLINE_QUEUE orange, DECLINED red, WITHDRAWN gray, DRAFT
-muted — img 20), `abstracts-table.tsx`, `review-panel.tsx`, `agenda-grid.tsx` /
-`agenda-list.tsx`, `mdx-editor.tsx` (`@monaco-editor/react`), `form-renderer.tsx` +
+muted — img 20), `abstracts-table.tsx`, `review-panel.tsx`, `agenda-page.tsx`,
+`mdx-editor.tsx` (`@monaco-editor/react`), `form-renderer.tsx` +
 `field-components.tsx` (§6), `portal-shell.tsx`, `portal-tasks.tsx`,
 `speaker-profile-page.tsx`, `library-settings.tsx`.
 
@@ -676,15 +675,13 @@ generate a new version and reuse the same validation/preview pipeline unchanged.
 ## 9. Agenda
 
 - The live schedule IS `Session.roomId/startsAt/endsAt` — no drafts.
-- Views: **list** (table with times/room/track, sortable), **day grid** (columns =
-  rooms, rows = 15-min slots rendered in `event.timezone`; day picker across
-  `event.startsAt..endsAt`), **track/room grouping** via query param. Unscheduled
-  ACCEPTED (+ SERVICE) sessions sit in a side rail; clicking a grid cell (or dragging a
-  rail item — pointer-based DnD is a milestone-2 polish, click-to-place ships first)
-  opens a placement drawer pre-filled with `Format.defaultDurationMinutes`.
+- Views: **list** (table with times/room/track, sortable), **week** (all event days in
+  compact columns), and **room grouping** via query param. Unscheduled ACCEPTED (+
+  SERVICE) sessions remain available in List and Rooms. Placing or moving an item opens
+  a drawer pre-filled with `Format.defaultDurationMinutes`.
 - `lib/conflicts.ts` (pure, heavily unit-tested): sessions conflict when time ranges
   intersect AND (same room OR shared participant). Computed in the agenda loader, shown
-  as warnings on the grid + a conflicts panel; placement that creates a conflict asks
+  as warnings in agenda views and a conflicts panel; placement that creates a conflict asks
   for confirmation, never blocks.
 - Schedule changes bump `icsSequence` and enqueue `SCHEDULE_INVITE/UPDATE/CANCEL` per
   confirmed participant (dedupeKey `ics:{sessionId}:{speakerId}:{icsSequence}`).
@@ -819,8 +816,8 @@ throughout.
 4. **Emails + ICS + cron** — all 9 templates, outbox + dedupe + retry, send_email
    wiring, ICS module + mimetext attachments, scheduled handler (form close, reminders,
    outbox, file GC), notify flow stamping `notifiedAt`, emails admin log page.
-5. **Agenda** — list + day×room grid + click-to-place drawer + conflicts panel + ICS
-   sequence bumps; SERVICE sessions; then pointer drag-and-drop polish.
+5. **Agenda** — week + list + room views, placement drawer, conflicts panel, and ICS
+   sequence bumps; SERVICE sessions.
 6. **Embeds/feeds + dashboard polish + seed + ship** — embed pages, JSON/ICS feeds,
    dashboard KPIs/nudges, seed script, README with deploy instructions, custom domain,
    final preview→prod deploy, `lintcn lint`.
