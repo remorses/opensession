@@ -577,6 +577,7 @@ async function persistResponse({ loaded, submission, collected, participantSpeak
     }
   }
   return {
+    eventSlug: loaded.event.slug,
     responseId: loaded.response.id,
     sessionId: loaded.response.session.id,
     title: projected.session.title || 'Untitled submission',

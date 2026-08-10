@@ -34,14 +34,12 @@ export type PublicFormWizardProps = {
   accountName?: string | null
   signInHref: string
   uploadFile?: (file: File, fieldName: string) => Promise<string>
-  onChange?: (submission: FormSubmission) => void
   onSaveDraft?: (submission: FormSubmission) => void | Promise<void>
   onSubmit: (submission: FormSubmission) => void | Promise<void>
   submitLabel?: string
   /** Hide Welcome when empty and jump past Account when already signed in is not desired —
    *  Account still shows so the user confirms the Google identity. */
   saving?: boolean
-  savedAt?: number | null
   error?: string | null
   header?: React.ReactNode
 }
@@ -56,12 +54,10 @@ export function PublicFormWizard({
   accountName,
   signInHref,
   uploadFile,
-  onChange,
   onSaveDraft,
   onSubmit,
   submitLabel = 'Submit',
   saving,
-  savedAt,
   error,
   header,
 }: PublicFormWizardProps) {
@@ -77,10 +73,6 @@ export function PublicFormWizard({
     () => visibleSubmission({ mdxSource, scope, values, participants }),
     [mdxSource, scope, values, participants],
   )
-
-  React.useEffect(() => {
-    onChange?.(submission)
-  }, [submission, onChange])
 
   const active = tabs[tabIndex] ?? tabs[0]!
 
@@ -259,7 +251,6 @@ export function PublicFormWizard({
           </Button>
         ) : null}
 
-        {savedAt ? <span className="text-xs text-muted-foreground">Draft saved</span> : null}
         {(stepError || error) ? (
           <p className="basis-full whitespace-pre-wrap text-sm text-destructive">{stepError || error}</p>
         ) : null}

@@ -971,7 +971,8 @@ export async function savePublicCfpDraft(input: z.input<typeof cfpActionSchema>)
   const actionRequest = getActionRequest()
   const session = await requireSession(actionRequest)
   const parsed = cfpActionSchema.parse(input)
-  return saveCfpDraft({ ...parsed, session })
+  const result = await saveCfpDraft({ ...parsed, session })
+  throw redirect(router.href('/portal/:eventSlug/submissions', { eventSlug: result.eventSlug }))
 }
 
 /** Validate and submit the response against its immutable pinned version. */
@@ -979,7 +980,8 @@ export async function submitPublicCfp(input: z.input<typeof cfpActionSchema>) {
   const actionRequest = getActionRequest()
   const session = await requireSession(actionRequest)
   const parsed = cfpActionSchema.parse(input)
-  return submitCfpResponse({ ...parsed, session })
+  const result = await submitCfpResponse({ ...parsed, session })
+  throw redirect(router.href('/portal/:eventSlug/submissions', { eventSlug: result.eventSlug }))
 }
 
 // ── Speaker portal actions (speaker-owned, not org-admin) ───────────
@@ -993,7 +995,8 @@ export async function withdrawPortalSubmission(input: z.input<typeof portalSessi
   const actionRequest = getActionRequest()
   const session = await requireSession(actionRequest)
   const parsed = portalSessionActionSchema.parse(input)
-  return withdrawPortalSubmissionServer({ ...parsed, session })
+  const result = await withdrawPortalSubmissionServer({ ...parsed, session })
+  throw redirect(router.href('/portal/:eventSlug/submissions', { eventSlug: result.eventSlug }))
 }
 
 const savePortalSubmissionSchema = portalSessionActionSchema.extend({
@@ -1005,7 +1008,8 @@ export async function savePortalSubmission(input: z.input<typeof savePortalSubmi
   const actionRequest = getActionRequest()
   const session = await requireSession(actionRequest)
   const parsed = savePortalSubmissionSchema.parse(input)
-  return savePortalSubmissionServer({ ...parsed, session })
+  const result = await savePortalSubmissionServer({ ...parsed, session })
+  throw redirect(router.href('/portal/:eventSlug/submissions', { eventSlug: result.eventSlug }))
 }
 
 const savePortalProfileSchema = z.object({

@@ -625,7 +625,7 @@ export const app = new Spiceflow()
 
   .page('/submit/:eventSlug/:formSlug', async ({ params, loaderData }) => {
     if (!loaderData.cfp) {
-      return <PublicUnavailable reason={loaderData.unavailableReason} />
+      return <PublicUnavailable eventSlug={params.eventSlug} reason={loaderData.unavailableReason} />
     }
     const { PublicCfpPage } = await import('./components/public-cfp-page.tsx')
     const { event, form, tracks, formats } = loaderData.cfp
@@ -2470,14 +2470,24 @@ function EventStatusBadge({ status }: { status: 'DRAFT' | 'ACTIVE' | 'ARCHIVED' 
   )
 }
 
-function PublicUnavailable({ reason }: { reason?: PublicCfpBlockReason | null }) {
+function PublicUnavailable({ eventSlug, reason }: { eventSlug?: string; reason?: PublicCfpBlockReason | null }) {
   const detail = reason
     ? publicCfpBlockMessage(reason)
     : 'The event or form may be closed, archived, or no longer public.'
   return (
     <main className="flex min-h-screen items-center justify-center px-6 py-16">
       <div className="flex max-w-md flex-col items-center gap-5 text-center text-balance">
-        <OpenSessionLogo imageClassName="h-8" />
+        <div className="flex items-center gap-4">
+          <OpenSessionLogo imageClassName="h-8" />
+          {eventSlug ? (
+            <Link
+              href={router.href('/portal/:eventSlug', { eventSlug })}
+              className="text-sm text-muted-foreground no-underline hover:text-foreground hover:underline"
+            >
+              Speaker portal
+            </Link>
+          ) : null}
+        </div>
         <h1 className="text-xl font-semibold">This page is not available</h1>
         <p className="text-sm text-muted-foreground">{detail}</p>
       </div>

@@ -148,7 +148,7 @@ export function PortalShell({
   return (
     <div className="min-h-screen bg-background">
       <header className="border-b border-border">
-        <div className="mx-auto flex w-full max-w-4xl flex-col gap-4 px-4 py-4 sm:px-6">
+        <div className="mx-auto flex w-full max-w-[996px] flex-col gap-4 px-4 py-4 sm:px-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex items-center gap-3">
               <OpenSessionLogo imageClassName="h-7" />
@@ -198,7 +198,7 @@ export function PortalShell({
           </nav>
         </div>
       </header>
-      <main className="mx-auto w-full max-w-4xl px-4 py-8 sm:px-6">
+      <main className="mx-auto w-full max-w-[996px] px-4 py-8 sm:px-6">
         <ErrorBoundary
           below
           fallback={<ErrorBoundary.ErrorMessage className="whitespace-pre-wrap text-sm text-destructive" />}
@@ -540,7 +540,6 @@ export function PortalSubmissionDetailPage() {
       submission,
       submit: true,
     })
-    setEditing(false)
   }
 
   return (

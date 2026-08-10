@@ -364,7 +364,7 @@ export async function withdrawPortalSubmission({
   } else {
     await updateSession
   }
-  return { sessionId, status: 'WITHDRAWN' as const }
+  return { eventSlug: ctx.event.slug, sessionId, status: 'WITHDRAWN' as const }
 }
 
 export async function savePortalSubmission({
@@ -459,7 +459,7 @@ export async function savePortalSubmission({
     ...fieldRows.map((row) => db.insert(schema.formFieldValue).values(row)),
   ]
   await db.batch(queries)
-  return { sessionId, status: loaded.session.status }
+  return { eventSlug: ctx.event.slug, sessionId, status: loaded.session.status }
 }
 
 export async function savePortalProfile({

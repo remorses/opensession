@@ -145,7 +145,9 @@ describe('core customer workflow', () => {
       params: { eventSlug: event.slug, formSlug: form.slug },
     })
     if (!(openCfp instanceof SpiceflowTestResponse)) throw new Error('expected public CFP page')
-    expect(await openCfp.text()).toContain('Call for speakers')
+    const openCfpHtml = await openCfp.text()
+    expect(openCfpHtml).toContain('Call for speakers')
+    expect(openCfpHtml).toContain(`/portal/${event.slug}`)
 
     const speakerCookie = await signUp('Ada Speaker', 'ada-workflow@example.test')
     await runRedirect(speakerCookie, () => startPublicCfpSubmission({
@@ -177,12 +179,13 @@ describe('core customer workflow', () => {
         'speaker.bio': 'Builds reliable event systems.',
       }],
     }
-    await runWithCookie(speakerCookie, () => savePublicCfpDraft({
+    const savedDraftRedirect = await runRedirect(speakerCookie, () => savePublicCfpDraft({
       eventId: event.id,
       formId: form.id,
       responseId,
       submission,
     }))
+    expect(savedDraftRedirect.headers.get('location')).toBe(`/portal/${event.slug}/submissions`)
     const originalVersion = await db.query.formVersion.findFirst({
       where: { formId: form.id },
       orderBy: { createdAt: 'desc', id: 'desc' },
@@ -217,12 +220,13 @@ describe('core customer workflow', () => {
     sessionId = resetDraft.sessionId
     responseId = resetDraft.responseId
 
-    await runWithCookie(speakerCookie, () => submitPublicCfp({
+    const submittedRedirect = await runRedirect(speakerCookie, () => submitPublicCfp({
       eventId: event.id,
       formId: form.id,
       responseId,
       submission,
     }))
+    expect(submittedRedirect.headers.get('location')).toBe(`/portal/${event.slug}/submissions`)
 
     const submitted = await db.query.eventSession.findFirst({
       where: { id: sessionId },
@@ -244,6 +248,13 @@ describe('core customer workflow', () => {
     })
     if (!(editablePortal instanceof SpiceflowTestResponse)) throw new Error('expected portal submission page')
     expect(await editablePortal.text()).toContain('Edit')
+    const editRedirect = await runRedirect(speakerCookie, () => savePortalSubmission({
+      eventId: event.id,
+      sessionId,
+      submission,
+      submit: true,
+    }))
+    expect(editRedirect.headers.get('location')).toBe(`/portal/${event.slug}/submissions`)
 
     await runWithCookie(organizerCookie, () => updateFormSettings({
       orgId: org.orgId,
