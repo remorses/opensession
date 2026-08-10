@@ -17,8 +17,8 @@
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
-    "@holocron.so/cli": "^0.20.1",
-    "@holocron.so/vite": "0.25.1",
+    "@holocron.so/cli": "^0.21.0",
+    "@holocron.so/vite": "0.29.0",
     "@monaco-editor/react": "^4.7.0",
     "better-auth": "^1.2.8",
     "better-auth-drizzle-adapter": "^1.0.5",
