@@ -9,7 +9,11 @@ import { beforeAll, describe, expect, test } from 'vitest'
 import worker, { app } from '../src/app.tsx'
 import { getDb } from '../src/db.ts'
 import { runCron } from '../src/lib/emails/cron.ts'
-import { enqueueAndSend, isPlaceholderEmail } from '../src/lib/emails/send.ts'
+import {
+  enqueueAndSend,
+  isPlaceholderEmail,
+  sendEmailMessage,
+} from '../src/lib/emails/send.ts'
 
 const fixture = {
   userId: 'workerd-fixture-user',
@@ -188,6 +192,23 @@ describe('Cloudflare integration foundation', () => {
       result: { inserted: false, sent: false },
       row: null,
     })
+
+    const [existingRow] = await getDb().insert(schema.emailMessage).values({
+      eventId: fixture.eventId,
+      kind: 'SUBMISSION_CONFIRMATION',
+      dedupeKey: 'workerd:existing-placeholder-email',
+      toEmail: 'speaker@example.com',
+      subject: 'Existing placeholder message',
+      bodyHtml: '<p>This must not send.</p>',
+    }).returning()
+    const outcome = await sendEmailMessage({
+      db: getDb(),
+      row: existingRow!,
+      replyTo: 'organizer@example.test',
+      now: Date.UTC(2026, 7, 9),
+    })
+
+    expect(outcome).toEqual({ status: 'SKIPPED' })
   })
 
   test('cron queues one task reminder outbox snapshot for an incomplete assignment', async () => {
