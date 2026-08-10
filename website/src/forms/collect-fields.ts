@@ -282,3 +282,49 @@ export function collectFields({ mdxSource, scope }: { mdxSource: string; scope: 
   walk(tree, false)
   return result
 }
+
+export function hasFileUploadField(mdxSource: string, fieldName: string): boolean {
+  type MdxJsxElement = Extract<MyRootContent, { type: 'mdxJsxFlowElement' | 'mdxJsxTextElement' }>
+
+  const isMdxJsxElement = (node: MyRootContent): node is MdxJsxElement =>
+    node.type === 'mdxJsxFlowElement' || node.type === 'mdxJsxTextElement'
+
+  const visit = (node: MyRootContent): boolean => {
+    if (isMdxJsxElement(node) && node.name === 'FileUpload') {
+      const matches = node.attributes.some((attribute) =>
+        attribute.type === 'mdxJsxAttribute'
+        && attribute.name === 'name'
+        && attribute.value === fieldName,
+      )
+      if (matches) return true
+    }
+    switch (node.type) {
+      case 'blockquote':
+      case 'delete':
+      case 'emphasis':
+      case 'footnoteDefinition':
+      case 'heading':
+      case 'link':
+      case 'linkReference':
+      case 'list':
+      case 'listItem':
+      case 'mdxJsxFlowElement':
+      case 'mdxJsxTextElement':
+      case 'paragraph':
+      case 'root':
+      case 'strong':
+      case 'table':
+      case 'tableCell':
+      case 'tableRow':
+        return node.children.some(visit)
+      default:
+        return false
+    }
+  }
+
+  try {
+    return visit(mdxParse(mdxSource))
+  } catch {
+    return false
+  }
+}

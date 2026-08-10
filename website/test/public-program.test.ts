@@ -97,6 +97,46 @@ describe('published anonymous program', () => {
     }
   })
 
+  test('publishes cover images but keeps custom response uploads private', async () => {
+    await env.DB.prepare('UPDATE event SET program_published_at = ? WHERE id = ?').bind(now + 1, ids.event).run()
+    await env.DB.batch([
+      env.DB.prepare(dedent`
+        INSERT INTO form (id, event_id, purpose, target, name, slug, status, created_at, updated_at)
+        VALUES ('public-file-form', ?, 'CFP', 'SUBMISSION', 'CFP', 'public-file-cfp', 'OPEN', ?, ?)
+      `).bind(ids.event, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO form_version (id, form_id, mdx_source, created_at)
+        VALUES ('public-file-version', 'public-file-form', '<FileUpload name="privateAttachment" />', ?)
+      `).bind(now),
+      env.DB.prepare(dedent`
+        INSERT INTO form_response (id, event_id, form_id, form_version_id, speaker_id, session_id, status, submitted_at, created_at, updated_at)
+        VALUES ('public-file-response', ?, 'public-file-form', 'public-file-version', ?, ?, 'SUBMITTED', ?, ?, ?)
+      `).bind(ids.event, ids.speaker, ids.visible, now, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO file (id, event_id, kind, file_name, mime_type, size_bytes, storage_key, created_at)
+        VALUES ('private-response-file', ?, 'DOCUMENT', 'private.pdf', 'application/pdf', 7, 'public/private', ?)
+      `).bind(ids.event, now),
+      env.DB.prepare(dedent`
+        INSERT INTO file (id, event_id, kind, file_name, mime_type, size_bytes, storage_key, created_at)
+        VALUES ('public-cover-file', ?, 'IMAGE', 'cover.png', 'image/png', 5, 'public/cover', ?)
+      `).bind(ids.event, now),
+      env.DB.prepare(dedent`
+        INSERT INTO form_field_value (id, response_id, name, value, file_id)
+        VALUES ('private-response-value', 'public-file-response', 'privateAttachment', 'private-response-file', 'private-response-file')
+      `),
+      env.DB.prepare('UPDATE event_session SET cover_image_file_id = ? WHERE id = ?').bind('public-cover-file', ids.visible),
+    ])
+    await env.FILES.put('public/private', 'private')
+    await env.FILES.put('public/cover', 'cover')
+
+    const privateResponse = await app.handle(new Request('http://localhost/files/private-response-file'))
+    const coverResponse = await app.handle(new Request('http://localhost/files/public-cover-file'))
+
+    expect(privateResponse.status).toBe(404)
+    expect(coverResponse.status).toBe(200)
+    expect(new TextDecoder().decode(await coverResponse.arrayBuffer())).toBe('cover')
+  })
+
   test('writes a placement and serves the same row through JSON and ICS', async () => {
     const db = getDb()
     const event = await db.query.event.findFirst({ where: { id: ids.event } })

@@ -254,6 +254,58 @@ describe('immutable file slots and role-safe threads', () => {
     `).bind(ids.otherEvent, ids.assignment, now).run()).rejects.toThrow(/task assignment event mismatch/)
   })
 
+  test('rejects speaker uploads without a form-owned file slot', async () => {
+    const body = new FormData()
+    body.set('file', new File(['payload'], 'payload.pdf', { type: 'application/pdf' }))
+    body.set('eventId', ids.event)
+    body.set('kind', 'DOCUMENT')
+
+    const response = await app.handle(new Request('http://localhost/api/upload', {
+      method: 'POST',
+      headers: { cookie: speakerCookie },
+      body,
+    }))
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'invalid_upload_slot' })
+  })
+
+  test('rejects task uploads for fields outside the assigned form', async () => {
+    const body = new FormData()
+    body.set('file', new File(['payload'], 'payload.pdf', { type: 'application/pdf' }))
+    body.set('eventId', ids.event)
+    body.set('kind', 'DOCUMENT')
+    body.set('taskAssignmentId', 'content-replacement-assignment')
+    body.set('fieldName', 'identity-document')
+
+    const response = await app.handle(new Request('http://localhost/api/upload', {
+      method: 'POST',
+      headers: { cookie: speakerCookie },
+      body,
+    }))
+
+    expect(response.status).toBe(400)
+    expect(await response.json()).toMatchObject({ code: 'invalid_upload_slot' })
+  })
+
+  test('accepts a speaker upload for a file field in the assigned form', async () => {
+    const body = new FormData()
+    body.set('file', new File(['payload'], 'slides.pdf', { type: 'application/pdf' }))
+    body.set('eventId', ids.event)
+    body.set('kind', 'SLIDES')
+    body.set('taskAssignmentId', 'content-replacement-assignment')
+    body.set('fieldName', 'slides')
+
+    const response = await app.handle(new Request('http://localhost/api/upload', {
+      method: 'POST',
+      headers: { cookie: speakerCookie },
+      body,
+    }))
+
+    expect(response.status).toBe(200)
+    expect(await response.json()).toMatchObject({ fileName: 'slides.pdf' })
+  })
+
   test('accepts only the version uploaded through the submitted assignment and field', async () => {
     const db = getDb()
     await expect(assertTaskSlotFiles({

@@ -133,15 +133,15 @@ export function getFileFieldNames(result: {
 export function canAccessFile({
   isOrgMember = false,
   isOwningSpeaker = false,
-  hasPublicSessionReference = false,
+  isPublicSessionCover = false,
   isPublicSpeakerHeadshot = false,
 }: {
   isOrgMember?: boolean
   isOwningSpeaker?: boolean
-  hasPublicSessionReference?: boolean
+  isPublicSessionCover?: boolean
   isPublicSpeakerHeadshot?: boolean
 }): boolean {
-  return isOrgMember || isOwningSpeaker || hasPublicSessionReference || isPublicSpeakerHeadshot
+  return isOrgMember || isOwningSpeaker || isPublicSessionCover || isPublicSpeakerHeadshot
 }
 
 /** Status + optional schedule window for any form (CFP, portal, evaluation). */

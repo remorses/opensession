@@ -60,6 +60,8 @@ export function PublicCfpPage({
     const body = new FormData()
     body.set('file', file)
     body.set('eventId', event.id)
+    body.set('formResponseId', activeDraft?.responseId ?? '')
+    body.set('fieldName', fieldName)
     body.set(
       'kind',
       fieldName.includes('headshot') ? 'HEADSHOT'

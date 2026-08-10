@@ -23,7 +23,7 @@ import {
   getDb,
   requireSession,
 } from './db.ts'
-import { collectFields, libraryOptions, type FieldOption, type ValuesRecord } from './forms/collect-fields.ts'
+import { collectFields, hasFileUploadField, libraryOptions, type FieldOption, type ValuesRecord } from './forms/collect-fields.ts'
 import { loadAgendaSessions, speakerDisplayName } from './lib/agenda-server.ts'
 import { canAccessFile, formScheduleBlock, restoreSubmissionValues } from './lib/cfp-submission.ts'
 import {
@@ -396,6 +396,8 @@ export const app = new Spiceflow()
     const kindResult = z.enum(['HEADSHOT', 'SLIDES', 'DOCUMENT', 'IMAGE', 'OTHER'])
       .safeParse(body.get('kind'))
     const assignmentId = String(body.get('taskAssignmentId') ?? '').trim()
+    const responseId = String(body.get('formResponseId') ?? '').trim()
+    const formId = String(body.get('formId') ?? '').trim()
     const fieldName = String(body.get('fieldName') ?? '').trim()
     if (!(uploaded instanceof File) || !eventId || !kindResult.success) {
       return json({ code: 'invalid_upload', message: 'File, eventId, and kind are required' }, { status: 400 })
@@ -415,8 +417,9 @@ export const app = new Spiceflow()
       db.query.speaker.findFirst({ where: { eventId, userId: session.userId } }),
     ] as const)
     if (!member && !speaker) return json({ code: 'not_found', message: 'Event not found' }, { status: 404 })
-    if (Boolean(assignmentId) !== Boolean(fieldName) || fieldName.length > 200) {
-      return json({ code: 'invalid_task_slot', message: 'A task assignment and field name are both required' }, { status: 400 })
+    const contextCount = [assignmentId, responseId, formId].filter(Boolean).length
+    if (fieldName.length > 200 || contextCount > 1 || (contextCount > 0) !== Boolean(fieldName)) {
+      return json({ code: 'invalid_upload_slot', message: 'Choose one form-owned upload slot' }, { status: 400 })
     }
     const assignment = assignmentId
       ? await db.query.taskAssignment.findFirst({
@@ -428,6 +431,44 @@ export const app = new Spiceflow()
       if (!speaker || !assignment || assignment.speakerId !== speaker.id
         || assignment.taskDefinition?.source !== 'FORM') {
         return json({ code: 'not_found', message: 'Task assignment not found' }, { status: 404 })
+      }
+    }
+
+    if (speaker && !member) {
+      let mdxSource: string | null = null
+      if (assignment) {
+        const assignedFormId = assignment.taskDefinition?.formId
+        const version = assignedFormId
+          ? await db.query.formVersion.findFirst({ where: { formId: assignedFormId }, orderBy: { createdAt: 'desc', id: 'desc' } })
+          : null
+        mdxSource = version?.mdxSource ?? null
+      } else if (responseId) {
+        const response = await db.query.formResponse.findFirst({
+          where: { id: responseId, eventId, speakerId: speaker.id },
+          with: { form: true, formVersion: true },
+        })
+        if (response?.form?.purpose === 'CFP' && response.form.status === 'OPEN'
+          && response.status === 'DRAFT' && formScheduleBlock(response.form) == null) {
+          mdxSource = response.formVersion?.mdxSource ?? null
+        }
+      } else if (formId) {
+        const form = await db.query.form.findFirst({
+          where: { id: formId, eventId, purpose: 'PORTAL', target: 'SPEAKER', status: 'OPEN' },
+        })
+        const version = form && formScheduleBlock(form) == null
+          ? await db.query.formVersion.findFirst({ where: { formId }, orderBy: { createdAt: 'desc', id: 'desc' } })
+          : null
+        mdxSource = version?.mdxSource ?? null
+      }
+      if (!mdxSource || !hasFileUploadField(mdxSource, fieldName)) {
+        return json({ code: 'invalid_upload_slot', message: 'This file field is not available' }, { status: 400 })
+      }
+      const existingFiles = await db.query.file.findMany({
+        where: { eventId, uploadedBySpeakerId: speaker.id },
+      })
+      const usedBytes = existingFiles.reduce((total, file) => total + file.sizeBytes, 0)
+      if (existingFiles.length >= MAX_SPEAKER_FILES || usedBytes + uploaded.size > MAX_SPEAKER_UPLOAD_BYTES) {
+        return json({ code: 'upload_quota_exceeded', message: 'Speaker upload quota exceeded' }, { status: 413 })
       }
     }
 
@@ -505,9 +546,6 @@ export const app = new Spiceflow()
         with: { participations: { with: { session: true } } },
       }),
     ] as const)
-    const publicFieldReference = file.formFieldValues.some((value) =>
-      value.response?.session ? isPublicProgramSession(fileEvent, value.response.session) : false,
-    )
     const publicHeadshot = headshotSpeakers.some((speaker) =>
       speaker.participations.some((participation) =>
         participation.session ? isPublicProgramSession(fileEvent, participation.session) : false,
@@ -524,7 +562,7 @@ export const app = new Spiceflow()
     if (!canAccessFile({
       isOrgMember: Boolean(member),
       isOwningSpeaker: owningSpeaker,
-      hasPublicSessionReference: Boolean(coverSession && isPublicProgramSession(fileEvent, coverSession)) || publicFieldReference,
+      isPublicSessionCover: Boolean(coverSession && isPublicProgramSession(fileEvent, coverSession)),
       isPublicSpeakerHeadshot: publicHeadshot,
     })) return fileNotFound()
 
@@ -535,7 +573,7 @@ export const app = new Spiceflow()
       'content-length': String(file.sizeBytes),
       'content-disposition': `attachment; filename="${file.fileName.replace(/["\\\r\n]/g, '_').slice(0, 160) || 'download'}"`,
       'x-content-type-options': 'nosniff',
-      'cache-control': publicHeadshot || coverSession || publicFieldReference ? 'public, max-age=300' : 'private, no-store',
+      'cache-control': publicHeadshot || coverSession ? 'public, max-age=300' : 'private, no-store',
     })
     return new Response(object.body, { headers })
   })
@@ -2496,6 +2534,8 @@ function PublicUnavailable({ eventSlug, reason }: { eventSlug?: string; reason?:
 }
 
 const MAX_UPLOAD_BYTES = 100 * 1024 * 1024
+const MAX_SPEAKER_FILES = 100
+const MAX_SPEAKER_UPLOAD_BYTES = 500 * 1024 * 1024
 const IMAGE_EXTENSIONS = new Set(['avif', 'gif', 'jpeg', 'jpg', 'png', 'webp'])
 const DOCUMENT_EXTENSIONS = new Set(['doc', 'docx', 'key', 'pdf', 'ppt', 'pptx'])
 const IMAGE_MIME_TYPES = new Set(['image/avif', 'image/gif', 'image/jpeg', 'image/png', 'image/webp'])

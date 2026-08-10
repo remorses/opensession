@@ -518,7 +518,7 @@ export function PortalSubmissionDetailPage() {
     )
   }
 
-  const uploadFile = makeUpload({ eventId: event.id })
+  const uploadFile = makeUpload({ eventId: event.id, formResponseId: draft?.responseId })
 
   const withdraw = async () => {
     setWithdrawing(true)
@@ -655,7 +655,7 @@ export function PortalProfilePage() {
     )
   }
   const { event, speaker, userEmail, userName } = shell
-  const uploadFile = makeUpload({ eventId: event.id })
+  const uploadFile = makeUpload({ eventId: event.id, formId: profileForm?.id })
   const profileImage = speakerDisplayImage(speaker)
 
   if (!profileForm || !profileMdx) {
@@ -1127,19 +1127,23 @@ function TaskDeliverableThread({ eventId, assignmentId, slot }: {
 
 type UploadedVersion = { id: string; fileName: string; sizeBytes: number; createdAt: number }
 
-function makeUpload({ eventId, taskAssignmentId, onUploaded }: {
+function makeUpload({ eventId, taskAssignmentId, formResponseId, formId, onUploaded }: {
   eventId: string
   taskAssignmentId?: string
+  formResponseId?: string
+  formId?: string
   onUploaded?: (fieldName: string, versions: UploadedVersion[]) => void
 }) {
   return async (file: File, fieldName: string) => {
     const body = new FormData()
     body.set('file', file)
     body.set('eventId', eventId)
+    body.set('fieldName', fieldName)
     if (taskAssignmentId) {
       body.set('taskAssignmentId', taskAssignmentId)
-      body.set('fieldName', fieldName)
     }
+    if (formResponseId) body.set('formResponseId', formResponseId)
+    if (formId) body.set('formId', formId)
     body.set(
       'kind',
       fieldName.includes('headshot') ? 'HEADSHOT'

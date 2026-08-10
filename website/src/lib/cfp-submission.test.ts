@@ -137,7 +137,7 @@ describe('canAccessFile', () => {
   test('allows members, owners, and public references only', () => {
     expect(canAccessFile({ isOrgMember: true })).toBe(true)
     expect(canAccessFile({ isOwningSpeaker: true })).toBe(true)
-    expect(canAccessFile({ hasPublicSessionReference: true })).toBe(true)
+    expect(canAccessFile({ isPublicSessionCover: true })).toBe(true)
     expect(canAccessFile({ isPublicSpeakerHeadshot: true })).toBe(true)
     expect(canAccessFile({})).toBe(false)
   })
