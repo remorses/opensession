@@ -12,7 +12,7 @@
     {
       "binding": "DB",
       "database_name": "opensession-db",
-      "database_id": "b6282777-9a6f-4f6b-af76-8e57d1cb1749",
+      "database_id": "a852e3f7-b62b-4915-ad2a-382bd46b95b2",
       "migrations_dir": "../db/drizzle",
       "migrations_pattern": "../db/drizzle/*/migration.sql"
     }
@@ -57,7 +57,7 @@
         {
           "binding": "DB",
           "database_name": "opensession-preview-db",
-          "database_id": "ef841c1a-2ce6-4a18-957b-072d2258c448",
+          "database_id": "4169078f-7abe-48b5-88c2-6394a32115a4",
           "migrations_dir": "../db/drizzle",
           "migrations_pattern": "../db/drizzle/*/migration.sql"
         }
