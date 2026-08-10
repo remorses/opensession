@@ -1,0 +1,90 @@
+---
+title: OpenSession vs SessionBoard comparison
+sidebarTitle: vs SessionBoard
+description: Feature-by-feature comparison between OpenSession (free, open source) and SessionBoard ($40k/year, closed source).
+icon: lucide:scale
+---
+
+# OpenSession vs SessionBoard
+
+SessionBoard is an enterprise speaker and content management platform used by large
+conferences. It costs **over $40,000 per year**. OpenSession is a free, open-source
+alternative that covers the core **Program** module most organizers actually use.
+
+## At a glance
+
+|                         | **OpenSession**       | **SessionBoard**  |
+| ----------------------- | --------------------- | ----------------- |
+| **Price**               | Free (MIT license)    | $40,000+ / year   |
+| **Source code**         | Open source on GitHub | Closed source     |
+| **Self-hosting**        | Cloudflare Workers    | No (SaaS only)    |
+| **Data ownership**      | Your D1 database      | Their servers     |
+| **Infrastructure cost** | Cloudflare free tier  | Included in price |
+
+## Program features
+
+The Program module is the daily driver for conference organizers: call for papers,
+abstract review, agenda scheduling, speaker portal, and communications.
+
+| Feature                       | **OpenSession**                        | **SessionBoard**                       |
+| ----------------------------- | -------------------------------------- | -------------------------------------- |
+| **Custom CFP forms**          | MDX with conditional logic             | Visual form builder                    |
+| **Multi-speaker submissions** | Yes                                    | Yes                                    |
+| **Form versioning**           | Immutable versions with history        | Unknown                                |
+| **Abstract management**       | Status tabs, search, bulk actions      | Status tabs, search, bulk actions      |
+| **Voting and scoring**        | Yes/Maybe/No + 1-5 rating              | Yes/Maybe/No + detailed scorecards     |
+| **Evaluation rounds**         | Form-based rounds with reviewer pools  | Multi-round with AI evaluators         |
+| **Accept/decline queues**     | Batch notify with one click            | Batch notify                           |
+| **Agenda builder**            | Room/time grid with conflict detection | Room/time grid with conflict detection |
+| **Calendar invites**          | RFC 5545 ICS via email                 | RFC 5545 ICS via email                 |
+| **Speaker portal**            | Profile, tasks, file uploads           | Profile, tasks, file uploads, wiki     |
+| **Automated reminders**       | Task and draft reminders via cron      | Task and draft reminders               |
+| **Embeds**                    | Agenda + speaker gallery iframes       | Agenda + speaker embeds                |
+| **JSON/ICS feeds**            | Public schedule and speaker feeds      | API + embeds                           |
+| **CSV export**                | Abstracts export                       | Full export                            |
+| **Email outbox**              | Delivery tracking with retry           | Delivery tracking                      |
+
+## What SessionBoard has that OpenSession does not
+
+SessionBoard is a full enterprise suite. OpenSession deliberately excludes:
+
+| Feature                      | Why it is excluded                                                                 |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| **Speaker CRM**              | OpenSession focuses on program management, not relationship tracking across events |
+| **Marketing tools**          | Content repurposing, transcription, and campaign tools are a separate product      |
+| **CMS / website builder**    | Most organizers already have an event website                                      |
+| **AI evaluators**            | Simple voting and scoring covers the evaluation needs of most events               |
+| **Payment processing**       | Conference payment is handled by registration platforms like Accelevents           |
+| **Integrations marketplace** | OpenSession is self-hosted; you control the data directly                          |
+| **Live transcription**       | Out of scope for program management                                                |
+| **Digital posters**          | Niche feature for academic conferences                                             |
+
+## When to choose OpenSession
+
+- You run a **tech conference** and need CFP, review, agenda, and speaker onboarding
+- You want to **own your data** instead of depending on a SaaS vendor
+- You want to **avoid $40k+ annual licensing** for features you use 3 months a year
+- You are comfortable **self-hosting on Cloudflare** (free tier covers most workloads)
+- You want an **open-source tool** you can modify and contribute to
+
+## When to choose SessionBoard
+
+- You need the **full enterprise suite**: CRM, marketing, CMS, and integrations
+- You run **multiple large events** and need cross-event speaker relationship tracking
+- You need **AI evaluators** and advanced scoring rubrics
+- You prefer a **managed SaaS** with dedicated support and onboarding
+- Your organization has the budget and prefers vendor-managed solutions
+
+## Try OpenSession
+
+OpenSession is free and open source. Clone the repo, deploy to Cloudflare, and run
+your next event without the SaaS bill.
+
+<CardGroup cols={2}>
+  <Card title='Get started' icon='lucide:rocket' href='../guides/self-hosting.mdx'>
+    Deploy OpenSession to your own Cloudflare account.
+  </Card>
+  <Card title='View source' icon='lucide:github' href='https://github.com/remorses/opensession'>
+    Browse the source code on GitHub.
+  </Card>
+</CardGroup>

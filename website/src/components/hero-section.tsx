@@ -42,8 +42,8 @@ export function HeroSection() {
           className='flex flex-col items-center leading-none text-[32px] sm:text-[44px] md:text-[54px] text-foreground'
           style={{ fontFamily: HERO_FONT }}
         >
-          <span>call for papers, speakers,</span>
-          <span>and agendas — open source</span>
+          <span>run your conference program</span>
+          <span>without the $40k SaaS bill</span>
         </h1>
 
         {/* CTAs */}

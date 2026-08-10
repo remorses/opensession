@@ -1,0 +1,140 @@
+---
+title: Self-hosting OpenSession on Cloudflare
+sidebarTitle: Self-hosting
+description: Deploy OpenSession to your own Cloudflare account with D1, R2, and email sending. Zero infrastructure cost on the free tier.
+icon: lucide:server
+---
+
+# Self-hosting
+
+OpenSession runs as a single **Cloudflare Worker** with D1 (SQLite database), R2
+(file storage), and the `send_email` binding for transactional emails. The entire
+stack fits within Cloudflare's free tier for most conference workloads.
+
+## Prerequisites
+
+- A **Cloudflare account** (free tier works)
+- **Node.js 18+** and **pnpm**
+- **Google OAuth credentials** (for authentication)
+- A **domain** pointed at Cloudflare (for email sending)
+
+## Architecture
+
+```diagram
+  ┌──────────────────────── Cloudflare Worker ────────────────────────┐
+  │                                                                   │
+  │  Spiceflow app (React Server Components)                         │
+  │  ├── Admin dashboard    /org/:orgId/e/:eventId/*                  │
+  │  ├── Public CFP         /submit/:eventSlug/:formSlug              │
+  │  ├── Speaker portal     /portal/:eventSlug/*                      │
+  │  ├── Embeds             /embed/:eventSlug/*                       │
+  │  ├── API                /api/auth/* (BetterAuth)                  │
+  │  └── Cron               close forms, reminders, outbox drain      │
+  │                                                                   │
+  └────────┬──────────────┬──────────────┬────────────────────────────┘
+           │              │              │
+           v              v              v
+      D1 database    R2 bucket      send_email binding
+      (SQLite)       (files)        (transactional mail)
+```
+
+## Setup steps
+
+<Steps>
+
+### Clone the repository
+
+```bash
+git clone https://github.com/remorses/opensession
+cd opensession
+pnpm install
+```
+
+### Create Cloudflare resources
+
+Create a D1 database and R2 bucket in your Cloudflare dashboard or via Wrangler:
+
+```bash
+cd website
+npx wrangler d1 create opensession-db
+npx wrangler r2 bucket create opensession-files
+```
+
+Update `wrangler.jsonc` with your database ID.
+
+### Configure Google OAuth
+
+Create OAuth credentials in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
+
+1. Create a new OAuth 2.0 Client ID
+2. Set the authorized redirect URI to `https://your-domain.com/api/auth/callback/google`
+3. Note the Client ID and Client Secret
+
+### Set secrets
+
+Store your secrets using Wrangler or your preferred secrets manager:
+
+```bash
+npx wrangler secret put BETTER_AUTH_SECRET
+npx wrangler secret put GOOGLE_CLIENT_ID
+npx wrangler secret put GOOGLE_CLIENT_SECRET
+```
+
+Set `BETTER_AUTH_URL` to your production domain (e.g. `https://opensession.dev`).
+
+### Run migrations
+
+```bash
+pnpm db:migrate:remote
+```
+
+### Deploy
+
+```bash
+pnpm deploy
+```
+
+</Steps>
+
+## Local development
+
+For local development, the Vite dev server runs with Miniflare (local Cloudflare
+runtime) on port **8788**:
+
+```bash
+cd website
+pnpm db:migrate:local
+pnpm dev
+```
+
+Secrets for local development should be injected through your secrets manager
+(the project uses sigillo). Never commit `.env` or `.dev.vars` files.
+
+## Environment
+
+| Resource   | Production            | Preview                       |
+| ---------- | --------------------- | ----------------------------- |
+| **Worker** | `opensession-website` | `opensession-website-preview` |
+| **Domain** | `opensession.dev`     | `preview.opensession.dev`     |
+| **D1**     | `opensession-db`      | `opensession-preview-db`      |
+| **R2**     | `opensession-files`   | Shared                        |
+
+The preview environment uses a separate D1 database so test data does not
+affect production.
+
+## Cost
+
+Cloudflare Workers free tier includes:
+
+| Resource        | Free tier limit                            |
+| --------------- | ------------------------------------------ |
+| Worker requests | 100,000 / day                              |
+| D1 reads        | 5 million / day                            |
+| D1 writes       | 100,000 / day                              |
+| D1 storage      | 5 GB                                       |
+| R2 storage      | 10 GB                                      |
+| R2 operations   | 10 million reads, 1 million writes / month |
+| Email sending   | 100 / day (on Workers Paid, higher limits) |
+
+A conference with 500 submissions, 100 accepted speakers, and 50,000 public
+agenda views per month fits comfortably within these limits.

@@ -11,9 +11,13 @@
   "icons": { "library": "lucide" },
   // App routes served by the same worker — the broken-link checker only
   // sees .mdx pages, so anything the landing page links to must be here.
-  "knownPaths": ["/login", "/login/*", "/dashboard", "/invite/*", "/org", "/org/*"],
+  "knownPaths": ["/login", "/login/*", "/dashboard", "/invite/*", "/org", "/org/*", "/submit/*", "/portal/*", "/embed/*", "/public/*", "/api/*", "/files/*"],
   "navbar": {
     "links": [
+      {
+        "label": "GitHub",
+        "href": "https://github.com/remorses/opensession"
+      },
       {
         "label": "Dashboard",
         "href": "/dashboard"
@@ -44,6 +48,45 @@
             "group": "Overview",
             "icon": "lucide:rocket",
             "pages": ["index"]
+          }
+        ]
+      },
+      {
+        "tab": "Features",
+        "icon": "lucide:layers",
+        "groups": [
+          {
+            "group": "Core Features",
+            "icon": "lucide:sparkles",
+            "pages": [
+              "features/call-for-papers",
+              "features/abstract-review",
+              "features/agenda-builder",
+              "features/speaker-portal",
+              "features/emails-and-calendar"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Compare",
+        "icon": "lucide:scale",
+        "groups": [
+          {
+            "group": "Alternatives",
+            "icon": "lucide:arrow-left-right",
+            "pages": ["compare/vs-sessionboard"]
+          }
+        ]
+      },
+      {
+        "tab": "Guides",
+        "icon": "lucide:book-open",
+        "groups": [
+          {
+            "group": "Setup",
+            "icon": "lucide:wrench",
+            "pages": ["guides/self-hosting"]
           }
         ]
       }

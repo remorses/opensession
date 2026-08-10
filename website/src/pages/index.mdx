@@ -1,7 +1,7 @@
 ---
-title: OpenSession — open-source speaker & session management
+title: OpenSession — open-source event speaker and session management
 sidebarTitle: Home
-description: Open-source SessionBoard alternative. Collect talk submissions with CFP forms, review abstracts, build your agenda, and onboard speakers through a portal.
+description: Free, self-hosted SessionBoard alternative. Collect talk submissions, review abstracts, build your agenda, and onboard speakers through a portal. Deploy on Cloudflare in minutes.
 icon: lucide:home
 ---
 
@@ -13,34 +13,60 @@ import { HeroSection } from '../components/hero-section.tsx'
 
 </Above>
 
-Run your event's **call for papers**, review submissions, build the agenda, and onboard
-speakers — all in one open-source app you can self-host on Cloudflare.
+Open-source platform for **conference organizers** who need call for papers, abstract review,
+agenda scheduling, and speaker onboarding. Self-host on Cloudflare Workers with zero
+infrastructure cost. Replace SessionBoard, Sessionize, or spreadsheet chaos with something
+you own.
+
+```diagram
+  Speaker submits              Organizer reviews             Organizer schedules
+  ┌────────────────┐          ┌────────────────────┐        ┌───────────────────┐
+  │  Public CFP    │─────────>│  Abstracts table   │───────>│  Agenda builder   │
+  │  Google login  │          │  Vote / Rate / Tag │        │  Rooms & times    │
+  │  Draft & submit│          │  Accept / Decline  │        │  Conflict detect  │
+  └────────────────┘          └────────────────────┘        └───────┬───────────┘
+                                       │                            │
+                                       v                            v
+                              ┌────────────────────┐        ┌───────────────────┐
+                              │  Decision emails   │        │  Calendar invites │
+                              │  with ICS attached │        │  auto-sent to all │
+                              │  to each speaker   │        │  session speakers │
+                              └────────────────────┘        └───────┬───────────┘
+                                                                    │
+                                                                    v
+                                                            ┌───────────────────┐
+                                                            │  Speaker portal   │
+                                                            │  Profile + slides │
+                                                            │  Task tracking    │
+                                                            └───────────────────┘
+```
 
 ## Features {#features}
 
 <CardGroup cols={3}>
-  <Card title='CFP Forms' icon='lucide:file-text'>
-    Publish submission forms with custom fields and conditional logic. Speakers sign in
-    with Google and submit talks in minutes.
+  <Card title='Call for Papers' icon='lucide:file-text' href='./features/call-for-papers.mdx'>
+    Custom submission forms built with MDX. Conditional logic, multi-speaker support,
+    track and format selection. Speakers sign in with Google and submit in minutes.
   </Card>
-  <Card title='Abstract Review' icon='lucide:list-checks'>
-    Vote, rate, and comment on every submission. Move talks through accept and decline
-    queues, then notify speakers in one click.
+  <Card title='Abstract Review' icon='lucide:list-checks' href='./features/abstract-review.mdx'>
+    Your team votes Yes, Maybe, or No on every submission. Accept and decline queues
+    with one-click batch notifications. CSV export for offline review.
   </Card>
-  <Card title='Agenda Builder' icon='lucide:calendar'>
-    Place accepted sessions into rooms and time slots. Conflicts are detected live,
-    calendar invites go out automatically.
+  <Card title='Agenda Builder' icon='lucide:calendar' href='./features/agenda-builder.mdx'>
+    Place accepted sessions into rooms and time slots. Room and speaker conflicts
+    are detected live. Calendar invites go out automatically.
   </Card>
-  <Card title='Speaker Portal' icon='lucide:users'>
+  <Card title='Speaker Portal' icon='lucide:users' href='./features/speaker-portal.mdx'>
     Speakers confirm participation, complete onboarding tasks, upload slides and
-    headshots, and track their submissions.
+    headshots, and track their submissions from a dedicated portal.
   </Card>
-  <Card title='Reminder Emails' icon='lucide:mail'>
-    Automatic reminders for unfinished drafts and due tasks. Decision emails and ICS
-    calendar invites, no configuration needed.
+  <Card title='Emails & Calendar' icon='lucide:mail' href='./features/emails-and-calendar.mdx'>
+    Automatic decision emails, task reminders, and ICS calendar invites.
+    Replies go to the organizer. No email configuration needed.
   </Card>
   <Card title='Embeds & Feeds' icon='lucide:code'>
-    Embeddable agenda and speaker pages plus JSON and ICS feeds for your event website.
+    Embeddable agenda and speaker gallery for your event website. JSON and ICS
+    feeds for third-party integrations.
   </Card>
 </CardGroup>
 
@@ -50,20 +76,181 @@ speakers — all in one open-source app you can self-host on Cloudflare.
 
 ### Create your event
 
-Sign in with Google, create an event, and set up tracks, formats, and rooms.
+Sign in with Google, name your event, pick dates and timezone. OpenSession creates
+three default forms: Call for Papers, Speaker Profile, and Session Materials.
 
-### Publish your CFP
+### Publish the CFP
 
-Open a submission form and share the public link. Submissions land in your abstracts
-table with live status tabs.
+Open the submission form and share the public link. Speakers sign in with Google,
+fill out the form, and submit. Drafts auto-save so nothing gets lost.
+
+<Frame>
+  <img src="/screenshots/forms.png" alt="Forms management page showing CFP and portal forms" />
+</Frame>
 
 ### Review and accept
 
-Your whole team votes on submissions. Accepted speakers automatically get portal tasks
-and decision emails.
+Your whole team votes on submissions. Move talks through accept and decline queues,
+then notify all speakers in one click. Decision emails include calendar invites.
+
+<Frame>
+  <img src="/screenshots/abstracts.png" alt="Abstracts table with status tabs and submission details" />
+</Frame>
 
 ### Build the agenda
 
-Drag accepted talks into the schedule. Publish embeds and feeds to your event website.
+Place accepted talks into rooms and time slots. The conflict engine flags overlapping
+rooms and double-booked speakers. Publish embeds and feeds to your event website.
+
+<Frame>
+  <img src="/screenshots/agenda.png" alt="Agenda builder with room columns and time slots" />
+</Frame>
+
+### Track speaker onboarding
+
+Accepted speakers get portal access with tasks: complete their profile, upload slides,
+confirm participation. The dashboard shows who still has outstanding work.
+
+<Frame>
+  <img src="/screenshots/tasks.png" alt="Speaker task management with completion tracking" />
+</Frame>
 
 </Steps>
+
+## The organizer dashboard
+
+Everything in one place. The sidebar groups submissions, review tools, speaker portal,
+and communications into a clear workflow. Status tabs on every page let you filter
+by lifecycle state.
+
+<Frame>
+  <img src="/screenshots/dashboard.png" alt="OpenSession dashboard with sidebar navigation and event overview" />
+</Frame>
+
+## OpenSession vs SessionBoard
+
+|                     | **OpenSession**              | **SessionBoard**             |
+| ------------------- | ---------------------------- | ---------------------------- |
+| **Price**           | Free, forever                | $40,000+ / year              |
+| **Source code**     | Open source (MIT)            | Closed source                |
+| **Self-hosting**    | Yes, Cloudflare Workers      | No                           |
+| **CFP forms**       | MDX with conditional logic   | Visual form builder          |
+| **Abstract review** | Vote, rate, comment          | Vote, rate, comment          |
+| **Agenda builder**  | Rooms, time grid, conflicts  | Rooms, time grid, conflicts  |
+| **Speaker portal**  | Profile, tasks, file uploads | Profile, tasks, file uploads |
+| **Emails**          | Automated with ICS           | Automated with ICS           |
+| **Embeds**          | Agenda + speaker gallery     | Agenda + speaker gallery     |
+| **CRM**             | Not included                 | Included                     |
+| **Marketing**       | Not included                 | Included                     |
+| **Data ownership**  | Your Cloudflare D1 database  | Their servers                |
+
+OpenSession covers the **Program** module that conference organizers use daily. CRM,
+marketing pages, and payment processing are intentionally excluded to keep the product
+focused and the codebase small.
+
+[Full comparison →](./compare/vs-sessionboard.mdx)
+
+## Built with
+
+<CardGroup cols={4}>
+  <Card title='Cloudflare Workers' icon='lucide:cloud'>
+    Edge compute, D1 database, R2 storage, email sending. Zero cold starts.
+  </Card>
+  <Card title='Spiceflow RSC' icon='lucide:zap'>
+    React Server Components framework. Type-safe routes, server actions, streaming.
+  </Card>
+  <Card title='Drizzle ORM' icon='lucide:database'>
+    Type-safe SQL with migrations, batch operations, and SQLite-proxy for D1.
+  </Card>
+  <Card title='BetterAuth' icon='lucide:shield'>
+    Google OAuth for organizers and speakers. Session management with cookie caching.
+  </Card>
+</CardGroup>
+
+## Quick start
+
+<Steps>
+
+### Deploy to Cloudflare
+
+Clone the repo, configure your D1 database and R2 bucket, run migrations, and deploy.
+
+```bash
+git clone https://github.com/remorses/opensession
+cd opensession
+pnpm install
+```
+
+### Set up secrets
+
+Configure Google OAuth credentials and the auth secret through your preferred
+secrets manager.
+
+### Deploy
+
+```bash
+cd website
+pnpm db:migrate:remote
+pnpm deploy
+```
+
+</Steps>
+
+[Self-hosting guide →](./guides/self-hosting.mdx)
+
+## Frequently asked questions
+
+<AccordionGroup>
+  <Accordion title="Is OpenSession really free?">
+    Yes. OpenSession is open source under the MIT license. You self-host it on your own
+    Cloudflare account. Cloudflare Workers has a generous free tier that covers most
+    conference workloads.
+  </Accordion>
+  <Accordion title="What does OpenSession replace?">
+    The **Program** module of SessionBoard or Sessionize: call for papers, abstract review,
+    agenda scheduling, speaker portal, and automated emails. It does not replace CRM,
+    marketing, or payment features.
+  </Accordion>
+  <Accordion title="Can I customize the submission forms?">
+    Yes. Forms are written in MDX with custom field components. You can add conditional
+    logic, multi-speaker support, file uploads, and any custom text or layout. The Monaco
+    editor in the admin panel gives you a live preview as you edit.
+  </Accordion>
+  <Accordion title="How do speakers submit talks?">
+    Speakers visit a public URL, sign in with Google, fill out the form, and submit.
+    Drafts auto-save so they can come back later. Each speaker can submit up to 3 talks
+    per event.
+  </Accordion>
+  <Accordion title="Does it send real calendar invites?">
+    Yes. When you accept a talk and schedule it, OpenSession sends RFC 5545 ICS calendar
+    invites that show up natively in Gmail, Outlook, and Apple Calendar. Schedule changes
+    send updates automatically.
+  </Accordion>
+  <Accordion title="Can my team review submissions together?">
+    Yes. Invite team members to your organization. Everyone can vote on submissions, leave
+    comments, and see aggregate scores. Reviewers do not need admin access.
+  </Accordion>
+</AccordionGroup>
+
+## Explore
+
+<CardGroup cols={2}>
+  <Card title='Call for Papers' icon='lucide:file-text' href='./features/call-for-papers.mdx'>
+    MDX form engine with conditional logic and multi-speaker support.
+  </Card>
+  <Card title='Abstract Review' icon='lucide:list-checks' href='./features/abstract-review.mdx'>
+    Collaborative voting, scoring, and accept/decline workflows.
+  </Card>
+  <Card title='Agenda Builder' icon='lucide:calendar' href='./features/agenda-builder.mdx'>
+    Room and time scheduling with live conflict detection.
+  </Card>
+  <Card title='Speaker Portal' icon='lucide:users' href='./features/speaker-portal.mdx'>
+    Self-service onboarding with profile, tasks, and file uploads.
+  </Card>
+  <Card title='vs SessionBoard' icon='lucide:scale' href='./compare/vs-sessionboard.mdx'>
+    Feature-by-feature comparison with pricing breakdown.
+  </Card>
+  <Card title='Self-hosting Guide' icon='lucide:server' href='./guides/self-hosting.mdx'>
+    Deploy OpenSession to your own Cloudflare account.
+  </Card>
+</CardGroup>
