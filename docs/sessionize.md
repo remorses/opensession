@@ -214,11 +214,11 @@ Evaluation separates two perspectives:
   members.
 - **Evaluator's perspective**: show the current user's assigned evaluations.
 
-Sessionize allows unlimited plans per event. This is more flexible than OpenSession's
-single shared review flow, but it also requires setup before reviewers can work.
+Sessionize allows unlimited plans per event. OpenSession uses a smaller round model that
+keeps the same separation without copying the complete plan schema.
 
 OpenSession uses evaluation forms as rounds. This keeps separate reviewer pools and
-scorecards without adding a parallel plan and criterion schema.
+scorecards without adding parallel plan and criterion tables.
 
 ## 8. Schedule
 

@@ -27,7 +27,7 @@ OpenSession already has the main workflow owners:
 | `sessionParticipant` | Speaker or moderator participation and confirmation |
 | `form`, `formVersion` | CFP, portal forms, and evaluation scorecard definitions |
 | `formResponse`, `formFieldValue` | Submitted answers, custom data, and uploaded files |
-| `review` | Review assignment and completion record |
+| `review` | Evaluation assignment and completion owner |
 | `taskDefinition`, `taskAssignment` | Onboarding requests and per-speaker progress |
 | `file` | Immutable R2 object metadata and upload version order |
 | `emailMessage` | Outbox, rendered message snapshot, retry, and history |
@@ -81,8 +81,8 @@ The required workflows extend existing tables with a small number of columns:
 
 ## Pure Vitest
 
-Use `website/vitest.config.ts` for authorization decisions, projections, assignment
-planning, weighted review aggregation, CSV parsing, file version selection, agenda
+Use `website/vitest.config.ts` for authorization decisions, review aggregation,
+CSV parsing, file version selection, agenda
 placement, merge fields, and CRM merge planning. Prefer inline snapshots.
 
 ## Spiceflow inside workerd
@@ -131,67 +131,37 @@ Testing infrastructure only. No product schema or behavior.
 
 # Task 2: Complete abstract evaluation
 
-**Goal:** Add restricted reviewers, rounds, assignments, configurable scorecards, review
-completion, progress, reminders, and results by extending existing models.
+**Goal:** Provide round-based abstract evaluation with restricted reviewer queues,
+configurable scorecards, blind review, progress, and weighted results.
 
 ## Reuse
 
-- Generalize `orgInvitation` instead of adding another invitation table:
-  - add invitation purpose `ORG_MEMBER | EVALUATION_REVIEWER`
-  - add nullable evaluation `formId` and `invitedEmail`
-  - keep the existing secret-link page and acceptance action
-  - org invitations still create `orgMember`; reviewer invitations create
-    `evaluationReviewer`
-- Use `form` itself as the evaluation round and `formVersion` as its scorecard definition.
-  Add form purpose `EVALUATION` plus nullable `opensAt` and `blind` settings. Existing
-  `name`, `status`, `closesAt`, `createdAt`, and versions already provide the rest of the
-  round lifecycle. NUMBER, SELECT, and TEXT are form field components, not scorecard
-  tables.
-- Use `formResponse` and `formFieldValue` for review answers. Make `speakerId` nullable,
-  add nullable unique `reviewId`, and enforce that a response belongs to either a speaker
-  workflow or a review.
-- Convert `review` into the assignment row. Keep its event, session, and reviewer links;
-  add evaluation `formId` and nullable `recusedAt` and `recusalReason`. Remove the fixed
-  vote, rating, and comment columns.
-- Derive review state instead of storing it: no response is ASSIGNED, a DRAFT response is
-  IN_PROGRESS, a SUBMITTED response is COMPLETED, and `recusedAt` is RECUSED. Do not add
-  review status or completion columns that can disagree with `formResponse`.
-- Use existing `emailMessage` for reviewer invitations, reminders, and history by adding
-  email kinds and dedupe-key builders.
-
-## New table
-
-### `evaluation_reviewer`
-
-Needed because a BetterAuth user can belong to one evaluation form without becoming an
-organization member. This row is both the reviewer pool and authorization relation.
-
-No `evaluation_round`, `event_user_role`, `event_invitation`, `scorecard_field`,
-`scorecard_option`, `round_reviewer`, `review_assignment`, or `review_value` table is
-needed.
+- Represent each round with an `EVALUATION` form and immutable `formVersion` scorecard.
+- Store each assignment in `review`; derive its state from recusal or its optional
+  `formResponse` instead of storing another lifecycle column.
+- Store reviewer pools in `evaluationReviewer` and use email-bound `orgInvitation` rows
+  for restricted access without organizer membership.
+- Store scorecard answers in `formFieldValue`, using the same validation and immutable
+  version rules as CFP and portal forms.
 
 ## Workflow
 
-- Organizer creates EVALUATION forms and edits their scorecards with the existing form
-  engine. The UI calls them rounds.
-- Organizer invites users into an evaluation form and assigns sessions by creating
-  `review` rows.
-- Reviewer shell loads only their `evaluationReviewer` rounds and assigned `review` rows.
-- Blind projection removes speaker identity before serialization.
-- Review form saves through existing response and field-value persistence.
-- Organizer sees progress, coverage, weighted results, sorting, reminders, and CSV.
-- Old quick-review code is removed rather than supported in parallel.
+- An organizer creates independent rounds with dates, blind settings, and scorecards.
+- Reviewers receive round-specific invitations and only see assigned submissions.
+- Assignment supports selected submissions, track filtering, and a per-reviewer cap.
+- Reviewers save drafts, submit scorecards, or recuse with a reason.
+- Organizers monitor completion, send reminders, sort weighted results, and export CSV.
 
 ## Validation
 
-- Pure: invitation decisions, blind projection, scorecard validation, weighted results,
-  progress, and result ordering.
-- Workerd: existing org invites still work; reviewer invite email and expiry checks;
-  assignment isolation; review save/update/recusal; progress; export; email dedupe.
-- Playwriter: create two rounds, invite Sam, assign two of three submissions, sign in as
-  Sam, prove the third is inaccessible, complete reviews, and inspect organizer results.
+- Pure: invitation checks, blind projection, assignment state, progress, weighted
+  aggregation, sorting, and CSV.
+- Workerd: round and assignment tenant boundaries, response ownership, recusal, and
+  reminder dedupe.
+- Playwriter: configure two rounds, invite and assign a reviewer, complete blinded
+  scorecards, confirm progress, sort results, and trigger CSV export.
 
-**Evaluation:** `CFP-10`, `CFP-11`, and `ABS-01` through `ABS-14`.
+**Evaluation:** `ABS-01` through `ABS-13`. AI evaluation remains unclaimed.
 
 # Task 3: Speaker operations, tasks, and communications
 

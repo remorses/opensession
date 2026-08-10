@@ -292,13 +292,13 @@ resolved. Public URLs use the event **slug** only (never internal ids).
 │       │   └─ /:sessionId                  session detail + reviews + status actions
 │       ├─ /sessions        ?tab=all|scheduled|unscheduled|service
 │       ├─ /files
-│       ├─ /forms           ?status=all|open|closed|archived
+│       ├─ /forms                           CFP + PORTAL forms (one list; purpose column)
 │       │   └─ /:formId                     Monaco MDX editor + versions + settings
-│       ├─ /evaluation      ?tab=to-review|my-reviews|progress
+│       ├─ /evaluation      ?tab=rounds|reviewers|assignments|progress|results
 │       ├─ /agenda          ?view=list|day|week|rooms|conflicts&day=YYYY-MM-DD
 │       ├─ /tasks           ?tab=all|speaker|submission
 │       │   └─ /:taskId                     definition + assignment progress
-│       ├─ /portal-forms    ?tab=speaker|submission
+│       ├─ /portal-forms                    legacy redirect → /forms
 │       ├─ /speakers        ?tab=all|confirmed|pending|declined
 │       │   └─ /:speakerId                  profile + participations + tasks + files
 │       ├─ /emails          ?tab=all|queued|sent|failed|reminders
@@ -423,7 +423,6 @@ the query param (§4).
 │   Agenda           │                                                                  │
 │  PORTAL            │                                                                  │
 │   Tasks            │                                                                  │
-│   Portal Forms     │                                                                  │
 │   Speakers         │                                                                  │
 │  COMMUNICATIONS    │                                                                  │
 │   Emails           │                                                                  │
@@ -461,11 +460,10 @@ Requests are FORM tasks with `<FileUpload>`; Email Templates/Themes are hard-cod
 | **Abstracts** (SUBMISSIONS) | `All` \| `Pending` \| `Accept Queue` \| `Accepted` \| `Decline Queue` \| `Declined` \| `Withdrawn` \| `Drafts` — with counts (img 19) | table (status badge, source form, title, track, format, speakers, rating avg, votes, notified, submitted at), search, bulk select → move to queues, "Notify" per queue, inline status popover (img 20), Add Abstract drawer (manual, img 23), CSV export, row → session detail w/ review panel |
 | **Sessions** (SUBMISSIONS) | `All` \| `Scheduled` \| `Unscheduled` \| `Service` | ACCEPTED + SERVICE sessions (the "is_abstract=false" half of the API model): times/room/track columns, visibility toggle (PUBLIC/PRIVATE), cover image, add SERVICE session (break/lunch), row → same session detail |
 | **Files** (SUBMISSIONS) | single table | every event File: name, kind, size, uploader, usage (headshot/slides/cover/logo), download; orphans flagged for GC |
-| **Forms** (COLLECT & REVIEW) | `All` \| `Open` \| `Closed` \| `Archived` (img 05) | CFP form cards (status badge, submissions/drafts counts, closesAt), Create/Copy-from, card → MDX editor (Monaco + preview + versions + settings) |
-| **Evaluation** (COLLECT & REVIEW) | `To Review` \| `My Reviews` \| `Progress` | To Review: pending sessions the caller hasn't voted on — quick Yes/Maybe/No + stars + comment inline. My Reviews: editable past votes. Progress: per-reviewer counts, per-session coverage (replaces SB's evaluation plans) |
+| **Forms** (COLLECT & REVIEW) | single table (no type tabs) | One list for CFP + PORTAL forms. Columns: name/slug, purpose badge (CFP / Portal · Speaker / Portal · Submission), status, share link (CFP public submit URL or portal home), submissions/drafts, closesAt. Create dialog picks purpose + target. Row → MDX editor. Legacy `/portal-forms` redirects here |
+| **Evaluation** (COLLECT & REVIEW) | `Rounds` \| `Reviewers` \| `Assignments` \| `Progress` \| `Results` | Form-backed rounds with immutable scorecards, round-specific reviewer pools, selected/track-filtered capped assignment, restricted blind reviewer queues, reminders, weighted aggregates, sorting, and CSV export |
 | **Agenda** (COLLECT & REVIEW) | `List` \| `Day` \| `Week` \| `Rooms` \| `Conflicts` (img 24) | List: sortable table. Day: day-picker + rooms×time grid, unscheduled rail, click-to-place drawer (drag later). Week: all event days side by side, compact. Rooms: grouped by room. Conflicts: computed room/speaker overlaps with jump-to links. Placement bumps icsSequence + calendar emails |
 | **Tasks** (PORTAL) | `All` \| `Speaker Tasks` \| `Submission Tasks` (img 25) | TaskDefinition cards (title, MANUAL/FORM badge, target chip, dueAt, linked form), Add Task, per-task assignment progress bar (n of m complete), task detail lists assignments with per-speaker status |
-| **Portal Forms** (PORTAL) | `Speaker Forms` \| `Submission Forms` | Every event starts with editable Speaker Profile and Session Materials forms. Organizers may add rare event-specific forms (travel, dietary, visa, release forms). Same MDX editor; forms can be linked from FORM tasks |
 | **Speakers** (PORTAL) | `All` \| `Confirmed` \| `Pending` \| `Declined` (derived confirmation) | table: name, email, company, headshot, sessions, linked-user badge, outstanding tasks count; detail: profile fields, participations w/ per-session confirmation, task assignments, files, email history |
 | **Emails** (COMMUNICATIONS) | `All` \| `Queued` \| `Sent` \| `Failed` \| `Reminders` | outbox log (kind, to, subject, status, attempts, ICS badge), retry-now on FAILED, message preview; Reminders tab: read-only description of the hard-coded schedule (task −3d/−1d/overdue, draft −3d/−1d) + next cron run |
 | **Settings** (CONFIGURE) | `Details` \| `Tracks` \| `Formats` \| `Rooms` \| `Team` (img 02-04) | Details: name, slug, type, website, location, timezone, starts/ends, description, logo upload, status. Tracks: name+color+order CRUD. Formats: name+default duration. Rooms: name+order. Team: org members + secret invite links (org-level, from akarso access-tab) |
@@ -662,10 +660,10 @@ generate a new version and reuse the same validation/preview pipeline unchanged.
 - Status transitions live in `lib/submissions.ts` as a single guarded function
   (validates legal edges of the state machine in database-schema-plan.md, stamps
   `submittedAt/decidedAt/withdrawnAt`).
-- Review = upsert on `review(sessionId, reviewerId)`: vote YES/MAYBE/NO, optional 1–5
-  rating, comment. Abstracts table aggregates per-session counts + avg rating in the
-  loader (one `db.query` with `with: { reviews: true }`, aggregate in JS — row counts
-  are small).
+- Each EVALUATION form is one round. Its newest `FormVersion` defines the scorecard;
+  submitted reviews pin the version through `FormResponse`. `Review` owns assignment and
+  recusal, while `EvaluationReviewer` scopes the reviewer pool to one round. Weighted
+  aggregates and progress are derived from submitted field values.
 - Accept/decline queues: bulk-select rows → move to `ACCEPT_QUEUE`/`DECLINE_QUEUE` →
   "Notify" action per queue: for each session set final status, enqueue
   `DECISION_ACCEPTED/DECLINED` (dedupeKey `decision:{sessionId}:{speakerId}`), stamp

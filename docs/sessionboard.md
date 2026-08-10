@@ -277,7 +277,7 @@ Admin Mode** when the user is also an organizer.
 | CRM, Marketing, Reports, Studio, and broad CMS | Outside the conference Program scope |
 | Invoices and Payments & Fees | Payments are an explicit non-goal |
 | Nested Event Settings sidebar | Five query-param tabs are enough for the MVP |
-| Enterprise evaluation configuration | Keep review rounds, scoped reviewers, and MDX scorecards without copying the full suite model |
+| Separate evaluation-plan tables | Reuse form versions for round scorecards and responses for reviewer answers |
 | Contact, Group, and Submission portal abstractions | OpenSession only needs Speaker and Submission targets |
 | Standalone File Requests | A portal form task with `FileUpload` preserves context |
 | User-created dashboards and AI dashboard prompts | Start with one reliable, curated overview |
@@ -293,11 +293,10 @@ OpenSession keeps SessionBoard's workflow but uses a smaller route map:
 | Abstracts | `/org/:orgId/e/:eventId/abstracts` |
 | Sessions | `/org/:orgId/e/:eventId/sessions` |
 | Files | `/org/:orgId/e/:eventId/files` |
-| Submission Forms | `/org/:orgId/e/:eventId/forms` |
+| Submission Forms + Portal Forms | `/org/:orgId/e/:eventId/forms` (one list; purpose column) |
 | Evaluation | `/org/:orgId/e/:eventId/evaluation` |
 | Agenda | `/org/:orgId/e/:eventId/agenda` |
 | Portal Tasks | `/org/:orgId/e/:eventId/tasks` |
-| Portal Forms | `/org/:orgId/e/:eventId/portal-forms` |
 | Speakers | `/org/:orgId/e/:eventId/speakers` |
 | Communications | `/org/:orgId/e/:eventId/emails` |
 | Event Settings | `/org/:orgId/e/:eventId/settings` |
