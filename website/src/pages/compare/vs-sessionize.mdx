@@ -1,0 +1,100 @@
+---
+title: OpenSession vs Sessionize comparison
+sidebarTitle: vs Sessionize
+sidebarToc: false
+description: Compare OpenSession and Sessionize across pricing, hosting, CFP workflows, evaluation, scheduling, speaker tools, and publishing.
+icon: lucide:scale
+---
+
+{/* Compares OpenSession with Sessionize for conference program management. */}
+
+# OpenSession vs Sessionize
+
+Sessionize is a mature, hosted platform for managing conference content. **OpenSession**
+covers the same core program workflow with open-source software that runs in your own
+Cloudflare account.
+
+## At a glance
+
+|                    | **OpenSession**                            | **Sessionize**                                                           |
+| ------------------ | ------------------------------------------ | ------------------------------------------------------------------------ |
+| **Price**          | Free under the MIT license                 | Free for eligible community events; $499 plus tax per professional event |
+| **Hosting**        | Your Cloudflare account                    | Managed SaaS                                                             |
+| **Source code**    | Open source                                | Closed source                                                            |
+| **Data ownership** | Your D1 database and R2 bucket             | Stored in Sessionize                                                     |
+| **Setup**          | Self-host and configure Google OAuth       | Create an account and activate an event                                  |
+| **Best fit**       | Teams that want control and no license fee | Teams that want a mature hosted product                                  |
+
+Sessionize also offers **bulk pricing** for organizations that run five or more events
+per year. Its free community license is limited to qualifying open, volunteer-run events.
+
+## Program workflow
+
+Both products support the main path from an open call for speakers to a published
+schedule. The main difference is **how much control** the organizer has over the software
+and infrastructure.
+
+| Capability            | **OpenSession**                                               | **Sessionize**                                                   |
+| --------------------- | ------------------------------------------------------------- | ---------------------------------------------------------------- |
+| **Call for speakers** | Versioned MDX forms with conditional fields                   | Hosted form builder with custom fields                           |
+| **Multiple speakers** | Co-speakers and linked profiles                               | Co-speakers and agent submissions                                |
+| **Evaluation**        | Yes, Maybe, No, ratings, comments, and form-backed rounds     | Stars, Yes/No, comparison mode, and anonymous evaluation         |
+| **Decisions**         | Accept and decline queues with explicit notification          | Status queues and a separate Inform Speakers workflow            |
+| **Schedule**          | Rooms, time slots, service sessions, and conflict warnings    | Drag-and-drop builder, service sessions, and collision detection |
+| **Speaker workspace** | Portal forms, tasks, files, and completion tracking           | Speaker Dashboard and shared speaker profiles                    |
+| **Email**             | Decision mail, group mail, reminders, outbox history, and ICS | Decision mail, group mailing, and email history                  |
+| **Publishing**        | Agenda and speaker embeds plus JSON, XML, and ICS feeds       | Embeds, JSON and XML data, and an attendee app                   |
+
+## Where OpenSession is stronger
+
+- **Source access:** inspect, change, and deploy the complete application.
+- **Data control:** event records and uploaded files remain in your Cloudflare account.
+- **Form versioning:** each submission stays attached to the exact MDX form version the
+  speaker completed.
+- **Speaker tasks:** assign form-backed or manual onboarding work and track completion.
+- **Predictable cost:** there is no per-event OpenSession license fee.
+
+OpenSession is a good fit when **ownership and customization** matter more than a managed
+service. It does require someone to deploy and maintain the Cloudflare resources.
+
+## Where Sessionize is stronger
+
+- **Managed service:** organizers can start without deploying infrastructure.
+- **Evaluation modes:** comparison ranking and anonymous review are built in.
+- **Attendee app:** Sessionize creates a mobile and web event app from the schedule.
+- **Audience feedback:** attendees can rate sessions through time-limited QR check-ins.
+- **Promotion:** social banner generation is included.
+- **Maturity:** the organizer workflow has been used across many event types for years.
+
+Sessionize is a good fit when **speed and managed operations** matter more than source
+access or direct database ownership.
+
+## Pricing details
+
+Sessionize lists a **$499 plus tax** professional license for one event occurrence. It
+provides a free license for eligible community events that are open, free to attend, and
+run by unpaid organizers. Discounts may be available for low-cost community events.
+
+OpenSession has **no software license fee**. Cloudflare usage can still create charges if
+an event exceeds the included service limits.
+
+## Choose the right tool
+
+Choose **OpenSession** when you want open-source software, direct control of event data,
+versioned MDX forms, and a reusable self-hosted system.
+
+Choose **Sessionize** when you want a hosted service, attendee-facing applications,
+audience feedback, social promotion tools, and no infrastructure work.
+
+<CardGroup cols={2}>
+  <Card title='Self-host OpenSession' icon='lucide:server' href='../guides/self-hosting.mdx'>
+    Deploy the full application to your Cloudflare account.
+  </Card>
+  <Card title='Sessionize pricing' icon='lucide:external-link' href='https://sessionize.com/pricing'>
+    Review the current professional and community license terms.
+  </Card>
+</CardGroup>
+
+Sources: [Sessionize pricing](https://sessionize.com/pricing),
+[platform overview](https://sessionize.com/playbook/platform-overview), and
+[community license terms](https://sessionize.com/playbook/community-license).
