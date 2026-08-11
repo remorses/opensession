@@ -40,9 +40,9 @@ the kimaki project mapping) and the sigillo org `opensessions` (the CLI has no
 
 `snapshot()` kept returning an old page's accessibility tree after full `goto()` navigations on the dashboard (showed the previous route's content). Verify page state with `page.evaluate(() => document.querySelector('main').innerText)` instead; the DOM is always correct.
 
-## safe-mdx supports JSX inside expressions after 1.11.5
+## safe-mdx supports JSX inside expressions
 
-The upstream fix supports `{cond && <TextField />}`, ternary JSX expressions, and callbacks such as `items.map(item => <TextField label={item.label} />)`. The website still uses `safe-mdx@1.11.5`, so use `<Show when={expr}>` until its dependency includes the fix. After that update, `<Show>` remains available but is not required.
+The website uses `safe-mdx@1.12.0`, which supports `{cond && <TextField />}`, ternary JSX expressions, and callbacks such as `items.map(item => <TextField label={item.label} />)`. `<Show when={expr}>` remains available but is not required.
 
 ## Cloudflare send_email builder supports attachments
 
