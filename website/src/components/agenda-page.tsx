@@ -11,9 +11,9 @@
 // with the format's default duration and sends wall-clock values to the server.
 'use client'
 
-import { useMemo, useState, useTransition } from 'react'
+import { useCallback, useMemo, useState, useTransition } from 'react'
 import { Link, router, useLoaderData } from 'spiceflow/react'
-import { CalendarDaysIcon, TriangleAlertIcon } from 'lucide-react'
+import { CalendarDaysIcon, GripVerticalIcon, TriangleAlertIcon } from 'lucide-react'
 import {
   applyAutoPlace,
   previewAutoPlace,
@@ -88,14 +88,98 @@ export function AgendaPage({ view }: { view: AgendaView }) {
   const [plan, setPlan] = useState<Awaited<ReturnType<typeof previewAutoPlace>> | null>(null)
   const [publicationOpen, setPublicationOpen] = useState(false)
   const [toolbarPending, startToolbarTransition] = useTransition()
+  // Drag-and-drop: local override of { roomId, dayKey, sortIndex } per session.
+  // Only populated when the user drags/moves a session. Cleared on save.
+  type PendingMove = { roomId: string; dayKey: string; sortIndex: number }
+  const [pendingMoves, setPendingMoves] = useState<Map<string, PendingMove>>(new Map())
+  const [savePending, startSaveTransition] = useTransition()
 
   const conflicting = useMemo(() => conflictSessionIds(conflicts), [conflicts])
-  const scheduled = sessions.filter(isScheduled)
-  const unscheduled = sessions.filter((row) => !isScheduled(row))
+  // Apply pending moves to determine scheduled/unscheduled lists
+  const sessionsWithMoves = useMemo(() => {
+    if (pendingMoves.size === 0) return sessions
+    return sessions.map((row) => {
+      const move = pendingMoves.get(row.id)
+      if (!move) return row
+      return { ...row, dayKey: move.dayKey, roomId: move.roomId, roomName: rooms.find((r) => r.id === move.roomId)?.name ?? row.roomName }
+    })
+  }, [sessions, pendingMoves, rooms])
+  const scheduled = sessionsWithMoves.filter(isScheduled)
+  const unscheduled = sessionsWithMoves.filter((row) => !isScheduled(row))
   const publication = summarizeProgramPublication(sessions)
   const acceptedContent = sessions.filter((row) => row.kind === 'CONTENT' && row.status === 'ACCEPTED')
   const acceptedUnscheduledCount = acceptedContent.filter((row) => !isScheduled(row)).length
   const privateAcceptedCount = acceptedContent.filter((row) => row.visibility === 'PRIVATE').length
+
+  async function saveAgendaMoves() {
+    if (pendingMoves.size === 0) return
+    // For each moved session, compute its new startMinute based on where
+    // it was dropped relative to its neighbors. Only the moved session's
+    // time changes; other sessions stay put.
+    const updates: Array<{ sessionId: string; dayKey: string; startMinute: number; durationMinutes: number; roomId: string }> = []
+
+    for (const [sessionId, move] of pendingMoves) {
+      const row = sessions.find((s) => s.id === sessionId)
+      if (!row) continue
+      const dur = durationOf(row)
+
+      // Find all unmoved sessions already in the target day, sorted by time
+      const neighbors = sessions
+        .filter((s) => {
+          if (s.id === sessionId) return false
+          const sMove = pendingMoves.get(s.id)
+          const sDay = sMove?.dayKey ?? s.dayKey
+          return sDay === move.dayKey && isScheduled(s)
+        })
+        .sort((a, b) => (a.startMinute ?? 0) - (b.startMinute ?? 0))
+
+      let startMinute: number
+      if (neighbors.length === 0) {
+        // Empty day: start at 9:00
+        startMinute = 9 * 60
+      } else {
+        // Find insertion point based on sortIndex
+        const insertIdx = neighbors.findIndex((n) => (n.startMinute ?? 0) > move.sortIndex)
+        if (insertIdx === 0) {
+          // Dropped before all neighbors: start at the first neighbor's time minus duration,
+          // but not before 8:00
+          startMinute = Math.max(8 * 60, (neighbors[0]!.startMinute ?? 9 * 60) - dur)
+        } else if (insertIdx === -1) {
+          // Dropped after all neighbors: start after the last one ends
+          const last = neighbors[neighbors.length - 1]!
+          startMinute = (last.startMinute ?? 0) + durationOf(last)
+        } else {
+          // Dropped between two neighbors: start after the one above ends
+          const above = neighbors[insertIdx - 1]!
+          startMinute = (above.startMinute ?? 0) + durationOf(above)
+        }
+      }
+
+      updates.push({ sessionId, dayKey: move.dayKey, startMinute, durationMinutes: dur, roomId: move.roomId })
+    }
+
+    let success = 0
+    for (const update of updates) {
+      const result = await runAction(
+        () => scheduleSession({
+          orgId: currentOrgId,
+          eventId: event.id,
+          sessionId: update.sessionId,
+          roomId: update.roomId,
+          dayKey: update.dayKey,
+          startMinute: update.startMinute,
+          durationMinutes: update.durationMinutes,
+          confirmConflicts: true,
+        }),
+        { fallbackError: 'Could not save agenda change' },
+      )
+      if (result) success++
+    }
+    if (success > 0) {
+      toast.success(`${success} session${success === 1 ? '' : 's'} updated.`, 'Agenda saved')
+      setPendingMoves(new Map())
+    }
+  }
 
   function openPlacement(partial: Partial<PlacementDraft> & { sessionId?: string }) {
     const sessionId = partial.sessionId ?? unscheduled[0]?.id ?? sessions[0]?.id ?? ''
@@ -128,28 +212,45 @@ export function AgendaPage({ view }: { view: AgendaView }) {
             </Button>
           ) : null}
           <div className="flex items-center gap-2" aria-label="Build agenda actions">
-            <Button
-              variant="outline"
-              disabled={toolbarPending || rooms.length === 0 || unscheduled.length === 0}
-              onClick={() => {
-                startToolbarTransition(async () => {
-                  const result = await runAction(
-                    () => previewAutoPlace({ orgId: currentOrgId, eventId: event.id }),
-                    { fallbackError: 'Could not build an automatic placement preview' },
-                  )
-                  if (result) setPlan(result)
-                })
-              }}
-            >
-              Auto-place
-            </Button>
-            <Button
-              disabled={rooms.length === 0 || sessions.length === 0}
-              onClick={() => openPlacement({})}
-            >
-              <CalendarDaysIcon />
-              Place
-            </Button>
+            {pendingMoves.size > 0 ? (
+              <>
+                <span className="text-sm text-muted-foreground">{pendingMoves.size} unsaved</span>
+                <Button variant="outline" onClick={() => setPendingMoves(new Map())}>
+                  Discard
+                </Button>
+                <Button
+                  disabled={savePending}
+                  onClick={() => startSaveTransition(() => saveAgendaMoves())}
+                >
+                  {savePending ? 'Saving…' : 'Save changes'}
+                </Button>
+              </>
+            ) : (
+              <>
+                <Button
+                  variant="outline"
+                  disabled={toolbarPending || rooms.length === 0 || unscheduled.length === 0}
+                  onClick={() => {
+                    startToolbarTransition(async () => {
+                      const result = await runAction(
+                        () => previewAutoPlace({ orgId: currentOrgId, eventId: event.id }),
+                        { fallbackError: 'Could not build an automatic placement preview' },
+                      )
+                      if (result) setPlan(result)
+                    })
+                  }}
+                >
+                  Auto-place
+                </Button>
+                <Button
+                  disabled={rooms.length === 0 || sessions.length === 0}
+                  onClick={() => openPlacement({})}
+                >
+                  <CalendarDaysIcon />
+                  Place
+                </Button>
+              </>
+            )}
           </div>
           <div className="border-l border-border pl-3">
             <Button
@@ -243,7 +344,16 @@ export function AgendaPage({ view }: { view: AgendaView }) {
           </Button>
         </EmptyState>
       ) : view === 'week' ? (
-        <WeekView days={days} sessions={scheduled} conflicting={conflicting} onPlace={openPlacement} />
+        <WeekView
+          days={days}
+          rooms={rooms}
+          sessions={sessionsWithMoves}
+          unscheduled={unscheduled}
+          conflicting={conflicting}
+          onPlace={openPlacement}
+          pendingMoves={pendingMoves}
+          onPendingMovesChange={setPendingMoves}
+        />
       ) : view === 'rooms' ? (
         <RoomsView rooms={rooms} sessions={sessions} conflicting={conflicting} onPlace={openPlacement} />
       ) : view === 'conflicts' ? (
@@ -574,58 +684,218 @@ function ListView({
   )
 }
 
+// ── Kanban week view (native HTML drag-and-drop, hover.dev pattern) ──
+// Columns = days. Cards drag freely between day columns to reschedule.
+// Each card shows room + time; a room dropdown lets users reassign rooms.
+// Drop indicators between cards highlight during drag.
+
+function getIndicators(columnId: string): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>(`[data-column="${columnId}"][data-before]`))
+}
+
+function getNearestIndicator(e: React.DragEvent, columnId: string) {
+  const indicators = getIndicators(columnId)
+  let closest = { offset: Number.NEGATIVE_INFINITY, element: indicators[indicators.length - 1]! }
+  for (const indicator of indicators) {
+    const box = indicator.getBoundingClientRect()
+    const offset = e.clientY - (box.top + box.height / 2)
+    if (offset < 0 && offset > closest.offset) closest = { offset, element: indicator }
+  }
+  return closest
+}
+
+function clearHighlights(columnId?: string) {
+  const selector = columnId ? `[data-column="${columnId}"][data-before]` : '[data-before]'
+  document.querySelectorAll<HTMLElement>(selector).forEach((el) => { el.style.opacity = '0' })
+}
+
+function highlightIndicator(e: React.DragEvent, columnId: string) {
+  clearHighlights(columnId)
+  const { element } = getNearestIndicator(e, columnId)
+  if (element) element.style.opacity = '1'
+}
+
+function DropIndicator({ beforeId, columnId }: { beforeId: string; columnId: string }) {
+  return (
+    <div
+      data-before={beforeId}
+      data-column={columnId}
+      className="my-0.5 h-0.5 w-full rounded-full bg-primary opacity-0 transition-opacity"
+    />
+  )
+}
+
 function WeekView({
   days,
+  rooms,
   sessions,
+  unscheduled,
   conflicting,
   onPlace,
+  pendingMoves,
+  onPendingMovesChange,
 }: {
   days: string[]
+  rooms: { id: string; name: string }[]
   sessions: AgendaRow[]
+  unscheduled: AgendaRow[]
   conflicting: Set<string>
   onPlace: (partial: Partial<PlacementDraft> & { sessionId?: string }) => void
+  pendingMoves: Map<string, { roomId: string; dayKey: string; sortIndex: number }>
+  onPendingMovesChange: (moves: Map<string, { roomId: string; dayKey: string; sortIndex: number }>) => void
 }) {
+  // Sessions grouped by day column
+  const dayItems = useMemo(() => {
+    const map = new Map<string, AgendaRow[]>()
+    for (const day of days) map.set(day, [])
+    for (const row of sessions) {
+      if (!row.dayKey || !map.has(row.dayKey)) continue
+      if (!isScheduled(row)) continue
+      map.get(row.dayKey)!.push(row)
+    }
+    for (const [, items] of map) {
+      items.sort((a, b) => {
+        const aMove = pendingMoves.get(a.id)
+        const bMove = pendingMoves.get(b.id)
+        const aKey = aMove ? aMove.sortIndex : (a.startMinute ?? 0)
+        const bKey = bMove ? bMove.sortIndex : (b.startMinute ?? 0)
+        return aKey - bKey
+      })
+    }
+    return map
+  }, [days, sessions, pendingMoves])
+
+  const handleDragStart = useCallback((e: React.DragEvent, sessionId: string) => {
+    e.dataTransfer.setData('text/plain', sessionId)
+    e.dataTransfer.effectAllowed = 'move'
+  }, [])
+
+  const handleDragOver = useCallback((e: React.DragEvent, columnId: string) => {
+    e.preventDefault()
+    e.dataTransfer.dropEffect = 'move'
+    highlightIndicator(e, columnId)
+  }, [])
+
+  const handleDragLeave = useCallback((_e: React.DragEvent, columnId: string) => {
+    clearHighlights(columnId)
+  }, [])
+
+  const handleDrop = useCallback((e: React.DragEvent, targetDay: string) => {
+    e.preventDefault()
+    clearHighlights()
+    const sessionId = e.dataTransfer.getData('text/plain')
+    if (!sessionId) return
+
+    const { element } = getNearestIndicator(e, targetDay)
+    const beforeId = element?.getAttribute('data-before') ?? '-1'
+    const items = dayItems.get(targetDay) ?? []
+
+    let sortIndex: number
+    if (beforeId === '-1') {
+      const last = items[items.length - 1]
+      sortIndex = last ? (last.startMinute ?? 0) + durationOf(last) + 1 : 0
+    } else {
+      const targetIdx = items.findIndex((row) => row.id === beforeId)
+      if (targetIdx <= 0) {
+        sortIndex = (items[0]?.startMinute ?? 0) - 1
+      } else {
+        const prev = items[targetIdx - 1]!
+        const prevKey = pendingMoves.get(prev.id)?.sortIndex ?? (prev.startMinute ?? 0)
+        const nextKey = pendingMoves.get(beforeId)?.sortIndex ?? (items[targetIdx]?.startMinute ?? 0)
+        sortIndex = (prevKey + nextKey) / 2
+      }
+    }
+
+    // Keep the session's current room (or first room as fallback)
+    const row = sessions.find((s) => s.id === sessionId)
+    const existingMove = pendingMoves.get(sessionId)
+    const roomId = existingMove?.roomId ?? row?.roomId ?? rooms[0]?.id ?? ''
+
+    const next = new Map(pendingMoves)
+    next.set(sessionId, { roomId, dayKey: targetDay, sortIndex })
+    onPendingMovesChange(next)
+  }, [dayItems, sessions, rooms, pendingMoves, onPendingMovesChange])
+
+  const handleRoomChange = useCallback((sessionId: string, newRoomId: string) => {
+    const row = sessions.find((s) => s.id === sessionId)
+    const existing = pendingMoves.get(sessionId)
+    const next = new Map(pendingMoves)
+    next.set(sessionId, {
+      roomId: newRoomId,
+      dayKey: existing?.dayKey ?? row?.dayKey ?? days[0] ?? '',
+      sortIndex: existing?.sortIndex ?? (row?.startMinute ?? 0),
+    })
+    onPendingMovesChange(next)
+  }, [sessions, days, pendingMoves, onPendingMovesChange])
+
   return (
-    <div className="flex gap-3 overflow-x-auto pb-2">
-      {days.map((day) => {
-        const items = sessions
-          .filter((row) => row.dayKey === day)
-          .sort((a, b) => (a.startMinute ?? 0) - (b.startMinute ?? 0))
-        return (
-          <div key={day} className="flex w-56 shrink-0 flex-col gap-2">
-            <div className="flex items-baseline justify-between border-b border-border pb-1.5">
-              <span className="text-sm font-medium">{formatDayLabel(day)}</span>
-              <span className="text-xs tabular-nums text-muted-foreground">{items.length}</span>
+    <div className="flex flex-col gap-4">
+      <div className="flex items-stretch gap-3 overflow-x-auto pb-2">
+        {days.map((day) => {
+          const items = dayItems.get(day) ?? []
+          return (
+            <div key={day} className="flex w-56 shrink-0 flex-col gap-1">
+              <div className="flex items-baseline justify-between border-b border-border pb-1.5">
+                <span className="text-sm font-medium">{formatDayLabel(day)}</span>
+                <span className="text-xs tabular-nums text-muted-foreground">{items.length}</span>
+              </div>
+              <div
+                className="flex flex-1 flex-col transition-colors"
+                onDragOver={(e) => handleDragOver(e, day)}
+                onDragLeave={(e) => handleDragLeave(e, day)}
+                onDrop={(e) => handleDrop(e, day)}
+              >
+                {items.map((row) => {
+                  const move = pendingMoves.get(row.id)
+                  const currentRoomId = move?.roomId ?? row.roomId ?? ''
+                  const roomName = rooms.find((r) => r.id === currentRoomId)?.name ?? row.roomName
+                  return (
+                    <div key={row.id}>
+                      <DropIndicator beforeId={row.id} columnId={day} />
+                      <button
+                        type="button"
+                        draggable
+                        onDragStart={(e) => handleDragStart(e, row.id)}
+                        onClick={() => onPlace({ sessionId: row.id })}
+                        className={cn(
+                          'flex w-full cursor-grab items-start gap-1.5 rounded border px-1.5 py-1 text-left transition-colors active:cursor-grabbing hover:bg-accent/60',
+                          conflicting.has(row.id) ? 'border-destructive/60' : 'border-border',
+                          pendingMoves.has(row.id) && 'ring-2 ring-primary/30',
+                        )}
+                      >
+                        <GripVerticalIcon className="mt-0.5 size-3 shrink-0 text-muted-foreground/40" />
+                        <div className="flex min-w-0 flex-1 flex-col">
+                          <span className="truncate text-xs font-medium leading-tight">{row.title}</span>
+                          <span className="truncate text-[11px] tabular-nums text-muted-foreground">
+                            {row.timeLabel} · {roomName}
+                          </span>
+                        </div>
+                        {row.trackColor ? (
+                          <span className="mt-0.5 size-2 shrink-0 rounded-full" style={{ backgroundColor: row.trackColor }} />
+                        ) : null}
+                      </button>
+                    </div>
+                  )
+                })}
+                <DropIndicator beforeId="-1" columnId={day} />
+              </div>
             </div>
-            {items.length === 0 ? (
-              <p className="text-xs text-muted-foreground">Nothing scheduled.</p>
-            ) : (
-              items.map((row) => (
-                <button
-                  key={row.id}
-                  type="button"
-                  onClick={() => onPlace({ sessionId: row.id })}
-                  style={{
-                    borderInlineStartColor: conflicting.has(row.id)
-                      ? 'var(--destructive)'
-                      : (row.trackColor ?? undefined),
-                  }}
-                  className={cn(
-                    'flex flex-col items-start gap-0.5 rounded-md border border-s-4 px-2 py-1.5 text-left transition-colors hover:bg-accent/60',
-                    conflicting.has(row.id) ? 'border-destructive/60' : 'border-border',
-                  )}
-                >
-                  <span className="w-full truncate text-xs tabular-nums text-muted-foreground">
-                    {row.timeLabel} · {row.roomName}
-                  </span>
-                  <span className="w-full truncate text-sm font-medium">{row.title}</span>
-                  {row.trackName ? <span className="w-full truncate text-xs text-muted-foreground">{row.trackName}</span> : null}
-                </button>
-              ))
-            )}
+          )
+        })}
+      </div>
+
+      {unscheduled.length > 0 ? (
+        <div className="flex flex-col gap-2">
+          <span className="text-sm font-medium">Unscheduled ({unscheduled.length})</span>
+          <div className="flex flex-wrap gap-2">
+            {unscheduled.map((row) => (
+              <Button key={row.id} size="sm" variant="outline" onClick={() => onPlace({ sessionId: row.id })}>
+                {row.title}
+              </Button>
+            ))}
           </div>
-        )
-      })}
+        </div>
+      ) : null}
     </div>
   )
 }
