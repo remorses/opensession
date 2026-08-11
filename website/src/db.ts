@@ -92,6 +92,23 @@ export function getBaseUrl(): string {
   return env.APP_URL
 }
 
+function base64Url(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+    .replaceAll('+', '-')
+    .replaceAll('/', '_')
+    .replaceAll('=', '')
+}
+
+export function generateApiKeySecret(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32))
+  return `osk_${base64Url(bytes)}`
+}
+
+export async function hashApiKeySecret(secret: string): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(secret))
+  return base64Url(new Uint8Array(digest))
+}
+
 // ── Session helpers ─────────────────────────────────────────────────
 
 export type Session = {

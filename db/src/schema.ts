@@ -254,6 +254,51 @@ export const event = s.sqliteTable('event', {
   s.check('event_status_check', orm.sql`status IN ('DRAFT', 'ACTIVE', 'ARCHIVED')`),
 ])
 
+// Event-scoped API credentials. The raw secret is shown once; only its
+// SHA-256 hash and display prefix are stored.
+export const apiKey = s.sqliteTable('api_key', {
+  id: s.text('id').primaryKey().notNull().$defaultFn(() => ulid()),
+  orgId: s.text('org_id').notNull(),
+  eventId: s.text('event_id').notNull(),
+  name: s.text('name').notNull(),
+  keyHash: s.text('key_hash').notNull().unique(),
+  keyPrefix: s.text('key_prefix').notNull(),
+  createdByUserId: s.text('created_by_user_id').references(() => user.id, { onDelete: 'set null' }),
+  lastUsedAt: epochMs('last_used_at'),
+  expiresAt: epochMs('expires_at'),
+  revokedAt: epochMs('revoked_at'),
+  createdAt: epochMs('created_at').notNull().$defaultFn(() => Date.now()),
+}, (table) => [
+  s.index('api_key_event_id_idx').on(table.eventId),
+  s.index('api_key_org_id_idx').on(table.orgId),
+  s.index('api_key_created_by_idx').on(table.createdByUserId),
+  s.foreignKey({
+    columns: [table.eventId, table.orgId],
+    foreignColumns: [event.id, event.orgId],
+    name: 'api_key_event_org_fk',
+  }).onDelete('cascade'),
+])
+
+export const apiKeyScope = s.sqliteTable('api_key_scope', {
+  apiKeyId: s.text('api_key_id').notNull().references(() => apiKey.id, { onDelete: 'cascade' }),
+  scope: s.text('scope', {
+    enum: [
+      'read:events',
+      'write:events',
+      'read:sessions',
+      'write:sessions',
+      'read:speakers',
+      'write:speakers',
+      'read:metadata',
+      'write:metadata',
+      'read:reviews',
+    ],
+  }).notNull(),
+}, (table) => [
+  s.primaryKey({ columns: [table.apiKeyId, table.scope] }),
+  s.check('api_key_scope_check', orm.sql`scope IN ('read:events', 'write:events', 'read:sessions', 'write:sessions', 'read:speakers', 'write:speakers', 'read:metadata', 'write:metadata', 'read:reviews')`),
+])
+
 // ── Event library (Settings > Library): tracks, formats, rooms ──────
 
 export const track = s.sqliteTable('track', {
@@ -837,7 +882,7 @@ export const relations = orm.defineRelations(
   {
     user, session, account, verification, org, orgMember, orgInvitation,
     orgContact, contactTag, contactTagLink, contactSegment, contactActivity,
-    event, track, format, room, form, evaluationReviewer, formVersion, speaker, eventSession,
+    event, apiKey, apiKeyScope, track, format, room, form, evaluationReviewer, formVersion, speaker, eventSession,
     sessionParticipant, formResponse, formFieldValue, review, taskDefinition,
     taskAssignment, taskComment, sessionRevision, file, emailMessage,
   },
@@ -856,6 +901,7 @@ export const relations = orm.defineRelations(
       taskComments: r.many.taskComment(),
       sessionRevisions: r.many.sessionRevision(),
       contactActivities: r.many.contactActivity(),
+      apiKeys: r.many.apiKey(),
     },
     session: {
       user: r.one.user({ from: r.session.userId, to: r.user.id }),
@@ -873,6 +919,7 @@ export const relations = orm.defineRelations(
         to: r.user.id.through(r.orgMember.userId),
       }),
       events: r.many.event(),
+      apiKeys: r.many.apiKey(),
       contacts: r.many.orgContact(),
       contactTags: r.many.contactTag(),
       contactSegments: r.many.contactSegment(),
@@ -932,6 +979,16 @@ export const relations = orm.defineRelations(
       files: r.many.file({ from: r.event.id, to: r.file.eventId }),
       emailMessages: r.many.emailMessage(),
       evaluationReviewers: r.many.evaluationReviewer(),
+      apiKeys: r.many.apiKey(),
+    },
+    apiKey: {
+      org: r.one.org({ from: r.apiKey.orgId, to: r.org.orgId }),
+      event: r.one.event({ from: r.apiKey.eventId, to: r.event.id }),
+      creator: r.one.user({ from: r.apiKey.createdByUserId, to: r.user.id }),
+      scopes: r.many.apiKeyScope(),
+    },
+    apiKeyScope: {
+      apiKey: r.one.apiKey({ from: r.apiKeyScope.apiKeyId, to: r.apiKey.id }),
     },
     track: {
       event: r.one.event({ from: r.track.eventId, to: r.event.id }),

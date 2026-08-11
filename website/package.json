@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tuistory -- sigillo run -c dev -- vite dev",
+    "openapi": "bun scripts/generate-openapi.ts",
+    "prebuild": "pnpm openapi",
     "build": "tsc && vite build",
     "typecheck": "tsc",
     "test:workerd": "vitest run --config vitest.workerd.config.ts",

@@ -1,5 +1,5 @@
 // Event Settings page (/org/:orgId/e/:eventId/settings) — tabs driven by the
-// ?tab= query param (details | tracks | formats | rooms | team). Details is a
+// ?tab= query param (details | tracks | formats | rooms | team | api). Details is a
 // plain form posting to the updateEvent action; tracks/formats/rooms are
 // Frame+Table CRUD lists (access-tab pattern); team links to the org members
 // page (access is org-level, no per-event roles).
@@ -7,26 +7,36 @@
 
 import { useActionState, useState } from 'react'
 import { ErrorBoundary, Link, router, useLoaderData } from 'spiceflow/react'
-import { TrashIcon, UsersIcon } from 'lucide-react'
+import { ExternalLinkIcon, KeyRoundIcon, TrashIcon, UsersIcon } from 'lucide-react'
 import {
+  createApiKey,
   createFormat,
   createRoom,
   createTrack,
   deleteFormat,
   deleteRoom,
   deleteTrack,
+  revokeApiKey,
   updateEvent,
 } from '../actions.tsx'
-import { nextTrackColor } from '../lib/utils.ts'
-import { cn } from '../lib/utils.ts'
+import { API_SCOPES, type ApiScope } from '../api-schemas.ts'
+import { cn, formatDateTimeUTC, nextTrackColor } from '../lib/utils.ts'
 import { toZonedSlot } from '../lib/conflicts.ts'
 import { Button } from './ui/button.tsx'
+import {
+  Dialog,
+  DialogDescription,
+  DialogHeader,
+  DialogPanel,
+  DialogPopup,
+  DialogTitle,
+} from './ui/dialog.tsx'
 import { Frame } from './ui/frame.tsx'
 import { Input, NativeSelect, Textarea, TimezoneSelect } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
 import { toastActionError } from './ui/toast.tsx'
 
-export type SettingsTab = 'details' | 'tracks' | 'formats' | 'rooms' | 'team'
+export type SettingsTab = 'details' | 'tracks' | 'formats' | 'rooms' | 'team' | 'api'
 
 const tabs: { value: SettingsTab; label: string }[] = [
   { value: 'details', label: 'Details' },
@@ -34,11 +44,13 @@ const tabs: { value: SettingsTab; label: string }[] = [
   { value: 'formats', label: 'Formats' },
   { value: 'rooms', label: 'Rooms' },
   { value: 'team', label: 'Team' },
+  { value: 'api', label: 'API' },
 ]
 
 export function EventSettings({ tab }: { tab: SettingsTab }) {
-  const { currentOrgId } = useLoaderData('/org/:orgId/*')
+  const { currentOrgId, role } = useLoaderData('/org/:orgId/*')
   const { event, tracks, formats, rooms } = useLoaderData('/org/:orgId/e/:eventId/*')
+  const { apiKeys } = useLoaderData('/org/:orgId/e/:eventId/settings')
 
   return (
     <div className="flex flex-col gap-5">
@@ -76,6 +88,7 @@ export function EventSettings({ tab }: { tab: SettingsTab }) {
       {tab === 'formats' ? <FormatsTab orgId={currentOrgId} eventId={event.id} formats={formats} /> : null}
       {tab === 'rooms' ? <RoomsTab orgId={currentOrgId} eventId={event.id} rooms={rooms} /> : null}
       {tab === 'team' ? <TeamTab orgId={currentOrgId} /> : null}
+      {tab === 'api' ? <ApiTab orgId={currentOrgId} eventId={event.id} admin={role === 'admin'} apiKeys={apiKeys} /> : null}
     </div>
   )
 }
@@ -478,6 +491,147 @@ function TeamTab({ orgId }: { orgId: string }) {
         <UsersIcon />
         Manage members
       </Button>
+    </div>
+  )
+}
+
+// ── API keys ────────────────────────────────────────────────────────
+
+type ApiKeyRow = {
+  id: string
+  name: string
+  keyPrefix: string
+  scopes: ApiScope[]
+  lastUsedAt: number | null
+  expiresAt: number | null
+  revokedAt: number | null
+  status: 'ACTIVE' | 'EXPIRED' | 'REVOKED'
+  createdAt: number
+}
+
+function ApiTab({ orgId, eventId, admin, apiKeys }: {
+  orgId: string
+  eventId: string
+  admin: boolean
+  apiKeys: ApiKeyRow[]
+}) {
+  const [createdSecret, setCreatedSecret] = useState<string | null>(null)
+  const [pendingId, setPendingId] = useState<string | null>(null)
+
+  return (
+    <div className="flex max-w-4xl flex-col gap-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex max-w-2xl flex-col gap-1">
+          <h2 className="font-medium">Event API keys</h2>
+          <p className="text-sm text-muted-foreground">
+            Use event-scoped keys to manage sessions, speakers, reviews, and schedule data from code.
+          </p>
+        </div>
+        <Button variant="outline" render={<Link href={router.href('/docs/api')} target="_blank" />}>
+          <ExternalLinkIcon />
+          API reference
+        </Button>
+      </div>
+
+      {admin ? (
+        <ErrorBoundary below fallback={<ErrorBoundary.ErrorMessage className="text-sm text-destructive" />}>
+          <form
+            className="flex flex-col gap-3 rounded-xl border border-border p-4"
+            action={async (formData: FormData) => {
+              const result = await createApiKey({
+                orgId,
+                eventId,
+                name: String(formData.get('name') ?? '').trim(),
+                scopes: formData.getAll('scope').map(String) as ApiScope[],
+              })
+              setCreatedSecret(result.secret)
+            }}
+          >
+            <div className="flex flex-wrap items-end gap-2">
+              <FieldLabel className="min-w-64 grow">
+                Key name
+                <Input required name="name" maxLength={80} placeholder="Website integration" />
+              </FieldLabel>
+              <Button type="submit">
+                <KeyRoundIcon />
+                Create key
+              </Button>
+            </div>
+            <fieldset className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+              <legend className="pb-2 text-sm font-medium">Scopes</legend>
+              {API_SCOPES.map((scope) => (
+                <label key={scope} className="flex items-center gap-2 text-sm">
+                  <input defaultChecked name="scope" type="checkbox" value={scope} className="size-4 accent-primary" />
+                  <span className="font-mono text-xs">{scope}</span>
+                </label>
+              ))}
+            </fieldset>
+          </form>
+        </ErrorBoundary>
+      ) : (
+        <p className="text-sm text-muted-foreground">Only organization admins can create or revoke API keys.</p>
+      )}
+
+      {apiKeys.length === 0 ? (
+        <LibraryEmpty>No API keys yet.</LibraryEmpty>
+      ) : (
+        <Frame>
+          <Table>
+            <TableHeader>
+              <TableRow className="hover:bg-transparent">
+                <TableHead>Name</TableHead>
+                <TableHead>Key</TableHead>
+                <TableHead>Scopes</TableHead>
+                <TableHead>Last used</TableHead>
+                <TableHead>Status</TableHead>
+                <TableHead className="w-14" />
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {apiKeys.map((key) => {
+                const active = key.status === 'ACTIVE'
+                return (
+                  <TableRow key={key.id}>
+                    <TableCell className="font-medium">{key.name}</TableCell>
+                    <TableCell className="font-mono text-xs">{key.keyPrefix}…</TableCell>
+                    <TableCell className="max-w-72 text-xs text-muted-foreground">{key.scopes.join(', ')}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">
+                      {key.lastUsedAt ? formatDateTimeUTC(key.lastUsedAt) : 'Never'}
+                    </TableCell>
+                    <TableCell className="text-xs">{key.status === 'ACTIVE' ? 'Active' : key.status === 'EXPIRED' ? 'Expired' : 'Revoked'}</TableCell>
+                    <TableCell className="p-0">
+                      {admin && active ? (
+                        <DeleteRowButton
+                          label={`Revoke API key ${key.name}`}
+                          pending={pendingId === key.id}
+                          onClick={() => {
+                            setPendingId(key.id)
+                            void revokeApiKey({ orgId, eventId, apiKeyId: key.id })
+                              .catch((error) => toastActionError(error, 'Failed to revoke API key'))
+                              .finally(() => setPendingId(null))
+                          }}
+                        />
+                      ) : null}
+                    </TableCell>
+                  </TableRow>
+                )
+              })}
+            </TableBody>
+          </Table>
+        </Frame>
+      )}
+
+      <Dialog open={createdSecret != null} onOpenChange={(open) => { if (!open) setCreatedSecret(null) }}>
+        <DialogPopup>
+          <DialogHeader>
+            <DialogTitle>API key created</DialogTitle>
+            <DialogDescription>Copy this key now. OpenSession stores only its hash, so it cannot be shown again.</DialogDescription>
+          </DialogHeader>
+          <DialogPanel>
+            <Input readOnly value={createdSecret ?? ''} className="font-mono text-xs" onFocus={(event) => event.currentTarget.select()} />
+          </DialogPanel>
+        </DialogPopup>
+      </Dialog>
     </div>
   )
 }

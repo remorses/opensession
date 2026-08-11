@@ -20,8 +20,11 @@ import {
   requireOrgAccess,
   requireAdminRole,
   ensurePersonalOrg,
+  generateApiKeySecret,
   getDb,
+  hashApiKeySecret,
 } from './db.ts'
+import { API_SCOPES, ApiScopeSchema } from './api-schemas.ts'
 import { collectFields } from './forms/collect-fields.ts'
 import {
   starterCfpTemplate,
@@ -578,6 +581,67 @@ export async function updateEvent(input: z.input<typeof updateEventSchema>) {
     throw new Error(`The slug "${parsed.slug}" is already taken. Pick another one.`)
   }
   return { eventId: parsed.eventId }
+}
+
+const createApiKeySchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  name: z.string().trim().min(1).max(80),
+  scopes: z.array(ApiScopeSchema).min(1).max(API_SCOPES.length),
+})
+
+export async function createApiKey(input: z.input<typeof createApiKeySchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = createApiKeySchema.parse(input)
+  const { db, session } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  await requireAdminRole(session.userId, parsed.orgId)
+  const secret = generateApiKeySecret()
+  const id = ulid()
+  const createdAt = Date.now()
+  await db.batch([
+    db.insert(schema.apiKey).values({
+      id,
+      orgId: parsed.orgId,
+      eventId: parsed.eventId,
+      name: parsed.name,
+      keyHash: await hashApiKeySecret(secret),
+      keyPrefix: secret.slice(0, 12),
+      createdByUserId: session.userId,
+      createdAt,
+    }),
+    ...parsed.scopes.map((scope) => db.insert(schema.apiKeyScope).values({ apiKeyId: id, scope })),
+  ] as [any, ...any[]])
+  return { id, name: parsed.name, secret, scopes: parsed.scopes, createdAt }
+}
+
+const revokeApiKeySchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  apiKeyId: z.string().min(1),
+})
+
+export async function revokeApiKey(input: z.input<typeof revokeApiKeySchema>) {
+  const actionRequest = getActionRequest()
+  const parsed = revokeApiKeySchema.parse(input)
+  const { db, session } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  await requireAdminRole(session.userId, parsed.orgId)
+  const key = await db.query.apiKey.findFirst({
+    where: { id: parsed.apiKeyId, eventId: parsed.eventId, orgId: parsed.orgId },
+  })
+  if (!key) throw new Error('API key not found')
+  await db.update(schema.apiKey)
+    .set({ revokedAt: Date.now() })
+    .where(orm.eq(schema.apiKey.id, parsed.apiKeyId))
+    .limit(1)
+  return { apiKeyId: parsed.apiKeyId }
 }
 
 // ── Library: tracks / formats / rooms ───────────────────────────────

@@ -11,13 +11,9 @@
   "icons": { "library": "lucide" },
   // App routes served by the same worker — the broken-link checker only
   // sees .mdx pages, so anything the landing page links to must be here.
-  "knownPaths": ["/login", "/login/*", "/dashboard", "/invite/*", "/org", "/org/*", "/submit/*", "/portal/*", "/embed/*", "/public/*", "/api/*", "/files/*"],
+  "knownPaths": ["/login", "/login/*", "/dashboard", "/invite/*", "/org", "/org/*", "/submit/*", "/portal/*", "/embed/*", "/public/*", "/api/*", "/files/*", "/docs/api", "/docs/api/*"],
   "navbar": {
     "links": [
-      {
-        "label": "GitHub",
-        "href": "https://github.com/remorses/opensession"
-      },
       {
         "label": "Dashboard",
         "href": "/dashboard"
@@ -30,15 +26,6 @@
     }
   },
   "navigation": {
-    "global": {
-      "anchors": [
-        {
-          "anchor": "GitHub",
-          "href": "https://github.com/remorses/opensession",
-          "icon": "lucide:github"
-        }
-      ]
-    },
     "tabs": [
       {
         "tab": "Home",
@@ -48,16 +35,10 @@
             "group": "Overview",
             "icon": "lucide:rocket",
             "pages": ["index"]
-          }
-        ]
-      },
-      {
-        "tab": "Features",
-        "icon": "lucide:layers",
-        "groups": [
+          },
           {
-            "group": "Core Features",
-            "icon": "lucide:sparkles",
+            "group": "Features",
+            "icon": "lucide:layers",
             "pages": [
               "features/call-for-papers",
               "features/abstract-review",
@@ -65,30 +46,32 @@
               "features/speaker-portal",
               "features/emails-and-calendar"
             ]
-          }
-        ]
-      },
-      {
-        "tab": "Compare",
-        "icon": "lucide:scale",
-        "groups": [
+          },
           {
-            "group": "Alternatives",
-            "icon": "lucide:arrow-left-right",
-            "pages": ["compare/vs-sessionboard"]
-          }
-        ]
-      },
-      {
-        "tab": "Guides",
-        "icon": "lucide:book-open",
-        "groups": [
+            "group": "Compare",
+            "icon": "lucide:scale",
+            "pages": [
+              "compare/vs-sessionboard",
+              "compare/vs-sessionize"
+            ]
+          },
           {
-            "group": "Setup",
-            "icon": "lucide:wrench",
+            "group": "Guides",
+            "icon": "lucide:book-open",
             "pages": ["guides/self-hosting"]
           }
         ]
+      },
+      {
+        "tab": "API Reference",
+        "icon": "lucide:code",
+        "openapi": "openapi.json",
+        "base": "/docs/api"
+      },
+      {
+        "tab": "GitHub",
+        "icon": "lucide:github",
+        "href": "https://github.com/remorses/opensession"
       }
     ]
   }

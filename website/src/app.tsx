@@ -94,6 +94,7 @@ import {
 } from './lib/public-program.ts'
 import { buildIcsCalendar } from './lib/ics.ts'
 import { contactMetrics } from './lib/contact-crm.ts'
+import { apiApp } from './api.ts'
 
 // ── Schemas ─────────────────────────────────────────────────────────
 
@@ -2188,14 +2189,33 @@ export const app = new Spiceflow()
     },
   })
 
-  // ── Event settings (?tab=details|tracks|formats|rooms|team) ───────
+  // ── Event settings (?tab=details|tracks|formats|rooms|team|api) ───
+
+  .loader('/org/:orgId/e/:eventId/settings', async ({ params }) => {
+    const apiKeys = await getDb().query.apiKey.findMany({
+      where: { eventId: params.eventId, orgId: params.orgId },
+      with: { scopes: { orderBy: { scope: 'asc' } } },
+      orderBy: { createdAt: 'desc' },
+    })
+    return {
+      apiKeys: apiKeys.map(({ keyHash: _keyHash, scopes, ...key }) => ({
+        ...key,
+        scopes: scopes.map((row) => row.scope),
+        status: key.revokedAt != null
+          ? 'REVOKED' as const
+          : key.expiresAt != null && key.expiresAt <= Date.now()
+            ? 'EXPIRED' as const
+            : 'ACTIVE' as const,
+      })),
+    }
+  })
 
   .page({
     path: '/org/:orgId/e/:eventId/settings',
     query: z.object({
       // NOTE: spiceflow query validation does not apply zod .default() to the
       // parsed handler value — normalize undefined in the handler instead.
-      tab: z.enum(['details', 'tracks', 'formats', 'rooms', 'team']).optional(),
+      tab: z.enum(['details', 'tracks', 'formats', 'rooms', 'team', 'api']).optional(),
     }),
     handler: async ({ query }) => {
       const { EventSettings } = await import('./components/event-settings.tsx')
@@ -2233,6 +2253,9 @@ export const app = new Spiceflow()
     const { AccessTab } = await import('./components/access-tab.tsx')
     return <AccessTab />
   })
+
+  // Authenticated public API and generated OpenAPI document.
+  .use(apiApp)
 
   // Mount holocron last — it serves the landing page and docs pages
   .use(holocronApp)
@@ -2888,7 +2911,7 @@ export type App = typeof app
 declare module 'spiceflow/react' {
   interface SpiceflowRegister {
     app: typeof app
-    knownPaths: '/' | '/#features'
+    knownPaths: '/' | '/#features' | '/docs/api' | '/docs/api/*'
   }
 }
 
@@ -2897,6 +2920,9 @@ declare module 'spiceflow/react' {
 // is what Cloudflare invokes for the wrangler.jsonc cron trigger.
 export default {
   async fetch(request: Request): Promise<Response> {
+    if (new URL(request.url).pathname === '/api/v1/openapi.json') {
+      return apiApp.handle(request)
+    }
     return app.handle(request)
   },
   async scheduled(
