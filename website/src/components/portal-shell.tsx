@@ -229,7 +229,7 @@ export function PortalHomePage() {
         <EmptyState
           icon={<FileTextIcon className="size-5 text-muted-foreground" />}
           title="No speaker profile yet"
-          description="Submit a talk through the event CFP, or wait until an organizer adds you as a co-speaker. Your verified Google email must match."
+          description="Submit a talk through the event CFP, or wait until an organizer adds you as a co-speaker. Your verified account email must match."
         >
           {data.openCfp ? (
             <Button render={<Link href={router.href('/submit/:eventSlug/:formSlug', { eventSlug: data.event.slug, formSlug: data.openCfp.slug })} />}>

@@ -21,8 +21,8 @@
     ],
     "primary": {
       "type": "button",
-      "label": "Login with Google",
-      "href": "/login/google"
+      "label": "Sign in",
+      "href": "/login"
     }
   },
   "navigation": {

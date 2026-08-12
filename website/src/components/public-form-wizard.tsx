@@ -18,7 +18,7 @@ import {
 } from '../forms/form-steps.ts'
 import { FormRenderer } from '../forms/form-renderer.tsx'
 import { cn } from '../lib/utils.ts'
-import { SignInButton } from './login-button.tsx'
+import { GoogleSignInButton } from './login-button.tsx'
 import { Button } from './ui/button.tsx'
 import { toastActionError } from './ui/toast.tsx'
 import { Badge } from './ui/primitives.tsx'
@@ -38,7 +38,7 @@ export type PublicFormWizardProps = {
   onSubmit: (submission: FormSubmission) => void | Promise<void>
   submitLabel?: string
   /** Hide Welcome when empty and jump past Account when already signed in is not desired —
-   *  Account still shows so the user confirms the Google identity. */
+   *  Account still shows so the user confirms the verified identity. */
   saving?: boolean
   error?: string | null
   header?: React.ReactNode
@@ -79,7 +79,7 @@ export function PublicFormWizard({
   const goNext = async () => {
     setStepError(null)
     if (active.kind === 'account' && !authenticated) {
-      setStepError('Sign in with Google to continue')
+      setStepError('Sign in to continue')
       return
     }
     if (active.kind === 'content') {
@@ -276,11 +276,11 @@ function AccountStep({
         <div className="flex flex-col gap-2 text-balance">
           <h2 className="text-xl font-semibold tracking-tight">Sign in to continue</h2>
           <p className="text-sm text-muted-foreground">
-            Use Google so your verified email links this form to your speaker portal.
+            Use a verified email so this form links to your speaker portal.
           </p>
         </div>
         <div className="w-full max-w-sm">
-          <SignInButton href={signInHref}>Continue with Google</SignInButton>
+          <GoogleSignInButton href={signInHref}>Sign in</GoogleSignInButton>
         </div>
       </section>
     )
@@ -294,7 +294,7 @@ function AccountStep({
       <div className="flex flex-col gap-1 border-y border-border py-4 text-sm">
         {name ? <span className="font-medium">{name}</span> : null}
         <span className="text-muted-foreground">{email}</span>
-        <Badge variant="success" className="mt-2 w-fit px-1.5">Google</Badge>
+        <Badge variant="success" className="mt-2 w-fit px-1.5">Verified account</Badge>
       </div>
     </section>
   )

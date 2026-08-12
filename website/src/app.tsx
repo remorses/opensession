@@ -1,5 +1,5 @@
 // OpenSession website: Cloudflare Worker serving the holocron landing page,
-// user auth (better-auth Google login), and the org dashboard. Built on the
+// user auth (password and Google login), and the org dashboard. Built on the
 // akarso skeleton — auth flow, org resolution, and shell chrome are ported.
 import './globals.css'
 
@@ -22,6 +22,8 @@ import {
   getInvitation,
   getDb,
   requireSession,
+  requireVerifiedEmail,
+  type Session,
 } from './db.ts'
 import { collectFields, hasFileUploadField, libraryOptions, type FieldOption, type ValuesRecord } from './forms/collect-fields.ts'
 import { loadAgendaSessions, speakerDisplayName } from './lib/agenda-server.ts'
@@ -98,7 +100,10 @@ import { apiApp } from './api.ts'
 
 // ── Schemas ─────────────────────────────────────────────────────────
 
-const loginQuerySchema = z.object({ callbackURL: z.string().optional() })
+const loginQuerySchema = z.object({
+  callbackURL: z.string().optional(),
+  verify: z.enum(['required']).optional(),
+})
 const abstractsQuerySchema = z.object({
   status: z.enum([
     'all',
@@ -226,9 +231,15 @@ async function createGoogleSignInRedirect(request: Pick<Request, 'headers'>, cal
 // ensurePersonalOrg against D1). /dashboard exists only as the stable
 // entry point for external links where the org id can't be known upfront.
 
-async function personalOrgPath(session: { userId: string; user: { name: string | null } }) {
+async function personalOrgPath(session: Session) {
+  requireVerifiedEmail(session)
   const org = await ensurePersonalOrg(session.userId, { name: session.user.name ?? undefined })
   return `/org/${org.orgId}`
+}
+
+function verificationRedirect(callbackURL: string) {
+  const query = new URLSearchParams({ verify: 'required', callbackURL })
+  return `/login?${query}`
 }
 
 // ── Main app ────────────────────────────────────────────────────────
@@ -261,7 +272,7 @@ export const app = new Spiceflow()
     query: loginQuerySchema,
     handler: async ({ request, query }) => {
       const session = await getSession(request)
-      if (session) {
+      if (session?.user.emailVerified) {
         // Already signed in: go straight to the destination. The
         // '/dashboard' default resolves to the personal org here so the
         // browser never bounces /login → /dashboard → /org/… .
@@ -269,18 +280,19 @@ export const app = new Spiceflow()
         throw redirect(target === '/dashboard' ? await personalOrgPath(session) : target)
       }
       const callbackURL = normalizeAuthRedirectPath(query.callbackURL)
-      const { SignInButton } = await import('./components/login-button.tsx')
+      const { LoginForm } = await import('./components/login-form.tsx')
       const { AuthPage } = await import('./components/auth-page.tsx')
       return (
         <AuthPage
-          title=""
-          description="Sign in to manage your events, submissions, and speakers."
-          footer={
-            <SignInButton href={router.href('/login/google', { callbackURL })}>
-              Sign in with Google
-            </SignInButton>
-          }
-        />
+          title="Welcome to OpenSession"
+          description="Sign in or create an account to manage events and speaker submissions."
+        >
+          <LoginForm
+            callbackURL={callbackURL}
+            googleHref={router.href('/login/google', { callbackURL })}
+            verificationRequired={query.verify === 'required'}
+          />
+        </AuthPage>
       )
     },
   })
@@ -320,6 +332,9 @@ export const app = new Spiceflow()
           callbackURL: normalizeAuthRedirectPath(request.parsedUrl.pathname),
         }),
       )
+    }
+    if (!session.user.emailVerified) {
+      throw redirect(verificationRedirect(normalizeAuthRedirectPath(request.parsedUrl.pathname)))
     }
 
     const reviewerInvite = invitation.purpose === 'EVALUATION_REVIEWER'
@@ -382,6 +397,7 @@ export const app = new Spiceflow()
     async ({ request }) => {
       const session = await getSession(request)
       if (!session) throw redirect('/login')
+      if (!session.user.emailVerified) throw redirect(verificationRedirect('/dashboard'))
       throw redirect(await personalOrgPath(session))
     },
     { detail: { hide: true } },
@@ -391,6 +407,7 @@ export const app = new Spiceflow()
 
   .post('/api/upload', async ({ request }) => {
     const session = await requireSession(request)
+    requireVerifiedEmail(session)
     const body = await request.formData()
     const uploaded = body.get('file')
     const eventId = String(body.get('eventId') ?? '')
@@ -637,6 +654,9 @@ export const app = new Spiceflow()
         accountName: null,
       }
     }
+    if (!session.user.emailVerified) {
+      throw redirect(verificationRedirect(`/submit/${params.eventSlug}/${params.formSlug}`))
+    }
     try {
       const draft = await getOrCreateCfpDraft({ cfp, session })
       return {
@@ -677,7 +697,7 @@ export const app = new Spiceflow()
         mdxSource={loaderData.cfp.version.mdxSource}
         draft={loaderData.draft}
         capReached={loaderData.capReached}
-        signInHref={router.href('/login/google', { callbackURL })}
+        signInHref={router.href('/login', { callbackURL })}
         accountEmail={loaderData.accountEmail}
         accountName={loaderData.accountName}
       />
@@ -690,6 +710,9 @@ export const app = new Spiceflow()
     const session = await getSession(request)
     if (!session) {
       throw redirect(`/login?callbackURL=${encodeURIComponent(`/portal/${params.eventSlug}`)}`)
+    }
+    if (!session.user.emailVerified) {
+      throw redirect(verificationRedirect(`/portal/${params.eventSlug}`))
     }
     const ctx = await loadPortalContext(params.eventSlug, session)
     if (!ctx) {
@@ -2383,6 +2406,7 @@ async function loadReviewerRound(request: Request, formId: string) {
   if (!sessionUser) {
     throw redirect(`/login?callbackURL=${encodeURIComponent(`/review/${formId}`)}`)
   }
+  requireVerifiedEmail(sessionUser)
   const db = getDb()
   const membership = await db.query.evaluationReviewer.findFirst({
     where: { formId, userId: sessionUser.userId },

@@ -515,11 +515,11 @@ export function buildReviewerInvite(context: EmailContext, data: ReviewerInviteD
   return compose(context, `Review submissions for ${context.eventName}`, {
     html: [
       paragraph(`you were invited to join the <strong>${escapeHtml(data.roundName)}</strong> reviewer pool for ${escapeHtml(context.eventName)}.`),
-      paragraph(`Accept the invitation with the Google account that received this email: ${link(data.inviteUrl, data.inviteUrl)}`),
+      paragraph(`Accept the invitation with the verified email address that received this message: ${link(data.inviteUrl, data.inviteUrl)}`),
     ],
     text: [
       `you were invited to join the "${data.roundName}" reviewer pool for ${context.eventName}.`,
-      `Accept the invitation with the Google account that received this email:\n${data.inviteUrl}`,
+      `Accept the invitation with the verified email address that received this message:\n${data.inviteUrl}`,
     ],
   })
 }

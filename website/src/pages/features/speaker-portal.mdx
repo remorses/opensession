@@ -23,7 +23,7 @@ The portal has four sections:
 | **Profile**     | Complete speaker profile: name, bio, headshot, social links    |
 | **Tasks**       | List of assigned tasks with completion status                  |
 
-Speakers sign in with the same **Google account** they used to submit their talk.
+Speakers sign in with the same **verified email account** they used to submit their talk.
 The system matches their verified email to existing speaker records, including
 records created by co-speaker entries from other submissions.
 
@@ -42,7 +42,7 @@ form content, add fields, or change requirements.
 ```diagram
   Talk accepted                    Tasks auto-created               Speaker completes
   ┌─────────────────┐            ┌─────────────────────┐          ┌─────────────────────┐
-  │ Status: ACCEPTED│───────────>│ Complete Profile    │ ─────────│ Form submitted      │
+  │ Status: ACCEPTED│──────────→│ Complete Profile    │ ────────→│ Form submitted      │
   │ Stage: SESSION  │            │ Upload Materials    │          │ Files in R2         │
   │ Emails sent     │            │ (auto-assigned)     │          │ Task marked done    │
   └─────────────────┘            └─────────────────────┘          └─────────────────────┘

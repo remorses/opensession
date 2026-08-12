@@ -16,6 +16,7 @@
 import { env } from 'cloudflare:workers'
 import * as orm from 'drizzle-orm'
 import * as schema from 'db/schema'
+import dedent from 'string-dedent'
 import type { getDb } from '../../db.ts'
 import { buildEmail, type EmailKind, type EmailPayload } from './templates.ts'
 
@@ -28,6 +29,56 @@ export const EMAIL_SENDER = {
   email: 'notifications@opensession.dev',
   name: 'OpenSession',
 } as const
+
+function escapeHtml(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+}
+
+/** Auth emails have no event owner, so they bypass the event-scoped outbox. */
+export async function sendAccountVerificationEmail(input: { email: string; url: string }) {
+  if (env.EMAIL_DELIVERY_DISABLED === 'true' || isPlaceholderEmail(input.email)) return
+  const url = escapeHtml(input.url)
+  const HTML = dedent`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1" />
+        <meta name="color-scheme" content="light dark" />
+        <meta name="supported-color-schemes" content="light dark" />
+        <style>
+          body { background-color: #ffffff; }
+          a { color: #15c; }
+          @media (prefers-color-scheme: dark) {
+            body { background-color: #1f1f1f !important; color: #e3e3e3 !important; }
+            a { color: #8ab4f8 !important; }
+          }
+        </style>
+      </head>
+      <body style="font-family: Arial, Helvetica, sans-serif; font-size: 14px; line-height: 1.5; color: #222; margin: 0; padding: 16px; -webkit-text-size-adjust: 100%;">
+        <div style="max-width: 600px;">
+          <p>Hey,</p>
+          <p>verify your email address to finish creating your OpenSession account:</p>
+          <p><a href="${url}">${url}</a></p>
+          <p>If you did not create this account, you can ignore this email.</p>
+          <p>OpenSession<br /><a href="https://opensession.dev">opensession.dev</a></p>
+        </div>
+      </body>
+    </html>
+  `
+  await env.EMAIL.send({
+    from: EMAIL_SENDER,
+    replyTo: EMAIL_SENDER.email,
+    to: input.email,
+    subject: 'Verify your OpenSession email',
+    html: HTML,
+    text: `Verify your email address to finish creating your OpenSession account:\n\n${input.url}\n\nIf you did not create this account, you can ignore this email.`,
+  })
+}
 
 /** Retries beyond this are pointless; the row stays FAILED for manual retry. */
 export const MAX_SEND_ATTEMPTS = 5

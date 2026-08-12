@@ -14,13 +14,14 @@
 // (owner_user_id) WHERE kind = 'personal'. Membership is NEVER cached —
 // removing a member must apply immediately.
 
-import { env } from 'cloudflare:workers'
+import { env, waitUntil } from 'cloudflare:workers'
 import { drizzle } from 'drizzle-orm/sqlite-proxy'
 import * as schema from 'db/schema'
 import { betterAuth } from 'better-auth/minimal'
 import { drizzleAdapter } from 'better-auth-drizzle-adapter'
 import { json } from 'spiceflow'
 import { ulid } from 'ulid'
+import { sendAccountVerificationEmail } from './lib/emails/send.ts'
 
 // ── Drizzle client via D1 (sqlite-proxy driver) ─────────────────────
 
@@ -59,7 +60,16 @@ export function getAuth() {
     secret: env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, { provider: 'sqlite' }),
     emailAndPassword: {
-      enabled: env.TEST_AUTH_ENABLED === 'true',
+      enabled: true,
+      requireEmailVerification: true,
+    },
+    emailVerification: {
+      autoSignInAfterVerification: true,
+      sendOnSignIn: true,
+      sendVerificationEmail({ user, url }) {
+        waitUntil(sendAccountVerificationEmail({ email: user.email, url }))
+        return Promise.resolve()
+      },
     },
     session: {
       expiresIn: 60 * 60 * 24 * 365, // 1 year
@@ -148,6 +158,13 @@ export async function requireSession(request: RequestHeaders): Promise<Session> 
     throw json({ message: 'Not authenticated', code: 'unauthorized' }, { status: 401 })
   }
   return session
+}
+
+export function requireVerifiedEmail(session: Session): string {
+  if (!session.user.emailVerified) {
+    throw json({ message: 'Verify your email address to continue', code: 'email_not_verified' }, { status: 403 })
+  }
+  return session.user.email.trim().toLowerCase()
 }
 
 // ── Org helpers ─────────────────────────────────────────────────────

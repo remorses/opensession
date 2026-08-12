@@ -19,7 +19,6 @@ interface ImportMeta {
 declare namespace Cloudflare {
   interface Env {
     TEST_MIGRATIONS: D1Migration[]
-    TEST_AUTH_ENABLED?: string
     EMAIL_DELIVERY_DISABLED?: string
   }
 }

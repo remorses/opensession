@@ -95,7 +95,7 @@ This diagram maps out the complete lifecycle of a conference program within Open
 - **Actor**: Organizer (Admin)
 - **Goal**: Create the tenant workspace and initial event record.
 - **Steps in product**:
-  1. Organizer logs in via Google Auth.
+  1. Organizer logs in with verified email credentials or Google.
   2. Navigate to `/org/:orgId` (an organization is auto-created on first login).
   3. Click "Create Event" and fill in event name, slug, timezone, startsAt, and endsAt.
 - **Data created**: `event` row, `form` definition rows (default CFP, Profile, Materials), and initial `formVersion` MDX templates.
@@ -128,7 +128,7 @@ This diagram maps out the complete lifecycle of a conference program within Open
 - **Goal**: Submit a talk proposal and capture co-speaker information.
 - **Steps in product**:
   1. Speaker opens `/submit/:eventSlug/:formSlug`.
-  2. Renders welcome copy; click Continue to trigger the Google Auth gate.
+  2. Renders welcome copy; click Continue to sign in with email or Google.
   3. Enter session details (Title, Description, Track, Format). The form automatically autosaves draft entries in the background.
   4. If required, add co-speakers by entering their emails and bios in the `<Participants>` list.
   5. Review all details on the confirmation page and click Submit.
@@ -180,7 +180,7 @@ This diagram maps out the complete lifecycle of a conference program within Open
 - **Goal**: Claim the speaker profile and view pending requirements.
 - **Steps in product**:
   1. Speaker clicks the magic link or portal URL at `/portal/:eventSlug`.
-  2. Authenticates via Google. The system matches their verified email to existing unlinked speaker rows.
+  2. Authenticates with email or Google. The system matches their verified email to existing unlinked speaker rows.
 - **Data created**: Links `speaker.userId` to the logged-in User account.
 - **Success criteria**: Enters the portal homepage, displaying the list of their accepted sessions and outstanding tasks.
 
@@ -209,7 +209,7 @@ This diagram maps out the complete lifecycle of a conference program within Open
 
 | Demand | Status | Evidence (file/route) | Notes |
 | :--- | :--- | :--- | :--- |
-| **Google Auth & Orgs** | **Done** | `website/src/db.ts` | Uses BetterAuth with Google OAuth. Implements personal-org invariants. |
+| **Email/Google Auth & Orgs** | **Done** | `website/src/db.ts` | Uses BetterAuth with verified email/password and Google OAuth. Implements personal-org invariants. |
 | **Event Settings** | **Done** | `website/src/components/event-settings.tsx` | Details, tracks, formats, rooms, and org member team tabs fully functional. |
 | **MDX Form Builder** | **Done** | `website/src/components/form-editor.tsx` | Full Monaco editor with live previews, draft history, and versioning. |
 | **Public CFP Form** | **Done** | `website/src/components/public-cfp-page.tsx` | Google-authed form with rich text, conditional logic, and multi-speaker fields. |

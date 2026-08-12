@@ -27,19 +27,19 @@ you own.
 ```diagram
   Speaker submits              Organizer reviews             Organizer schedules
   ┌────────────────┐          ┌────────────────────┐        ┌───────────────────┐
-  │  Public CFP    │─────────>│  Abstracts table   │───────>│  Agenda builder   │
-  │  Google login  │          │  Vote / Rate / Tag │        │  Rooms & times    │
+  │  Public CFP    │─────────>│  Abstracts table   │──────>│  Agenda builder   │
+  │  Email / Google│          │  Vote / Rate / Tag │        │  Rooms & times    │
   │  Draft & submit│          │  Accept / Decline  │        │  Conflict detect  │
-  └────────────────┘          └────────────────────┘        └───────┬───────────┘
-                                       │                            │
-                                       v                            v
+  └────────────────┘          └────────────────────┘        └────────┬──────────┘
+                                       ▼                             ▼
+                                       │                             │
                               ┌────────────────────┐        ┌───────────────────┐
                               │  Decision emails   │        │  Calendar invites │
                               │  with ICS attached │        │  auto-sent to all │
                               │  to each speaker   │        │  session speakers │
-                              └────────────────────┘        └───────┬───────────┘
-                                                                    │
-                                                                    v
+                              └────────────────────┘        └────────┬──────────┘
+                                                                     ▼
+                                                                     │
                                                             ┌───────────────────┐
                                                             │  Speaker portal   │
                                                             │  Profile + slides │
@@ -52,7 +52,7 @@ you own.
 <CardGroup cols={3}>
   <Card title='Call for Papers' icon='lucide:file-text' href='./features/call-for-papers.mdx'>
     Custom submission forms built with MDX. Conditional logic, multi-speaker support,
-    track and format selection. Speakers sign in with Google and submit in minutes.
+    track and format selection. Speakers sign in with email or Google and submit in minutes.
   </Card>
   <Card title='Abstract Review' icon='lucide:list-checks' href='./features/abstract-review.mdx'>
     Your team votes Yes, Maybe, or No on every submission. Accept and decline queues
@@ -82,12 +82,12 @@ you own.
 
 ### Create your event
 
-Sign in with Google, name your event, pick dates and timezone. OpenSession creates
+Sign in with email or Google, name your event, pick dates and timezone. OpenSession creates
 three default forms: Call for Papers, Speaker Profile, and Session Materials.
 
 ### Publish the CFP
 
-Open the submission form and share the public link. Speakers sign in with Google,
+Open the submission form and share the public link. Speakers sign in with email or Google,
 fill out the form, and submit. Drafts auto-save so nothing gets lost.
 
 <Frame>
@@ -169,7 +169,7 @@ focused and the codebase small.
     Type-safe SQL with migrations, batch operations, and SQLite-proxy for D1.
   </Card>
   <Card title='BetterAuth' icon='lucide:shield'>
-    Google OAuth for organizers and speakers. Session management with cookie caching.
+    Email/password and Google OAuth for organizers and speakers. Verified identities and cached sessions.
   </Card>
 </CardGroup>
 
@@ -189,8 +189,8 @@ pnpm install
 
 ### Set up secrets
 
-Configure Google OAuth credentials and the auth secret through your preferred
-secrets manager.
+Configure the auth secret through your preferred secrets manager. Google OAuth credentials
+are optional if you want to offer Google login too.
 
 ### Deploy
 

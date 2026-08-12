@@ -16,7 +16,7 @@ stack fits within Cloudflare's free tier for most conference workloads.
 
 - A **Cloudflare account** (free tier works)
 - **Node.js 18+** and **pnpm**
-- **Google OAuth credentials** (for authentication)
+- **Google OAuth credentials** (optional, for Google login)
 - A **domain** pointed at Cloudflare (for email sending)
 
 ## Architecture
@@ -63,7 +63,7 @@ npx wrangler r2 bucket create opensession-files
 
 Update `wrangler.jsonc` with your database ID.
 
-### Configure Google OAuth
+### Configure Google OAuth (optional)
 
 Create OAuth credentials in the [Google Cloud Console](https://console.cloud.google.com/apis/credentials):
 
@@ -73,7 +73,8 @@ Create OAuth credentials in the [Google Cloud Console](https://console.cloud.goo
 
 ### Set secrets
 
-Store your secrets using Wrangler or your preferred secrets manager:
+Store your auth secrets using Wrangler or your preferred secrets manager. Add the Google
+credentials only when you want to offer Google login:
 
 ```bash
 npx wrangler secret put BETTER_AUTH_SECRET

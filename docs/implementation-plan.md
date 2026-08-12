@@ -17,7 +17,7 @@ Skeleton, auth, org layer, and component patterns are copied from **akarso**
 of `akarso/db/src/schema.ts`.
 
 The build order (milestones at the bottom) is chosen so a demoable end-to-end slice —
-Google login → create event → publish CFP MDX form → public submit → abstracts table →
+verified login → create event → publish CFP MDX form → public submit → abstracts table →
 accept → portal task — works early, then agenda, emails/ICS, and embeds layer on top.
 
 ```
@@ -256,7 +256,7 @@ remaining references (and delete R2 objects).
 | Route | Kind | Notes |
 |---|---|---|
 | `/` | holocron page | landing from `src/pages/index.mdx` (see §4b); never auto-redirects |
-| `/login` | page | AuthPage + LoginButton (Google) |
+| `/login` | page | Sign in or create an account with email/password or Google |
 | `GET /login/google` | route | server-side `signInSocial` with `returnHeaders: true`, cookie forwarding |
 | `/api/auth/*` | middleware | forward to `getAuth().handler()`, fall through only on 404 |
 | `/invite/:invitationId` | page | secret-link org invite accept (idempotent insert) |
@@ -345,7 +345,7 @@ without remounting the shell. Screenshot refs: dashboard img 34-36, abstracts im
 
 | Route | Notes |
 |---|---|
-| `/submit/:eventSlug/:formSlug` | public CFP page (img 16): welcome (MDX top content) → Google sign-in gate → form fill (client FormRenderer, autosave draft) → review → submit |
+| `/submit/:eventSlug/:formSlug` | public CFP page (img 16): welcome (MDX top content) → verified account sign-in gate → form fill (client FormRenderer, autosave draft) → review → submit |
 | `/portal/:eventSlug` | portal home: my submissions, profile card, tasks (img 17) |
 | `/portal/:eventSlug/submissions/:sessionId` | view/edit own submission (while PENDING), withdraw |
 | `/portal/:eventSlug/profile` | system profile fields + headshot upload (img 18) |
@@ -634,17 +634,16 @@ input for the user phone number"). The editor is already API-driven — "create 
 FormVersion from mdxSource" is a single server action — so an AI endpoint can later
 generate a new version and reuse the same validation/preview pipeline unchanged.
 
-## 7. Auth flows (one Google login, two populations)
+## 7. Auth flows (one identity system, two populations)
 
 - **Config** (`src/db.ts`, akarso `getAuth()` shape): `better-auth/minimal` +
-  `better-auth-drizzle-adapter` (sqlite), Google provider with `prompt:
-  'select_account'`, magic-link plugin (schema-supported; used later for co-speakers
-  without Google), `session.expiresIn` 1y + cookieCache, `onAPIError` logging.
-- **Admin flow**: `/login` → Google → `/dashboard` resolver → `ensurePersonalOrg`
+  `better-auth-drizzle-adapter` (sqlite), verified email/password accounts, Google provider
+  with `prompt: 'select_account'`, `session.expiresIn` 1y + cookieCache, and `onAPIError` logging.
+- **Admin flow**: `/login` → email or Google → `/dashboard` resolver → `ensurePersonalOrg`
   (race-safe via the partial unique, ported verbatim from akarso) → newest event or org
   page. Org-level authz only: every OrgMember manages/reviews every event of the org.
-- **Participant flow (portal magic of shared login)**: public CFP and portal use the SAME
-  Google login. `lib/speaker-link.ts` runs in the portal/submit loaders: given a session
+- **Participant flow (portal magic of shared login)**: public CFP and portal use the same
+  verified identity. `lib/speaker-link.ts` runs in the portal/submit loaders: given a session
   with a verified email, find `speaker(eventId, email)` — if it exists with `userId
   NULL`, claim it (guarded by the partial unique `(eventId, userId) WHERE userId IS NOT
   NULL`); if none exists on first CFP submit, create it. Co-speakers added by email get

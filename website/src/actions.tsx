@@ -19,6 +19,7 @@ import {
   requireSession,
   requireOrgAccess,
   requireAdminRole,
+  requireVerifiedEmail,
   ensurePersonalOrg,
   generateApiKeySecret,
   getDb,
@@ -109,6 +110,7 @@ const createOrgSchema = z.object({ name: z.string().trim().min(1).max(60) })
 export async function createOrg(input: { name: string }) {
   const actionRequest = getActionRequest()
   const session = await requireSession(actionRequest)
+  requireVerifiedEmail(session)
   const { name } = createOrgSchema.parse(input)
 
   // Ensure the personal org exists BEFORE counting, so the cap always
@@ -191,6 +193,7 @@ const acceptInviteSchema = z.object({ invitationId: z.string().min(1) })
 export async function acceptInvite(input: { invitationId: string }) {
   const actionRequest = getActionRequest()
   const session = await requireSession(actionRequest)
+  requireVerifiedEmail(session)
   const { invitationId } = acceptInviteSchema.parse(input)
   const db = getDb()
   const invite = await db.query.orgInvitation.findFirst({ where: { invitationId } })

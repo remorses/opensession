@@ -15,7 +15,7 @@ Free, self-hosted alternative to [SessionBoard](https://sessionboard.com) and [S
 
 | Feature | Description |
 | --- | --- |
-| **Call for Papers** | MDX forms with conditional logic, multi-speaker support, file uploads. Speakers sign in with Google and submit in minutes. |
+| **Call for Papers** | MDX forms with conditional logic, multi-speaker support, file uploads. Speakers sign in with email or Google and submit in minutes. |
 | **Abstract Review** | Team voting (Yes/Maybe/No), 1-5 ratings, comments. Accept and decline queues with batch notifications. |
 | **Agenda Builder** | Place sessions into rooms and time slots. Conflict engine flags room overlaps and double-booked speakers. |
 | **Speaker Portal** | Self-service onboarding: profile, tasks, slide uploads, headshot, social links. Completion tracking for organizers. |
@@ -27,10 +27,10 @@ Free, self-hosted alternative to [SessionBoard](https://sessionboard.com) and [S
 ```
   Speaker submits              Organizer reviews             Organizer schedules
   ┌────────────────┐          ┌────────────────────┐        ┌───────────────────┐
-  │  Public CFP    │─────────>│  Abstracts table   │───────>│  Agenda builder   │
-  │  Google login  │          │  Vote / Rate / Tag │        │  Rooms & times    │
+  │  Public CFP    │─────────►│  Abstracts table   │───────►│  Agenda builder   │
+  │  Email / Google│          │  Vote / Rate / Tag │        │  Rooms & times    │
   │  Draft & submit│          │  Accept / Decline  │        │  Conflict detect  │
-  └────────────────┘          └────────────────────┘        └───────┬───────────┘
+  └────────────────┘          └────────┬───────────┘        └───────┬───────────┘
                                        │                            │
                                        v                            v
                               ┌────────────────────┐        ┌───────────────────┐
@@ -46,7 +46,7 @@ Free, self-hosted alternative to [SessionBoard](https://sessionboard.com) and [S
                                                             └───────────────────┘
 ```
 
-1. **Create your event.** Sign in with Google, name the event, pick dates and timezone.
+1. **Create your event.** Sign in with email or Google, name the event, pick dates and timezone.
 2. **Publish the CFP.** Share the public link. Speakers submit talks with auto-saving drafts.
 3. **Review and accept.** Your team votes on submissions. Batch-accept and notify speakers.
 4. **Build the agenda.** Place talks into rooms and time slots. Conflicts are flagged automatically.
@@ -79,14 +79,14 @@ pnpm db:migrate:remote
 pnpm deploy
 ```
 
-See the full [self-hosting guide](https://opensession.dev/guides/self-hosting) for Google OAuth setup, domain configuration, and local development.
+See the full [self-hosting guide](https://opensession.dev/guides/self-hosting) for authentication, domain configuration, and local development.
 
 ## Stack
 
 - **[Cloudflare Workers](https://workers.cloudflare.com/)** for edge compute, D1 (SQLite), R2 (files), email sending
 - **[Spiceflow](https://github.com/nicolo-ribaudo/spiceflow)** for React Server Components, type-safe routes, server actions
 - **[Drizzle ORM](https://orm.drizzle.team/)** for type-safe SQL, migrations, SQLite-proxy for D1
-- **[BetterAuth](https://www.better-auth.com/)** for Google OAuth, session management
+- **[BetterAuth](https://www.better-auth.com/)** for email/password, Google OAuth, and session management
 - **[Holocron](https://holocron.so)** for the landing page and docs
 
 ## Comparisons
