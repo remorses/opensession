@@ -3,10 +3,36 @@
 // one per (session × speaker) with sessionId set. DB insert uses
 // onConflictDoNothing against the partial unique indexes for idempotency.
 
+import dedent from 'string-dedent'
+
 export type TaskTarget = 'SPEAKER' | 'SUBMISSION'
 export type TaskSource = 'MANUAL' | 'FORM'
 export type TaskAssignmentPolicy = 'SELECTED' | 'ALL_ACCEPTED'
 export type TaskAssignmentStatus = 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED'
+
+export const fileRequestOptions = [
+  { value: 'PRESENTATION', label: 'Presentation', accept: '.pdf,.key,.ppt,.pptx' },
+  { value: 'HEADSHOT', label: 'Headshot', accept: '.avif,.gif,.jpeg,.jpg,.png,.webp' },
+  { value: 'DOCUMENT', label: 'Document', accept: '.doc,.docx,.pdf' },
+] as const
+
+export type FileRequestAccept = (typeof fileRequestOptions)[number]['accept']
+
+export function generateFileRequestMdx({ title, accept }: {
+  title: string
+  accept: FileRequestAccept
+}) {
+  const label = title.replace(/[\r\n]+/g, ' ')
+    .replace(/&/g, '&amp;')
+    .replace(/"/g, '&quot;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+  return dedent`
+    # File request
+
+    <FileUpload name="deliverable" label="${label}" accept="${accept}" required />
+  `
+}
 
 export type TaskDefForAssign = {
   id: string

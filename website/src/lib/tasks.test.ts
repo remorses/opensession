@@ -5,6 +5,8 @@ import {
   buildAssignmentsForAcceptance,
   defaultFormTaskDefinitions,
   defaultManualTaskDefinitions,
+  fileRequestOptions,
+  generateFileRequestMdx,
   summarizeAssignmentProgress,
 } from './tasks.ts'
 
@@ -197,5 +199,40 @@ describe('summarizeAssignmentProgress / defaults', () => {
   test('default manual task definitions still available', () => {
     expect(defaultManualTaskDefinitions('evt', 42)).toHaveLength(2)
     expect(defaultManualTaskDefinitions('evt', 42)[0]!.source).toBe('MANUAL')
+  })
+})
+
+describe('file requests', () => {
+  test('exposes clear presets with supported presentation and image types', () => {
+    expect(fileRequestOptions).toMatchInlineSnapshot(`
+      [
+        {
+          "accept": ".pdf,.key,.ppt,.pptx",
+          "label": "Presentation",
+          "value": "PRESENTATION",
+        },
+        {
+          "accept": ".avif,.gif,.jpeg,.jpg,.png,.webp",
+          "label": "Headshot",
+          "value": "HEADSHOT",
+        },
+        {
+          "accept": ".doc,.docx,.pdf",
+          "label": "Document",
+          "value": "DOCUMENT",
+        },
+      ]
+    `)
+  })
+
+  test('generates one required stable upload field', () => {
+    expect(generateFileRequestMdx({
+      title: 'Upload Session Presentation',
+      accept: '.pdf,.key,.ppt,.pptx',
+    })).toMatchInlineSnapshot(`
+      "# File request
+
+      <FileUpload name=\"deliverable\" label=\"Upload Session Presentation\" accept=\".pdf,.key,.ppt,.pptx\" required />"
+    `)
   })
 })

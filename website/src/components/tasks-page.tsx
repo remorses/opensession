@@ -12,6 +12,7 @@ import {
   remindTaskAssignments,
 } from '../actions.tsx'
 import { cn, formatDateUTC } from '../lib/utils.ts'
+import { fileRequestOptions } from '../lib/tasks.ts'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
 import {
@@ -190,16 +191,18 @@ export function TasksPage({ tab }: { tab: TasksTab }) {
         </Frame>
       )}
 
-      <TaskDialog
-        open={createOpen}
-        onOpenChange={setCreateOpen}
-        orgId={currentOrgId}
-        eventId={event.id}
-        portalForms={portalForms}
-        speakers={speakers}
-        acceptedSessions={acceptedSessions}
-        mode="create"
-      />
+      {createOpen ? (
+        <TaskDialog
+          open
+          onOpenChange={setCreateOpen}
+          orgId={currentOrgId}
+          eventId={event.id}
+          portalForms={portalForms}
+          speakers={speakers}
+          acceptedSessions={acceptedSessions}
+          mode="create"
+        />
+      ) : null}
     </div>
   )
 }
@@ -351,6 +354,8 @@ function TaskDialog({
   const [title, setTitle] = useState(task?.title ?? '')
   const [target, setTarget] = useState<'SPEAKER' | 'SUBMISSION'>(task?.target ?? 'SPEAKER')
   const [source, setSource] = useState<'MANUAL' | 'FORM'>(task?.source ?? 'MANUAL')
+  const [actionType, setActionType] = useState<'MANUAL' | 'FORM' | 'FILE'>(task?.source ?? 'MANUAL')
+  const [fileRequestType, setFileRequestType] = useState<(typeof fileRequestOptions)[number]['value']>('PRESENTATION')
   const [formId, setFormId] = useState(task?.formId ?? '')
   const [instructions, setInstructions] = useState(task?.instructionsHtml ?? '')
   const [dueDate, setDueDate] = useState(
@@ -370,6 +375,8 @@ function TaskDialog({
       setTitle(task?.title ?? '')
       setTarget(task?.target ?? 'SPEAKER')
       setSource(task?.source ?? 'MANUAL')
+      setActionType(task?.source ?? 'MANUAL')
+      setFileRequestType('PRESENTATION')
       setFormId(task?.formId ?? '')
       setInstructions(task?.instructionsHtml ?? '')
       setDueDate(task?.dueAt ? new Date(task.dueAt).toISOString().slice(0, 10) : '')
@@ -385,8 +392,7 @@ function TaskDialog({
         <DialogHeader>
           <DialogTitle>{mode === 'create' ? 'Add task' : 'Edit task'}</DialogTitle>
           <DialogDescription>
-            MANUAL tasks are checkboxes in the portal. FORM tasks complete when the linked portal
-            form is submitted.
+            Choose a manual action, an existing portal form, or a direct file request.
           </DialogDescription>
         </DialogHeader>
         <DialogPanel>
@@ -415,12 +421,15 @@ function TaskDialog({
                         title: title.trim(),
                         target,
                         source,
-                        formId: source === 'FORM' ? formId || null : null,
+                        formId: actionType === 'FORM' ? formId || null : null,
                         instructionsHtml: instructions.trim() || undefined,
                         dueAt,
                         assignmentPolicy,
                         speakerIds,
                         sessionIds,
+                        fileRequest: actionType === 'FILE'
+                          ? { accept: fileRequestOptions.find((option) => option.value === fileRequestType)!.accept }
+                          : undefined,
                       })
                     } else if (task) {
                       await updateTaskDefinition({
@@ -435,6 +444,7 @@ function TaskDialog({
                         dueAt,
                       })
                     }
+                    if (mode === 'create') toast.success('Task created')
                     onOpenChange(false)
                   } catch (err) {
                     setError(toastActionError(err, 'Save failed'))
@@ -468,14 +478,20 @@ function TaskDialog({
                   </NativeSelect>
                 </label>
                 <label className="flex flex-col gap-1.5 text-sm font-medium">
-                  Source
+                  Action
                   <NativeSelect
                     disabled={mode === 'edit'}
-                    value={source}
-                    onChange={(e) => setSource(e.target.value === 'FORM' ? 'FORM' : 'MANUAL')}
+                    value={actionType}
+                    onChange={(e) => {
+                      const next = e.target.value === 'FILE' ? 'FILE' : e.target.value === 'FORM' ? 'FORM' : 'MANUAL'
+                      setActionType(next)
+                      setSource(next === 'MANUAL' ? 'MANUAL' : 'FORM')
+                      setFormId('')
+                    }}
                   >
-                    <option value="MANUAL">Manual</option>
-                    <option value="FORM">Form</option>
+                    <option value="MANUAL">Manual action</option>
+                    <option value="FORM">Existing portal form</option>
+                    <option value="FILE">Direct file request</option>
                   </NativeSelect>
                 </label>
               </div>
@@ -486,7 +502,7 @@ function TaskDialog({
                   <fieldset className="flex flex-col gap-2"><legend className="text-sm font-medium">Accepted sessions</legend>{acceptedSessions.map((session) => <label key={session.id} className="flex items-start gap-2 text-sm"><input type="checkbox" checked={sessionIds.includes(session.id)} onChange={(event) => setSessionIds(event.target.checked ? [...sessionIds, session.id] : sessionIds.filter((id) => id !== session.id))} /><span>{session.title}<span className="block text-xs text-muted-foreground">{session.speakerNames.join(', ')}</span></span></label>)}</fieldset>
                 </div> : <p className="text-xs text-muted-foreground">Current accepted participants are assigned now. Future accepted sessions are assigned automatically.</p>}
               </> : null}
-              {source === 'FORM' ? (
+              {actionType === 'FORM' ? (
                 <label className="flex flex-col gap-1.5 text-sm font-medium">
                   Portal form
                   <NativeSelect
@@ -501,6 +517,15 @@ function TaskDialog({
                       </option>
                     ))}
                   </NativeSelect>
+                </label>
+              ) : null}
+              {actionType === 'FILE' ? (
+                <label className="flex flex-col gap-1.5 text-sm font-medium">
+                  File type
+                  <NativeSelect value={fileRequestType} onChange={(event) => setFileRequestType(event.target.value === 'HEADSHOT' ? 'HEADSHOT' : event.target.value === 'DOCUMENT' ? 'DOCUMENT' : 'PRESENTATION')}>
+                    {fileRequestOptions.map((option) => <option key={option.value} value={option.value}>{option.label} ({option.accept})</option>)}
+                  </NativeSelect>
+                  <span className="font-normal text-muted-foreground">One required upload. Maximum file size: 100 MB.</span>
                 </label>
               ) : null}
               <label className="flex flex-col gap-1.5 text-sm font-medium">

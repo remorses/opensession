@@ -6,6 +6,7 @@ import { runAction } from 'spiceflow/testing'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
 import {
+  createTaskDefinition,
   restoreSessionRevision,
   saveSessionContent,
   setSessionVisibility,
@@ -153,6 +154,55 @@ beforeAll(async () => {
 })
 
 describe('immutable file slots and role-safe threads', () => {
+  test('creates a direct file request and assignments through the real action', async () => {
+    const result = await runWithCookie(organizerCookie, () => createTaskDefinition({
+      orgId: ids.org,
+      eventId: ids.event,
+      title: 'Upload Final Headshot (print quality)',
+      instructionsHtml: 'Use a high-resolution portrait.',
+      target: 'SPEAKER',
+      source: 'FORM',
+      dueAt: Date.UTC(2027, 3, 14, 23, 59, 59),
+      assignmentPolicy: 'SELECTED',
+      speakerIds: [replacementSpeakerId],
+      sessionIds: [],
+      fileRequest: { accept: '.avif,.gif,.jpeg,.jpg,.png,.webp' },
+    }))
+
+    const row = await env.DB.prepare(dedent`
+      SELECT task.id AS taskId, task.source, task.target, task.assignment_policy AS assignmentPolicy,
+        task.form_id AS formId, form.purpose, form.status AS formStatus, form.target AS formTarget,
+        version.mdx_source AS mdxSource, assignment.speaker_id AS speakerId,
+        assignment.session_id AS sessionId, assignment.status, assignment.due_at AS dueAt
+      FROM task_definition task
+      JOIN form ON form.id = task.form_id
+      JOIN form_version version ON version.form_id = form.id
+      JOIN task_assignment assignment ON assignment.task_definition_id = task.id
+      WHERE task.id = ?
+    `).bind(result.taskDefinitionId).first<{ mdxSource: string } & Record<string, unknown>>()
+    expect(row).toMatchObject({
+      source: 'FORM', target: 'SPEAKER', assignmentPolicy: 'SELECTED', purpose: 'PORTAL',
+      formStatus: 'OPEN', formTarget: 'SPEAKER', speakerId: replacementSpeakerId, sessionId: null,
+      status: 'NOT_STARTED', dueAt: Date.UTC(2027, 3, 14, 23, 59, 59),
+    })
+    expect(row?.mdxSource).toContain('<FileUpload name="deliverable"')
+
+    const body = new FormData()
+    body.set('file', new File(['image'], 'headshot.png', { type: 'image/png' }))
+    body.set('eventId', ids.event)
+    body.set('kind', 'HEADSHOT')
+    body.set('taskAssignmentId', String((await env.DB.prepare('SELECT id FROM task_assignment WHERE task_definition_id = ?').bind(result.taskDefinitionId).first<{ id: string }>())!.id))
+    body.set('fieldName', 'deliverable')
+    const upload = await app.handle(new Request('http://localhost/api/upload', {
+      method: 'POST', headers: { cookie: speakerCookie }, body,
+    }))
+    expect(upload.status).toBe(200)
+
+    const otherEventRows = await env.DB.prepare('SELECT count(*) AS count FROM task_definition WHERE event_id = ? AND title = ?')
+      .bind(ids.otherEvent, 'Upload Final Headshot (print quality)').first()
+    expect(otherEventRows).toEqual({ count: 0 })
+  })
+
   test('allows a completed form task to receive and submit a replacement without reopening it', async () => {
     const upload = async (bodyText: string) => {
       const body = new FormData()
@@ -222,8 +272,8 @@ describe('immutable file slots and role-safe threads', () => {
     const rows = await env.DB.prepare(dedent`
       SELECT id, task_assignment_id AS taskAssignmentId, field_name AS fieldName,
         file_name AS fileName, created_at AS createdAt
-      FROM file WHERE event_id = ? ORDER BY created_at
-    `).bind(ids.event).all<TaskFileVersion>()
+      FROM file WHERE event_id = ? AND task_assignment_id = ? ORDER BY created_at
+    `).bind(ids.event, ids.assignment).all<TaskFileVersion>()
     expect(latestTaskFileVersions(rows.results)[0]?.currentFileId).toBe(ids.file2)
     expect(await (await env.FILES.get('content/v1'))?.text()).toBe('version one')
     expect(await (await env.FILES.get('content/v2'))?.text()).toBe('version two')

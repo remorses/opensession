@@ -80,6 +80,8 @@ import {
   assertTaskDefinitionShape,
   buildAssignmentsForAcceptance,
   defaultFormTaskDefinitions,
+  fileRequestOptions,
+  generateFileRequestMdx,
   type PlannedTaskAssignment,
 } from './lib/tasks.ts'
 import {
@@ -2824,6 +2826,9 @@ const createTaskDefinitionSchema = z.object({
   assignmentPolicy: z.enum(['SELECTED', 'ALL_ACCEPTED']).default('SELECTED'),
   speakerIds: z.array(z.string().min(1)).max(500).default([]),
   sessionIds: z.array(z.string().min(1)).max(500).default([]),
+  fileRequest: z.object({
+    accept: z.enum(fileRequestOptions.map((option) => option.accept)),
+  }).optional(),
 })
 
 export async function createTaskDefinition(input: z.input<typeof createTaskDefinitionSchema>) {
@@ -2835,9 +2840,15 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
     orgId: parsed.orgId,
     eventId: parsed.eventId,
   })
-  const formId = parsed.source === 'FORM' ? (parsed.formId ?? null) : null
+  if (parsed.fileRequest && (parsed.source !== 'FORM' || parsed.formId)) {
+    throw new Error('A file request creates its own portal form')
+  }
+  const generatedFormId = parsed.fileRequest ? ulid() : null
+  const formId = generatedFormId ?? (parsed.source === 'FORM' ? (parsed.formId ?? null) : null)
   const form = formId
-    ? await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId, purpose: 'PORTAL' } })
+    ? generatedFormId
+      ? { purpose: 'PORTAL' as const, target: parsed.target }
+      : await db.query.form.findFirst({ where: { id: formId, eventId: parsed.eventId, purpose: 'PORTAL' } })
     : null
   assertTaskDefinitionShape({
     source: parsed.source,
@@ -2851,6 +2862,7 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
   })
   const sortOrder = existing.reduce((max, row) => Math.max(max, row.sortOrder), -1) + 1
   const taskDefinitionId = ulid()
+  const formVersionId = parsed.fileRequest ? ulid() : null
   const now = Date.now()
   const [acceptedSessions, selectedSpeakers] = await db.batch([
     db.query.eventSession.findMany({
@@ -2899,7 +2911,26 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
   const assignmentRows = parsed.target === 'SPEAKER'
     ? [...new Set([...selectedSpeakers.map((row) => row.id), ...participants.map((row) => row.speakerId)])].map((speakerId) => ({ speakerId, sessionId: null }))
     : participants.map((row) => ({ speakerId: row.speakerId, sessionId: row.sessionId }))
-  await db.batch([
+  const statements = [
+    ...(parsed.fileRequest && generatedFormId && formVersionId ? [
+      db.insert(schema.form).values({
+        id: generatedFormId,
+        eventId: parsed.eventId,
+        purpose: 'PORTAL',
+        target: parsed.target,
+        name: parsed.title,
+        slug: `file-request-${generatedFormId.toLowerCase()}`,
+        status: 'OPEN',
+        createdAt: now,
+        updatedAt: now,
+      }),
+      db.insert(schema.formVersion).values({
+        id: formVersionId,
+        formId: generatedFormId,
+        mdxSource: generateFileRequestMdx({ title: parsed.title, accept: parsed.fileRequest.accept }),
+        createdAt: now,
+      }),
+    ] : []),
     definitionInsert,
     ...assignmentRows.map((row) => db.insert(schema.taskAssignment).values({
       eventId: parsed.eventId,
@@ -2910,8 +2941,9 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
       createdAt: now,
       updatedAt: now,
     }).onConflictDoNothing()),
-  ] as [any, ...any[]])
-  return { taskDefinitionId, assigned: assignmentRows.length }
+  ]
+  await db.batch(statements as [any, ...any[]])
+  return { taskDefinitionId, formId, assigned: assignmentRows.length }
 }
 
 const updateTaskDefinitionSchema = z.object({
