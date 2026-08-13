@@ -2285,7 +2285,7 @@ export async function sendCustomSpeakerCommunication(input: z.input<typeof custo
     if (outcome.inserted) queued += 1
     if (outcome.sent) sent += 1
   }
-  return { batchId, queued, sent }
+  return { batchId, queued, skipped: speakers.length - queued, sent }
 }
 
 // ── Organization speaker CRM ────────────────────────────────────────

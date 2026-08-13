@@ -2,12 +2,24 @@
 // These tests use production migrations and database constraints without mocks.
 import { env } from 'cloudflare:workers'
 import dedent from 'string-dedent'
+import { createSpiceflowFetch } from 'spiceflow/client'
+import { runAction, SpiceflowTestResponse } from 'spiceflow/testing'
 import { beforeAll, describe, expect, test } from 'vitest'
+import { z } from 'zod'
+import { sendCustomSpeakerCommunication } from '../src/actions.tsx'
+import { app } from '../src/app.tsx'
 
 const now = Date.UTC(2026, 7, 9)
+const emailHistorySchema = z.object({
+  emails: z.array(z.object({
+    batchId: z.string().nullable(),
+    batchRecipients: z.number().nullable(),
+  })),
+})
 const ids = {
   user: 'speaker-ops-user', org: 'speaker-ops-org', event: 'speaker-ops-event',
   otherEvent: 'speaker-ops-other-event', priya: 'speaker-ops-priya', marcus: 'speaker-ops-marcus',
+  dana: 'speaker-ops-dana', placeholder: 'speaker-ops-placeholder',
   session: 'speaker-ops-session', futureSession: 'speaker-ops-future-session',
   selectedTask: 'speaker-ops-selected-task', allTask: 'speaker-ops-all-task',
 }
@@ -34,6 +46,14 @@ beforeAll(async () => {
       INSERT INTO speaker (id, event_id, email, first_name, last_name, created_at, updated_at)
       VALUES (?, ?, 'marcus@example.test', 'Marcus', 'Okafor', ?, ?)
     `).bind(ids.marcus, ids.event, now, now),
+    env.DB.prepare(dedent`
+      INSERT INTO speaker (id, event_id, email, first_name, last_name, created_at, updated_at)
+      VALUES (?, ?, 'dana@example.test', 'Dana', 'Kowalski', ?, ?)
+    `).bind(ids.dana, ids.event, now, now),
+    env.DB.prepare(dedent`
+      INSERT INTO speaker (id, event_id, email, first_name, last_name, created_at, updated_at)
+      VALUES (?, ?, 'blocked@example.com', 'Blocked', 'Fixture', ?, ?)
+    `).bind(ids.placeholder, ids.event, now, now),
     ...[[ids.session, 'Accepted talk', 'ACCEPTED'], [ids.futureSession, 'Future talk', 'PENDING']].map(([id, title, status]) => env.DB.prepare(dedent`
       INSERT INTO event_session (id, event_id, kind, status, title, created_at, updated_at)
       VALUES (?, ?, 'CONTENT', ?, ?, ?, ?)
@@ -143,6 +163,101 @@ describe('participants and assignment policies', () => {
 })
 
 describe('email history and portal ownership', () => {
+  test('the authenticated bulk action preserves every selected eligible recipient', async () => {
+    const email = 'bulk-organizer@example.test'
+    const password = 'bulk-speaker-message-password'
+    const signUp = await app.handle(new Request('http://localhost/api/auth/sign-up/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Bulk Organizer', email, password }),
+    }))
+    expect(signUp.status).toBe(200)
+    await env.DB.prepare('UPDATE user SET email_verified = 1 WHERE email = ?').bind(email).run()
+    const user = await env.DB.prepare('SELECT id FROM user WHERE email = ?').bind(email).first<{ id: string }>()
+    if (!user) throw new Error('bulk organizer was not created')
+    await env.DB.prepare(dedent`
+      INSERT INTO org_member (member_id, org_id, user_id, role, created_at)
+      VALUES ('speaker-ops-bulk-member', ?, ?, 'admin', ?)
+    `).bind(ids.org, user.id, now).run()
+    const signIn = await app.handle(new Request('http://localhost/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    }))
+    const cookie = signIn.headers.get('set-cookie')?.split(';', 1)[0]
+    if (!cookie) throw new Error('bulk organizer did not receive a session cookie')
+
+    const selectedSpeakers = [ids.priya, ids.marcus, ids.dana, ids.placeholder]
+    const result = await runAction(() => sendCustomSpeakerCommunication({
+      orgId: ids.org,
+      eventId: ids.event,
+      speakerIds: selectedSpeakers,
+      subject: 'Welcome {{firstName}} to {{eventName}}',
+      body: 'Hi {{firstName}} {{lastName}} ({{email}}). Sessions: {{sessions}}. Portal: {{portalUrl}}',
+    }), {
+      request: new Request('http://localhost/action', { method: 'POST', headers: { cookie } }),
+    })
+    expect(result).toMatchObject({ queued: 3, skipped: 1, sent: 0 })
+
+    const rows = await env.DB.prepare(dedent`
+      SELECT batch_id, speaker_id, to_email, subject, body_text
+      FROM email_message WHERE batch_id = ? ORDER BY to_email
+    `).bind(result.batchId).all()
+    expect(rows.results.map((row) => ({ ...row, batch_id: row.batch_id === result.batchId }))).toMatchInlineSnapshot(`
+      [
+        {
+          "batch_id": true,
+          "body_text": "Hey Dana,
+
+      Hi Dana Kowalski (dana@example.test). Sessions: . Portal: https://opensession.dev/portal/speaker-ops
+
+      If anything looks off, just reply to this email.
+      Speaker Event",
+          "speaker_id": "speaker-ops-dana",
+          "subject": "Welcome Dana to Speaker Event",
+          "to_email": "dana@example.test",
+        },
+        {
+          "batch_id": true,
+          "body_text": "Hey Marcus,
+
+      Hi Marcus Okafor (marcus@example.test). Sessions: Future talk. Portal: https://opensession.dev/portal/speaker-ops
+
+      If anything looks off, just reply to this email.
+      Speaker Event",
+          "speaker_id": "speaker-ops-marcus",
+          "subject": "Welcome Marcus to Speaker Event",
+          "to_email": "marcus@example.test",
+        },
+        {
+          "batch_id": true,
+          "body_text": "Hey Priya,
+
+      Hi Priya Raman (priya@example.test). Sessions: Accepted talk. Portal: https://opensession.dev/portal/speaker-ops
+
+      If anything looks off, just reply to this email.
+      Speaker Event",
+          "speaker_id": "speaker-ops-priya",
+          "subject": "Welcome Priya to Speaker Event",
+          "to_email": "priya@example.test",
+        },
+      ]
+    `)
+    expect(rows.results.every((row) => row.batch_id === result.batchId)).toBe(true)
+    expect(rows.results.some((row) => row.to_email === 'blocked@example.com')).toBe(false)
+
+    const fetch = createSpiceflowFetch(app, { headers: { cookie } })
+    const history = await fetch('/org/:orgId/e/:eventId/emails', {
+      params: { orgId: ids.org, eventId: ids.event },
+    })
+    if (!(history instanceof SpiceflowTestResponse)) throw new Error('expected email history page')
+    const { emails } = emailHistorySchema.parse(history.loaderData)
+    const batchRows = emails.filter((row) => row.batchId === result.batchId)
+    expect(batchRows).toHaveLength(result.queued)
+    expect(batchRows.map((row) => row.batchRecipients)).toEqual([result.queued, result.queued, result.queued])
+    expect(await history.text()).toContain(`${result.queued} recipients`)
+  })
+
   test('groups rendered snapshots by batch and deduplicates each recipient', async () => {
     const message = env.DB.prepare(dedent`
       INSERT OR IGNORE INTO email_message
