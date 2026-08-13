@@ -6,8 +6,11 @@
 // real tracks/formats in scope. Save inserts a NEW immutable FormVersion
 // (saveFormVersion warns when field names disappear on a form that already
 // has responses). Version history loads an old version's source into the
-// editor (unsaved until Save). Settings dialog edits name/slug/status/
-// closesAt; purpose/target are immutable.
+// editor (unsaved until Save). A page-global draft API supports restricted
+// browser agents without saving or bypassing auth. The live ChatGPT
+// customization prompt is a <details id="form-customization-prompt"> (and on
+// that API) so browser/computer-use agents can open it and learn MDX forms.
+// Settings dialog edits name/slug/status/closesAt; purpose/target are immutable.
 'use client'
 
 import * as React from 'react'
@@ -55,6 +58,20 @@ import {
 } from './ui/dropdown-menu.tsx'
 import { toastActionError } from './ui/toast.tsx'
 
+declare global {
+  interface Window {
+    openSessionFormEditor?: {
+      getSource(): string
+      setSource(mdxSource: string): void
+      getCustomizationPrompt(): string
+    }
+  }
+}
+
+const FORM_EDITOR_HELP_ID = 'form-mdx-editor-help'
+const FORM_CUSTOMIZATION_PROMPT_ID = 'form-customization-prompt'
+const MDX_SOURCE_MAX = 100_000
+
 // ── Dark mode (hydration-safe, tailwind-skill pattern) ──────────────
 
 function getIsDark(): boolean {
@@ -91,6 +108,8 @@ export function FormEditorPage() {
 
   const newest = versions[0]
   const [source, setSource] = React.useState(newest?.mdxSource ?? '')
+  const sourceRef = React.useRef(source)
+  sourceRef.current = source
   const [loadedVersionId, setLoadedVersionId] = React.useState(newest?.id ?? null)
   const [saving, setSaving] = React.useState(false)
   const [saveError, setSaveError] = React.useState<string | null>(null)
@@ -99,6 +118,27 @@ export function FormEditorPage() {
   const [promptCopied, setPromptCopied] = React.useState(false)
   // Preview is the default open tab; Editor is second.
   const [pane, setPane] = React.useState<'preview' | 'editor'>('preview')
+
+  const customizationPromptRef = React.useRef('')
+  React.useEffect(() => {
+    const formEditorApi = {
+      getSource: () => sourceRef.current,
+      setSource: (mdxSource: string) => {
+        if (typeof mdxSource !== 'string') throw new TypeError('Form MDX source must be a string')
+        if (mdxSource.trim().length === 0) throw new TypeError('Form MDX source must not be empty')
+        if (mdxSource.length > MDX_SOURCE_MAX) {
+          throw new RangeError(`Form MDX source must not exceed ${MDX_SOURCE_MAX} characters`)
+        }
+        setSource(mdxSource)
+        setPane('editor')
+      },
+      getCustomizationPrompt: () => customizationPromptRef.current,
+    }
+    window.openSessionFormEditor = formEditorApi
+    return () => {
+      if (window.openSessionFormEditor === formEditorApi) delete window.openSessionFormEditor
+    }
+  }, [])
 
   // Cmd/Ctrl+P toggles Preview/Editor. Bound on window (preventDefault so
   // the browser print/palette dialog never opens) AND inside Monaco via
@@ -144,6 +184,7 @@ export function FormEditorPage() {
     fieldNames: [...summary.fields, ...summary.participantFields].map((field) => field.name),
     mdxSource: source,
   })
+  customizationPromptRef.current = customizationPrompt
 
   const handleCopyCustomizationPrompt = async () => {
     await navigator.clipboard.writeText(customizationPrompt)
@@ -280,6 +321,36 @@ export function FormEditorPage() {
         </div>
       ) : null}
 
+      {/*
+        Full ChatGPT authoring prompt as a real DOM node so browser/computer-use
+        agents can open this section, read how to write MDX forms, then apply
+        changes via the Editor tab or window.openSessionFormEditor.setSource.
+      */}
+      <details
+        id={FORM_CUSTOMIZATION_PROMPT_ID}
+        data-open-session-form-prompt=""
+        className="rounded-md border border-border bg-muted/30 open:bg-muted/50"
+      >
+        <summary className="cursor-pointer list-none px-3 py-2 text-sm font-medium marker:content-none [&::-webkit-details-marker]:hidden">
+          <span className="flex items-center justify-between gap-2">
+            <span>MDX form authoring prompt for AI agents</span>
+            <span className="text-xs font-normal text-muted-foreground">
+              Same guide as Customize with ChatGPT
+            </span>
+          </span>
+        </summary>
+        <div className="flex flex-col gap-2 border-t border-border px-3 py-3">
+          <p className="text-xs text-muted-foreground">
+            Read this prompt, switch to the Editor tab, replace the MDX with a full valid form,
+            then click Save version. Agents can also call window.openSessionFormEditor.setSource(fullMdx)
+            or window.openSessionFormEditor.getCustomizationPrompt().
+          </p>
+          <pre className="max-h-80 overflow-auto whitespace-pre-wrap rounded-md border border-border bg-background p-3 font-mono text-xs leading-relaxed text-foreground">
+            {customizationPrompt}
+          </pre>
+        </div>
+      </details>
+
       {saveError ? <p className="text-sm text-destructive">{saveError}</p> : null}
       {removedWarning ? (
         <div className="rounded-lg border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
@@ -293,7 +364,7 @@ export function FormEditorPage() {
       ) : null}
 
       <div className="flex min-h-0 flex-col gap-2">
-        <div className="flex items-center gap-1" role="tablist" aria-label="Form view">
+        <div className="flex min-w-0 items-center gap-1" role="tablist" aria-label="Form view">
           {([
             { value: 'preview', label: 'Preview' },
             { value: 'editor', label: 'Editor' },
@@ -314,9 +385,21 @@ export function FormEditorPage() {
               {tab.label}
             </button>
           ))}
-          <span className="ml-1 text-xs text-muted-foreground" title="Toggle editor and preview">
+          <span className="ml-1 shrink-0 text-xs text-muted-foreground" title="Toggle editor and preview">
             ⌘P
           </span>
+          {summary.errors.length > 0 ? (
+            <span
+              className="ml-2 min-w-0 truncate text-sm text-destructive"
+              title={summary.errors
+                .map((error) => `${error.line ? `Line ${error.line}: ` : ''}${error.message}`)
+                .join('\n')}
+            >
+              {summary.errors
+                .map((error) => `${error.line ? `Line ${error.line}: ` : ''}${error.message}`)
+                .join(' · ')}
+            </span>
+          ) : null}
         </div>
 
         {/* Preview first (default). Both panes stay mounted so Monaco keeps
@@ -338,7 +421,12 @@ export function FormEditorPage() {
           </div>
         </div>
 
-        <div className={cn('overflow-hidden rounded-lg border border-border', pane !== 'editor' && 'hidden')}>
+        <div className={cn('flex flex-col gap-2', pane !== 'editor' && 'hidden')}>
+          <p id={FORM_EDITOR_HELP_ID} className="text-sm text-muted-foreground">
+            This MDX source is editable. Click and type, or select all to replace it. Save version publishes the change.
+            Browser agents: read #{FORM_CUSTOMIZATION_PROMPT_ID} or window.openSessionFormEditor for the full authoring prompt and setSource API.
+          </p>
+          <div className="overflow-hidden rounded-lg border border-border">
           <Editor
             height="calc(100vh - 21rem)"
             language="markdown"
@@ -347,8 +435,12 @@ export function FormEditorPage() {
             onChange={(value) => setSource(value ?? '')}
             onMount={(editor, monaco) => {
               editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyP, () => toggleRef.current())
+              // Short help only — the full authoring prompt is huge and lives
+              // at #form-customization-prompt for agents to read on demand.
+              editor.getDomNode()?.querySelector('textarea')?.setAttribute('aria-describedby', FORM_EDITOR_HELP_ID)
             }}
             options={{
+              ariaLabel: 'Form MDX source. Editable multiline code editor.',
               minimap: { enabled: false },
               wordWrap: 'on',
               fontSize: 13,
@@ -360,6 +452,7 @@ export function FormEditorPage() {
               padding: { top: 12, bottom: 12 },
             }}
           />
+          </div>
         </div>
       </div>
 
