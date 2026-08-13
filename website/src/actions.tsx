@@ -2911,8 +2911,17 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
   const assignmentRows = parsed.target === 'SPEAKER'
     ? [...new Set([...selectedSpeakers.map((row) => row.id), ...participants.map((row) => row.speakerId)])].map((speakerId) => ({ speakerId, sessionId: null }))
     : participants.map((row) => ({ speakerId: row.speakerId, sessionId: row.sessionId }))
-  const statements = [
-    ...(parsed.fileRequest && generatedFormId && formVersionId ? [
+  const assignmentStatements = assignmentRows.map((row) => db.insert(schema.taskAssignment).values({
+    eventId: parsed.eventId,
+    taskDefinitionId,
+    speakerId: row.speakerId,
+    sessionId: row.sessionId,
+    dueAt: parsed.dueAt ?? null,
+    createdAt: now,
+    updatedAt: now,
+  }).onConflictDoNothing())
+  if (parsed.fileRequest && generatedFormId && formVersionId) {
+    await db.batch([
       db.insert(schema.form).values({
         id: generatedFormId,
         eventId: parsed.eventId,
@@ -2930,19 +2939,12 @@ export async function createTaskDefinition(input: z.input<typeof createTaskDefin
         mdxSource: generateFileRequestMdx({ title: parsed.title, accept: parsed.fileRequest.accept }),
         createdAt: now,
       }),
-    ] : []),
-    definitionInsert,
-    ...assignmentRows.map((row) => db.insert(schema.taskAssignment).values({
-      eventId: parsed.eventId,
-      taskDefinitionId,
-      speakerId: row.speakerId,
-      sessionId: row.sessionId,
-      dueAt: parsed.dueAt ?? null,
-      createdAt: now,
-      updatedAt: now,
-    }).onConflictDoNothing()),
-  ]
-  await db.batch(statements as [any, ...any[]])
+      definitionInsert,
+      ...assignmentStatements,
+    ])
+  } else {
+    await db.batch([definitionInsert, ...assignmentStatements])
+  }
   return { taskDefinitionId, formId, assigned: assignmentRows.length }
 }
 
