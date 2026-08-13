@@ -17,7 +17,7 @@ import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
 import { Badge, EmptyState, Input, NativeSelect } from './ui/primitives.tsx'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
-import { runAction, toast } from './ui/toast.tsx'
+import { runAction, toast, toastActionError } from './ui/toast.tsx'
 
 export type EvaluationTab = 'rounds' | 'reviewers' | 'assignments' | 'progress' | 'results'
 
@@ -126,49 +126,65 @@ function RoundSelect({ rounds, value, onChange }: { rounds: Round[]; value: stri
 
 function Rounds({ orgId, eventId, rounds }: { orgId: string; eventId: string; rounds: Round[] }) {
   const [creating, startTransition] = useTransition()
+  const [name, setName] = useState('')
+  const [opensAt, setOpensAt] = useState('')
+  const [closesAt, setClosesAt] = useState('')
+  const [blind, setBlind] = useState(false)
+  const [error, setError] = useState<string | null>(null)
   return (
     <div className="flex flex-col gap-4">
-      <ErrorBoundary below fallback={<ErrorBoundary.ErrorMessage className="text-sm text-destructive" />}>
-        <form
-          className="grid gap-4 rounded-lg border border-border p-4 md:grid-cols-2"
-          action={(formData) => startTransition(async () => {
-            const opensAt = Date.parse(String(formData.get('opensAt') ?? ''))
-            const closesAt = Date.parse(String(formData.get('closesAt') ?? ''))
+      <form
+        className="grid gap-4 rounded-lg border border-border p-4 md:grid-cols-2"
+        action={() => startTransition(async () => {
+          setError(null)
+          const parsedOpensAt = opensAt ? Date.parse(opensAt) : null
+          const parsedClosesAt = closesAt ? Date.parse(closesAt) : null
+          try {
+            if (parsedOpensAt != null && Number.isNaN(parsedOpensAt)) throw new Error('Open date is invalid')
+            if (parsedClosesAt != null && Number.isNaN(parsedClosesAt)) throw new Error('Close date is invalid')
             await createForm({
               orgId,
               eventId,
-              name: String(formData.get('name') ?? '').trim(),
+              name,
               purpose: 'EVALUATION',
-              opensAt: Number.isNaN(opensAt) ? null : opensAt,
-              closesAt: Number.isNaN(closesAt) ? null : closesAt,
-              blind: formData.get('blind') === 'on',
+              opensAt: parsedOpensAt,
+              closesAt: parsedClosesAt,
+              blind,
             })
-          })}
-        >
+            toast.success(`"${name.trim()}" is now available in evaluation rounds.`, 'Round created')
+            setName('')
+            setOpensAt('')
+            setClosesAt('')
+            setBlind(false)
+          } catch (cause) {
+            setError(toastActionError(cause, 'Could not create the evaluation round'))
+          }
+        })}
+      >
           <label className="flex flex-col gap-1.5 text-sm font-medium md:col-span-2">
             Round name
-            <Input required name="name" placeholder="Initial review" maxLength={120} />
+            <Input required name="name" placeholder="Initial review" maxLength={120} value={name} onChange={(event) => setName(event.target.value)} />
             <span className="text-xs font-normal text-muted-foreground">Reviewers see this name in their private review workspace.</span>
           </label>
           <label className="flex flex-col gap-1.5 text-sm font-medium">
             Opens at
-            <Input name="opensAt" type="datetime-local" />
+            <Input name="opensAt" type="datetime-local" value={opensAt} onChange={(event) => setOpensAt(event.target.value)} />
             <span className="text-xs font-normal text-muted-foreground">Optional. Review work is blocked before this time.</span>
           </label>
           <label className="flex flex-col gap-1.5 text-sm font-medium">
             Closes at
-            <Input name="closesAt" type="datetime-local" />
+            <Input name="closesAt" type="datetime-local" value={closesAt} onChange={(event) => setClosesAt(event.target.value)} />
             <span className="text-xs font-normal text-muted-foreground">Optional. Review work is blocked at and after this time.</span>
           </label>
           <div className="flex flex-wrap items-end justify-between gap-4 border-t border-border pt-4 md:col-span-2">
             <label className="flex max-w-xl items-start gap-2 text-sm">
-              <input className="mt-0.5" name="blind" type="checkbox" />
+              <input className="mt-0.5" name="blind" type="checkbox" checked={blind} onChange={(event) => setBlind(event.target.checked)} />
               <span className="flex flex-col gap-0.5"><span className="font-medium">Blind review</span><span className="text-muted-foreground">Hide speaker identity and identity-related answers from reviewers. Organizers still see the full submission.</span></span>
             </label>
             <Button type="submit" disabled={creating}><PlusIcon />Create round</Button>
           </div>
-        </form>
-      </ErrorBoundary>
+          {error ? <p className="text-sm text-destructive md:col-span-2" role="alert">{error}</p> : null}
+      </form>
       {rounds.length === 0 ? <EmptyState icon={<StarIcon />} title="No evaluation rounds" description="Create a round, then edit its MDX scorecard." /> : (
         <Frame><Table><TableHeader><TableRow><TableHead>Round</TableHead><TableHead>Dates</TableHead><TableHead>Scorecard</TableHead><TableHead>Reviewers</TableHead><TableHead>Status</TableHead></TableRow></TableHeader><TableBody>
           {rounds.map((round) => <TableRow key={round.id}>

@@ -2,7 +2,10 @@
 // boundaries. Authenticated Google UI remains covered by Playwriter.
 import { env } from 'cloudflare:workers'
 import dedent from 'string-dedent'
+import { runAction } from 'spiceflow/testing'
 import { beforeAll, describe, expect, test } from 'vitest'
+import { createForm } from '../src/actions.tsx'
+import { app } from '../src/app.tsx'
 
 const now = Date.UTC(2026, 7, 9)
 const ids = {
@@ -63,6 +66,69 @@ beforeAll(async () => {
 })
 
 describe('evaluation D1 boundaries', () => {
+  test('reports the existing round and persists a new round with its scorecard', async () => {
+    const email = 'round-organizer@example.test'
+    const password = 'evaluation-round-test-password'
+    const signUp = await app.handle(new Request('http://localhost/api/auth/sign-up/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Round Organizer', email, password }),
+    }))
+    expect(signUp.status).toBe(200)
+    await env.DB.prepare('UPDATE user SET email_verified = 1 WHERE email = ?').bind(email).run()
+    const user = await env.DB.prepare('SELECT id FROM user WHERE email = ?').bind(email).first<{ id: string }>()
+    if (!user) throw new Error('round organizer was not created')
+    await env.DB.prepare(dedent`
+      INSERT INTO org_member (member_id, org_id, user_id, role, created_at)
+      VALUES ('eval-round-organizer-member', ?, ?, 'admin', ?)
+    `).bind(ids.org, user.id, now).run()
+    const signIn = await app.handle(new Request('http://localhost/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    }))
+    const cookie = signIn.headers.get('set-cookie')?.split(';', 1)[0]
+    if (!cookie) throw new Error('round organizer did not receive a session cookie')
+    const runCreateForm = (name: string) => runAction(() => createForm({
+      orgId: ids.org,
+      eventId: ids.event,
+      name,
+      purpose: 'EVALUATION',
+      opensAt: Date.UTC(2026, 7, 10),
+      closesAt: Date.UTC(2026, 7, 12),
+      blind: true,
+    }), {
+      request: new Request('http://localhost/action', {
+        method: 'POST',
+        headers: { cookie },
+      }),
+    })
+
+    await expect(runCreateForm('Initial Review')).rejects.toThrow(
+      `An evaluation round named "Initial Review" already exists. Open "Initial Review" to edit it.`,
+    )
+
+    await expect(runCreateForm('Final Review')).resolves.toMatchObject({
+      name: 'Final Review',
+      slug: 'final-review',
+    })
+    const created = await env.DB.prepare(dedent`
+      SELECT form.name, form.slug, form.blind, form.opens_at, form.closes_at,
+        count(version.id) AS version_count
+      FROM form JOIN form_version version ON version.form_id = form.id
+      WHERE form.event_id = ? AND form.slug = 'final-review'
+      GROUP BY form.id
+    `).bind(ids.event).first()
+    expect(created).toEqual({
+      name: 'Final Review',
+      slug: 'final-review',
+      blind: 1,
+      opens_at: Date.UTC(2026, 7, 10),
+      closes_at: Date.UTC(2026, 7, 12),
+      version_count: 1,
+    })
+  })
+
   test('keeps existing shareable org invitations and idempotent membership inserts', async () => {
     await env.DB.prepare(dedent`
       INSERT INTO org_invitation (invitation_id, org_id, purpose, role, created_by, expires_at, created_at)

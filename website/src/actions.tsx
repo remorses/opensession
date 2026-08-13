@@ -810,13 +810,13 @@ async function requireFormAccess({ actionRequest, orgId, eventId, formId }: {
 const createFormSchema = z.object({
   orgId: z.string().min(1),
   eventId: z.string().min(1),
-  name: z.string().trim().min(1).max(120),
+  name: z.string().trim().min(1, 'Form name is required').max(120, 'Form name must be 120 characters or less'),
   slug: z.string().trim().toLowerCase().regex(SLUG_RE).max(60).optional(),
   purpose: z.enum(['CFP', 'PORTAL', 'EVALUATION']),
   /** Portal only; CFP forms are always about the submission. */
   target: z.enum(['SUBMISSION', 'SPEAKER']).optional(),
-  opensAt: z.number().int().positive().nullable().optional(),
-  closesAt: z.number().int().positive().nullable().optional(),
+  opensAt: z.number().int('Open date is invalid').positive('Open date is invalid').nullable().optional(),
+  closesAt: z.number().int('Close date is invalid').positive('Close date is invalid').nullable().optional(),
   blind: z.boolean().optional(),
 })
 
@@ -833,6 +833,15 @@ export async function createForm(input: z.input<typeof createFormSchema>) {
 
   const slug = parsed.slug || slugify(parsed.name)
   if (!SLUG_RE.test(slug)) throw new Error('Could not derive a valid slug from the form name')
+
+  const duplicateError = (existing: { name: string; purpose: string }) => {
+    if (parsed.purpose === 'EVALUATION' && existing.purpose === 'EVALUATION') {
+      return new Error(`An evaluation round named "${existing.name}" already exists. Open "${existing.name}" to edit it.`)
+    }
+    return new Error(`The slug "${slug}" is already used by "${existing.name}" in this event`)
+  }
+  const existing = await db.query.form.findFirst({ where: { eventId: parsed.eventId, slug } })
+  if (existing) throw duplicateError(existing)
 
   const formId = ulid()
   const template =
@@ -860,10 +869,14 @@ export async function createForm(input: z.input<typeof createFormSchema>) {
       }),
       db.insert(schema.formVersion).values({ formId, mdxSource: template }),
     ] as const)
-  } catch {
-    // Per-event unique slug — the most likely failure mode.
-    throw new Error(`The slug "${slug}" is already used by another form of this event`)
+  } catch (cause) {
+    // A concurrent create can pass the pre-read. Only translate the failure
+    // when the conflicting row now exists; preserve every other DB error.
+    const raced = await db.query.form.findFirst({ where: { eventId: parsed.eventId, slug } })
+    if (raced) throw duplicateError(raced)
+    throw cause
   }
+  if (parsed.purpose === 'EVALUATION') return { id: formId, name: parsed.name, slug }
   throw redirect(router.href('/org/:orgId/e/:eventId/forms/:formId', {
     orgId: parsed.orgId,
     eventId: parsed.eventId,
