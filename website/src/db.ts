@@ -14,7 +14,7 @@
 // (owner_user_id) WHERE kind = 'personal'. Membership is NEVER cached —
 // removing a member must apply immediately.
 
-import { env, waitUntil } from 'cloudflare:workers'
+import { env } from 'cloudflare:workers'
 import { drizzle } from 'drizzle-orm/sqlite-proxy'
 import * as schema from 'db/schema'
 import { betterAuth } from 'better-auth/minimal'
@@ -55,20 +55,26 @@ export function getDb() {
 
 export function getAuth() {
   const db = getDb()
-  return betterAuth({
+  const auth = betterAuth({
     baseURL: getBaseUrl(),
     secret: env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, { provider: 'sqlite' }),
     emailAndPassword: {
       enabled: true,
       requireEmailVerification: true,
+      async onExistingUserSignUp({ user }, request) {
+        if (user.emailVerified) return
+        await auth.api.sendVerificationEmail({
+          body: { email: user.email },
+          headers: request?.headers,
+        })
+      },
     },
     emailVerification: {
       autoSignInAfterVerification: true,
       sendOnSignIn: true,
-      sendVerificationEmail({ user, url }) {
-        waitUntil(sendAccountVerificationEmail({ email: user.email, url }))
-        return Promise.resolve()
+      async sendVerificationEmail({ user, url }) {
+        await sendAccountVerificationEmail({ email: user.email, url })
       },
     },
     session: {
@@ -95,6 +101,7 @@ export function getAuth() {
       },
     },
   })
+  return auth
 }
 
 export function getBaseUrl(): string {
