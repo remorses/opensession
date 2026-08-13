@@ -25,7 +25,7 @@ import {
   requireVerifiedEmail,
   type Session,
 } from './db.ts'
-import { collectFields, hasFileUploadField, libraryOptions, type FieldOption, type ValuesRecord } from './forms/collect-fields.ts'
+import { collectFields, getFileUploadAccept, libraryOptions, type FieldOption, type ValuesRecord } from './forms/collect-fields.ts'
 import { loadAgendaSessions, speakerDisplayName } from './lib/agenda-server.ts'
 import { canAccessFile, formScheduleBlock, restoreSubmissionValues } from './lib/cfp-submission.ts'
 import {
@@ -478,8 +478,12 @@ export const app = new Spiceflow()
           : null
         mdxSource = version?.mdxSource ?? null
       }
-      if (!mdxSource || !hasFileUploadField(mdxSource, fieldName)) {
+      const accept = mdxSource ? getFileUploadAccept(mdxSource, fieldName) : undefined
+      if (accept === undefined) {
         return json({ code: 'invalid_upload_slot', message: 'This file field is not available' }, { status: 400 })
+      }
+      if (accept && !matchesFileAccept(uploaded, accept)) {
+        return json({ code: 'unsupported_file', message: `This field accepts: ${accept}` }, { status: 415 })
       }
       const existingFiles = await db.query.file.findMany({
         where: { eventId, uploadedBySpeakerId: speaker.id },
@@ -2607,6 +2611,17 @@ function isAllowedUpload(
   if (kind === 'HEADSHOT' || kind === 'IMAGE') return isImage
   if (kind === 'SLIDES' || kind === 'DOCUMENT') return isDocument
   return isImage || isDocument
+}
+
+function matchesFileAccept(file: File, accept: string): boolean {
+  const extension = `.${file.name.split('.').pop()?.toLowerCase() ?? ''}`
+  return accept.split(',').some((raw) => {
+    const rule = raw.trim().toLowerCase()
+    if (!rule) return false
+    if (rule.startsWith('.')) return extension === rule
+    if (rule.endsWith('/*')) return file.type.toLowerCase().startsWith(rule.slice(0, -1))
+    return file.type.toLowerCase() === rule
+  })
 }
 
 function sanitizeFileName(fileName: string): string {

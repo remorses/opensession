@@ -283,20 +283,27 @@ export function collectFields({ mdxSource, scope }: { mdxSource: string; scope: 
   return result
 }
 
-export function hasFileUploadField(mdxSource: string, fieldName: string): boolean {
+export function getFileUploadAccept(mdxSource: string, fieldName: string): string | null | undefined {
   type MdxJsxElement = Extract<MyRootContent, { type: 'mdxJsxFlowElement' | 'mdxJsxTextElement' }>
 
   const isMdxJsxElement = (node: MyRootContent): node is MdxJsxElement =>
     node.type === 'mdxJsxFlowElement' || node.type === 'mdxJsxTextElement'
 
-  const visit = (node: MyRootContent): boolean => {
+  const visit = (node: MyRootContent): string | null | undefined => {
     if (isMdxJsxElement(node) && node.name === 'FileUpload') {
       const matches = node.attributes.some((attribute) =>
         attribute.type === 'mdxJsxAttribute'
         && attribute.name === 'name'
         && attribute.value === fieldName,
       )
-      if (matches) return true
+      if (matches) {
+        const accept = node.attributes.find((attribute) =>
+          attribute.type === 'mdxJsxAttribute' && attribute.name === 'accept'
+        )
+        return accept?.type === 'mdxJsxAttribute' && typeof accept.value === 'string'
+          ? accept.value
+          : null
+      }
     }
     switch (node.type) {
       case 'blockquote':
@@ -316,15 +323,23 @@ export function hasFileUploadField(mdxSource: string, fieldName: string): boolea
       case 'table':
       case 'tableCell':
       case 'tableRow':
-        return node.children.some(visit)
+        for (const child of node.children) {
+          const accept = visit(child)
+          if (accept !== undefined) return accept
+        }
+        return undefined
       default:
-        return false
+        return undefined
     }
   }
 
   try {
     return visit(mdxParse(mdxSource))
   } catch {
-    return false
+    return undefined
   }
+}
+
+export function hasFileUploadField(mdxSource: string, fieldName: string): boolean {
+  return getFileUploadAccept(mdxSource, fieldName) !== undefined
 }

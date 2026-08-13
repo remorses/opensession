@@ -6,11 +6,15 @@ import { runAction } from 'spiceflow/testing'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
 import {
+  addTaskComment,
   createTaskDefinition,
+  remindTaskAssignments,
   restoreSessionRevision,
+  savePortalProfile,
   saveSessionContent,
   setSessionVisibility,
   submitPortalFormTask,
+  updateTaskAssignmentDue,
 } from '../src/actions.tsx'
 import { app, loadFilesWorkspace, loadZipFiles, streamZip } from '../src/app.tsx'
 import {
@@ -20,6 +24,7 @@ import {
 } from '../src/lib/content-management.ts'
 import { getDb } from '../src/db.ts'
 import { assertTaskSlotFiles } from '../src/lib/portal-server.ts'
+import { runCron } from '../src/lib/emails/cron.ts'
 
 const now = Date.UTC(2026, 7, 9)
 const ids = {
@@ -27,10 +32,12 @@ const ids = {
   org: 'content-org', event: 'content-event', otherEvent: 'content-other-event',
   speaker: 'content-speaker', session: 'content-session', form: 'content-form', version: 'content-version',
   task: 'content-task', assignment: 'content-assignment', file1: 'content-file-1', file2: 'content-file-2',
+  profileForm: 'content-profile-form', profileVersion: 'content-profile-version',
 }
 
 let speakerCookie = ''
 let organizerCookie = ''
+let outsiderCookie = ''
 let replacementSpeakerId = ''
 let actionOrganizerId = ''
 
@@ -65,8 +72,10 @@ function runWithCookie<T>(cookie: string, action: () => Promise<T>) {
 beforeAll(async () => {
   const speakerAuth = await signUp('Replacement Speaker', 'replacement-content@example.test')
   const organizerAuth = await signUp('Content Action Organizer', 'action-organizer-content@example.test')
+  const outsiderAuth = await signUp('Content Outsider', 'outsider-action-content@example.test')
   speakerCookie = speakerAuth.cookie
   organizerCookie = organizerAuth.cookie
+  outsiderCookie = outsiderAuth.cookie
   actionOrganizerId = organizerAuth.userId
   replacementSpeakerId = 'content-replacement-speaker'
   await env.DB.batch([
@@ -111,6 +120,14 @@ beforeAll(async () => {
       VALUES (?, ?, '<FileUpload name="slides" />', ?)
     `).bind(ids.version, ids.form, now),
     env.DB.prepare(dedent`
+      INSERT INTO form (id, event_id, purpose, target, name, slug, status, created_at, updated_at)
+      VALUES (?, ?, 'PORTAL', 'SPEAKER', 'Speaker Profile', 'speaker-profile-content', 'OPEN', ?, ?)
+    `).bind(ids.profileForm, ids.event, now, now),
+    env.DB.prepare(dedent`
+      INSERT INTO form_version (id, form_id, mdx_source, created_at)
+      VALUES (?, ?, '<TextField name="speaker.bio" /><TextField name="speaker.travelLogistics" /><FileUpload name="speaker.headshot" accept="image/*" />', ?)
+    `).bind(ids.profileVersion, ids.profileForm, now),
+    env.DB.prepare(dedent`
       INSERT INTO task_definition (id, event_id, title, target, source, assignment_policy, form_id, created_at)
       VALUES (?, ?, 'Upload Session Presentation', 'SUBMISSION', 'FORM', 'SELECTED', ?, ?)
     `).bind(ids.task, ids.event, ids.form, now),
@@ -154,6 +171,60 @@ beforeAll(async () => {
 })
 
 describe('immutable file slots and role-safe threads', () => {
+  test('round-trips a portal headshot, custom profile value, and owned file bytes', async () => {
+    const body = new FormData()
+    body.set('file', new File(['real-headshot-bytes'], 'headshot.png', { type: 'image/png' }))
+    body.set('eventId', ids.event)
+    body.set('kind', 'HEADSHOT')
+    body.set('formId', ids.profileForm)
+    body.set('fieldName', 'speaker.headshot')
+    const uploaded = await app.handle(new Request('http://localhost/api/upload', {
+      method: 'POST', headers: { cookie: speakerCookie }, body,
+    }))
+    expect(uploaded.status).toBe(200)
+    const { fileId } = await uploaded.json<{ fileId: string }>()
+
+    await runWithCookie(speakerCookie, () => savePortalProfile({
+      eventId: ids.event,
+      formId: ids.profileForm,
+      submission: {
+        values: {
+          'speaker.bio': 'Portal profile round trip',
+          'speaker.travelLogistics': 'Arrival Friday by train',
+          'speaker.headshot': fileId,
+        },
+        participants: [],
+      },
+    }))
+
+    const metadata = await env.DB.prepare(dedent`
+      SELECT file.file_name AS fileName, file.mime_type AS mimeType, file.size_bytes AS sizeBytes,
+        file.uploaded_by_speaker_id AS uploadedBySpeakerId, speaker.headshot_file_id AS headshotFileId,
+        value.value AS customValue
+      FROM file
+      JOIN speaker ON speaker.id = file.uploaded_by_speaker_id
+      JOIN form_field_value value ON value.subject_speaker_id = speaker.id
+      WHERE file.id = ? AND value.name = 'speaker.travelLogistics'
+    `).bind(fileId).first()
+    expect({ ...metadata, headshotFileId: metadata?.headshotFileId === fileId }).toMatchInlineSnapshot(`
+      {
+        "customValue": "Arrival Friday by train",
+        "fileName": "headshot.png",
+        "headshotFileId": true,
+        "mimeType": "image/png",
+        "sizeBytes": 19,
+        "uploadedBySpeakerId": "content-replacement-speaker",
+      }
+    `)
+    const ownerDownload = await app.handle(new Request(`http://localhost/files/${fileId}`, { headers: { cookie: speakerCookie } }))
+    expect({
+      status: ownerDownload.status,
+      bytes: new TextDecoder().decode(await ownerDownload.arrayBuffer()),
+    }).toEqual({ status: 200, bytes: 'real-headshot-bytes' })
+    const outsiderDownload = await app.handle(new Request(`http://localhost/files/${fileId}`, { headers: { cookie: outsiderCookie } }))
+    expect(outsiderDownload.status).toBe(404)
+  })
+
   test('creates a direct file request and assignments through the real action', async () => {
     const result = await runWithCookie(organizerCookie, () => createTaskDefinition({
       orgId: ids.org,
@@ -268,6 +339,77 @@ describe('immutable file slots and role-safe threads', () => {
     })
   })
 
+  test('applies due overrides, role-safe comments, and deduplicated reminder outbox snapshots', async () => {
+    const manualDueAt = Date.now() + 3 * 86_400_000
+    await runWithCookie(organizerCookie, () => updateTaskAssignmentDue({
+      orgId: ids.org, eventId: ids.event, assignmentId: ids.assignment, dueAt: manualDueAt,
+    }))
+    await runWithCookie(speakerCookie, () => addTaskComment({
+      eventId: ids.event, assignmentId: 'content-replacement-assignment', fieldName: 'slides', body: 'Speaker action comment',
+    }))
+    await runWithCookie(organizerCookie, () => addTaskComment({
+      eventId: ids.event, assignmentId: 'content-replacement-assignment', fieldName: 'slides', body: 'Organizer action reply',
+    }))
+    await expect(runWithCookie(outsiderCookie, () => addTaskComment({
+      eventId: ids.event, assignmentId: 'content-replacement-assignment', fieldName: 'slides', body: 'Unauthorized comment',
+    }))).rejects.toThrow('Task assignment not found')
+
+    const manual = await runWithCookie(organizerCookie, () => remindTaskAssignments({
+      orgId: ids.org, eventId: ids.event, assignmentIds: [ids.assignment],
+    }))
+    const cronNow = Date.UTC(2026, 7, 9, 12)
+    await runWithCookie(organizerCookie, () => updateTaskAssignmentDue({
+      orgId: ids.org,
+      eventId: ids.event,
+      assignmentId: ids.assignment,
+      dueAt: Date.UTC(2026, 7, 12, 12),
+    }))
+    const firstCron = await runCron({ now: cronNow })
+    const secondCron = await runCron({ now: cronNow })
+    const messages = await env.DB.prepare(dedent`
+      SELECT kind, subject, body_text AS bodyText, dedupe_key AS dedupeKey
+      FROM email_message WHERE event_id = ? AND speaker_id = ? AND kind = 'TASK_REMINDER'
+      ORDER BY created_at, id
+    `).bind(ids.event, ids.speaker).all()
+    expect({ manual, firstCron: firstCron.taskRemindersQueued, secondCron: secondCron.taskRemindersQueued })
+      .toEqual({ manual: { queued: 1 }, firstCron: 1, secondCron: 0 })
+    expect(messages.results.map((row) => ({
+      ...row,
+      dedupeKey: String(row.dedupeKey).replace(/manual-task-reminder:[^:]+:\d+/, 'manual-task-reminder:<timestamp>'),
+    }))).toMatchInlineSnapshot(`
+      [
+        {
+          "bodyText": "Hey Priya,
+
+      "Upload Session Presentation" is still open in your Content Event speaker portal. It is due in 3 days.
+
+      It takes a couple of minutes:
+      https://opensession.dev/portal/content-event/tasks/content-assignment
+
+      If anything looks off, just reply to this email.
+      Content Event",
+          "dedupeKey": "manual-task-reminder:<timestamp>",
+          "kind": "TASK_REMINDER",
+          "subject": "Reminder: Upload Session Presentation",
+        },
+        {
+          "bodyText": "Hey Priya,
+
+      "Upload Session Presentation" is still open in your Content Event speaker portal. It is due in 3 days.
+
+      It takes a couple of minutes:
+      https://opensession.dev/portal/content-event/tasks/content-assignment
+
+      If anything looks off, just reply to this email.
+      Content Event",
+          "dedupeKey": "reminder:task:content-assignment:2026-08-09",
+          "kind": "TASK_REMINDER",
+          "subject": "Reminder: Upload Session Presentation",
+        },
+      ]
+    `)
+  })
+
   test('keeps both R2 versions downloadable and identifies the latest', async () => {
     const rows = await env.DB.prepare(dedent`
       SELECT id, task_assignment_id AS taskAssignmentId, field_name AS fieldName,
@@ -336,6 +478,32 @@ describe('immutable file slots and role-safe threads', () => {
 
     expect(response.status).toBe(400)
     expect(await response.json()).toMatchObject({ code: 'invalid_upload_slot' })
+  })
+
+  test('rejects a task upload that violates the file field accept constraint', async () => {
+    const assignment = await env.DB.prepare(dedent`
+      SELECT assignment.id
+      FROM task_assignment assignment
+      JOIN task_definition task ON task.id = assignment.task_definition_id
+      WHERE task.event_id = ? AND task.title = 'Upload Final Headshot (print quality)'
+    `).bind(ids.event).first<{ id: string }>()
+    if (!assignment) throw new Error('direct headshot request is missing')
+
+    const body = new FormData()
+    body.set('file', new File(['not an image'], 'speaker-notes.pdf', { type: 'application/pdf' }))
+    body.set('eventId', ids.event)
+    body.set('kind', 'DOCUMENT')
+    body.set('taskAssignmentId', assignment.id)
+    body.set('fieldName', 'deliverable')
+
+    const response = await app.handle(new Request('http://localhost/api/upload', {
+      method: 'POST',
+      headers: { cookie: speakerCookie },
+      body,
+    }))
+
+    expect(response.status).toBe(415)
+    expect(await response.json()).toMatchObject({ code: 'unsupported_file' })
   })
 
   test('accepts a speaker upload for a file field in the assigned form', async () => {
