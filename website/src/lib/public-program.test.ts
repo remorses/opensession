@@ -2,13 +2,16 @@
 import { describe, expect, test } from 'vitest'
 import {
   autoPlaceSessions,
+  buildEmbedOutput,
   buildPublicWidgetScript,
   isPublicProgramSession,
   projectPublicProgram,
+  parseEmbedPresets,
   renderPublicWidgetHtml,
   renderPublicWidgetXml,
   summarizeProgramPublication,
   type PublicProgramSource,
+  type EmbedPreset,
 } from './public-program.ts'
 import { nextTrackColor } from './utils.ts'
 
@@ -165,6 +168,82 @@ describe('public program projection', () => {
       title: 'DevFlow "sessions"',
     })).toMatchInlineSnapshot(`
       "(()=>{const s=document.currentScript;if(!s)return;const f=document.createElement('iframe');f.src=\"https://opensession.dev/embed/devflow/sessions?track=ai\";f.title=\"DevFlow \\\"sessions\\\"\";f.loading='lazy';f.style.cssText='width:100%;height:720px;border:0';f.allow='clipboard-write';s.insertAdjacentElement('afterend',f)})();"
+    `)
+  })
+})
+
+describe('embed presets', () => {
+  const preset: EmbedPreset = {
+    name: 'AI sessions',
+    enabled: true,
+    widget: 'sessions',
+    outputFormat: 'html',
+    accent: '#123abc',
+    compact: true,
+    trackId: 'track/ai',
+    formatId: 'talk',
+    roomId: '',
+    visibleFields: ['description', 'speakers', 'time'],
+  }
+
+  test('strictly parses the versioned local storage document and removes malformed rows', () => {
+    expect(parseEmbedPresets(JSON.stringify({
+      version: 1,
+      presets: [
+        preset,
+        { ...preset, name: '', enabled: 'yes' },
+        { ...preset, name: 'Unexpected', extra: true },
+        { ...preset, name: 'Bad field', visibleFields: ['description', 'privateEmail'] },
+      ],
+    }))).toMatchInlineSnapshot(`
+      [
+        {
+          "accent": "#123abc",
+          "compact": true,
+          "enabled": true,
+          "formatId": "talk",
+          "name": "AI sessions",
+          "outputFormat": "html",
+          "roomId": "",
+          "trackId": "track/ai",
+          "visibleFields": [
+            "description",
+            "speakers",
+            "time",
+          ],
+          "widget": "sessions",
+        },
+      ]
+    `)
+    expect(parseEmbedPresets('{broken')).toEqual([])
+    expect(parseEmbedPresets(JSON.stringify({ version: 2, presets: [preset] }))).toEqual([])
+  })
+
+  test('uses one serializer for exact hosted URLs and snippets', () => {
+    expect(buildEmbedOutput({
+      appUrl: 'https://opensession.dev/base',
+      eventSlug: 'Dev Flow',
+      eventName: 'DevFlow & Friends',
+      config: preset,
+    })).toMatchInlineSnapshot(`
+      {
+        "output": "<iframe src=\"https://opensession.dev/public/Dev%20Flow/widget.html?accent=%23123abc&amp;compact=1&amp;track=track%2Fai&amp;format=talk&amp;fields=description%2Cspeakers%2Ctime&amp;widget=sessions\" title=\"DevFlow &amp; Friends sessions\" loading=\"lazy\" style=\"width:100%;height:720px;border:0\"></iframe>",
+        "outputUrl": "https://opensession.dev/public/Dev%20Flow/widget.html?accent=%23123abc&compact=1&track=track%2Fai&format=talk&fields=description%2Cspeakers%2Ctime&widget=sessions",
+        "widgetUrl": "https://opensession.dev/embed/Dev%20Flow/sessions?accent=%23123abc&compact=1&track=track%2Fai&format=talk&fields=description%2Cspeakers%2Ctime",
+      }
+    `)
+
+    expect(buildEmbedOutput({
+      appUrl: 'https://opensession.dev',
+      eventSlug: 'devflow',
+      eventName: 'DevFlow',
+      config: { ...preset, outputFormat: 'ical', roomId: 'main room' },
+    })).toMatchInlineSnapshot(`
+      {
+        "output": "https://opensession.dev/public/devflow/schedule.ics?track=track%2Fai&format=talk&room=main+room",
+        "outputUrl": "https://opensession.dev/public/devflow/schedule.ics?track=track%2Fai&format=talk&room=main+room",
+        "widgetUrl": "https://opensession.dev/embed/devflow/sessions?accent=%23123abc&compact=1&track=track%2Fai&format=talk&room=main+room&fields=description%2Cspeakers%2Ctime",
+      }
     `)
   })
 })

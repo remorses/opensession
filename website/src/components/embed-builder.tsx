@@ -1,17 +1,25 @@
-// Organizer embed builder. Configuration stays in validated iframe query
-// parameters; no widget records or saved configuration tables are needed.
+// Organizer embed builder with browser-local named presets. Public output
+// configuration stays in validated query parameters, never database rows.
 'use client'
 
-import { useState } from 'react'
-import { CheckIcon, CircleAlertIcon, ClipboardIcon, ExternalLinkIcon, RefreshCwIcon } from 'lucide-react'
+import { useEffect, useState } from 'react'
+import { CheckIcon, CircleAlertIcon, ClipboardIcon, ExternalLinkIcon, RefreshCwIcon, Trash2Icon } from 'lucide-react'
 import { Link, router, useLoaderData } from 'spiceflow/react'
-import type { PublicWidgetField, PublicWidgetView } from '../lib/public-program.ts'
+import {
+  buildEmbedOutput,
+  parseEmbedPresets,
+  PUBLIC_WIDGET_FIELDS,
+  serializeEmbedPresets,
+  type EmbedOutputFormat,
+  type EmbedPreset,
+  type PublicWidgetField,
+  type PublicWidgetView,
+} from '../lib/public-program.ts'
 import { Button } from './ui/button.tsx'
 import { Frame } from './ui/frame.tsx'
-import { Input, NativeSelect } from './ui/primitives.tsx'
+import { Badge, Input, NativeSelect } from './ui/primitives.tsx'
+import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from './ui/table.tsx'
 import { toast } from './ui/toast.tsx'
-
-type OutputFormat = 'styled' | 'html' | 'json' | 'xml' | 'ical'
 
 const widgetTypes: Array<{ value: PublicWidgetView; label: string; description: string }> = [
   { value: 'sessions', label: 'Sessions list', description: 'A searchable list for event and content pages.' },
@@ -20,7 +28,7 @@ const widgetTypes: Array<{ value: PublicWidgetView; label: string; description: 
   { value: 'itinerary', label: 'Attendee itinerary', description: 'A schedule list where attendees can build a personal plan.' },
   { value: 'gallery', label: 'Speaker gallery', description: 'A visual speaker grid for landing pages and promotional sites.' },
 ]
-const outputFormats: Array<{ value: OutputFormat; label: string; kind: string; description: string }> = [
+const outputFormats: Array<{ value: EmbedOutputFormat; label: string; kind: string; description: string }> = [
   { value: 'styled', label: 'Styled JavaScript', kind: 'Embed code', description: 'Paste one script tag into a website. Basic coding access is required.' },
   { value: 'html', label: 'Hosted HTML', kind: 'Embed code', description: 'Paste an iframe into a website. No JavaScript integration is required.' },
   { value: 'json', label: 'JSON', kind: 'API feed', description: 'Structured data for a custom website or app. Developer work is required.' },
@@ -45,7 +53,7 @@ export function EmbedBuilder() {
   const { currentOrgId } = useLoaderData('/org/:orgId/*')
   const { event, tracks, formats, rooms, appUrl } = useLoaderData('/org/:orgId/e/:eventId/*')
   const [widget, setWidget] = useState<PublicWidgetView>('sessions')
-  const [format, setOutputFormat] = useState<OutputFormat>('styled')
+  const [format, setOutputFormat] = useState<EmbedOutputFormat>('styled')
   const [accent, setAccent] = useState('#171717')
   const [compact, setCompact] = useState(false)
   const [track, setTrack] = useState('')
@@ -53,38 +61,72 @@ export function EmbedBuilder() {
   const [room, setRoom] = useState('')
   const [visibleFields, setVisibleFields] = useState<PublicWidgetField[]>(fields.map((field) => field.value))
   const [refreshToken, setRefreshToken] = useState(0)
-  const params = new URLSearchParams()
-  if (accent !== '#171717') params.set('accent', accent)
-  if (compact) params.set('compact', '1')
-  if (track) params.set('track', track)
-  if (sessionFormat) params.set('format', sessionFormat)
-  if (room) params.set('room', room)
-  if (visibleFields.length !== fields.length) params.set('fields', visibleFields.join(','))
-  const feedParams = new URLSearchParams()
-  if (track) feedParams.set('track', track)
-  if (sessionFormat) feedParams.set('format', sessionFormat)
-  if (room) feedParams.set('room', room)
-  const suffix = params.size > 0 ? `?${params}` : ''
-  const widgetUrl = new URL(`/embed/${encodeURIComponent(event.slug)}/${widget}${suffix}`, appUrl).href
-  const outputParams = new URLSearchParams(params)
-  outputParams.set('widget', widget)
-  const outputSuffix = `?${outputParams}`
-  const outputUrl = format === 'styled'
-    ? new URL(`/public/${encodeURIComponent(event.slug)}/widget.js${outputSuffix}`, appUrl).href
-    : format === 'html'
-      ? new URL(`/public/${encodeURIComponent(event.slug)}/widget.html${outputSuffix}`, appUrl).href
-      : format === 'json'
-        ? new URL(`/public/${encodeURIComponent(event.slug)}/widget.json${outputSuffix}`, appUrl).href
-        : format === 'xml'
-          ? new URL(`/public/${encodeURIComponent(event.slug)}/widget.xml${outputSuffix}`, appUrl).href
-          : new URL(`/public/${encodeURIComponent(event.slug)}/schedule.ics${feedParams.size ? `?${feedParams}` : ''}`, appUrl).href
-  const output = format === 'styled'
-    ? `<script async src="${outputUrl}"></script>`
-    : format === 'html'
-      ? `<iframe src="${outputUrl}" title="${event.name} ${widget}" loading="lazy" style="width:100%;height:720px;border:0"></iframe>`
-      : outputUrl
+  const [presetName, setPresetName] = useState('')
+  const [presets, setPresets] = useState<EmbedPreset[]>([])
+  const [presetsReady, setPresetsReady] = useState(false)
+  const [editingName, setEditingName] = useState<string | null>(null)
+  const [nextName, setNextName] = useState('')
+  const [retrieved, setRetrieved] = useState<{ name: string; output: string } | null>(null)
+  const storageKey = `opensession:embed-presets:${event.id}`
+  const config = {
+    widget, outputFormat: format, accent, compact, trackId: track,
+    formatId: sessionFormat, roomId: room, visibleFields,
+  }
+  const { widgetUrl, outputUrl, output } = buildEmbedOutput({
+    appUrl, eventSlug: event.slug, eventName: event.name, config,
+  })
   const widgetDescription = widgetTypes.find((item) => item.value === widget)?.description
   const outputFormat = outputFormats.find((item) => item.value === format)!
+
+  useEffect(() => {
+    const stored = localStorage.getItem(storageKey)
+    const parsed = parseEmbedPresets(stored)
+    setPresets(parsed)
+    setPresetsReady(true)
+    if (stored && serializeEmbedPresets(parsed) !== stored) {
+      if (parsed.length) localStorage.setItem(storageKey, serializeEmbedPresets(parsed))
+      else localStorage.removeItem(storageKey)
+    }
+  }, [storageKey])
+
+  useEffect(() => {
+    if (!presetsReady) return
+    if (presets.length) localStorage.setItem(storageKey, serializeEmbedPresets(presets))
+    else localStorage.removeItem(storageKey)
+  }, [presets, presetsReady, storageKey])
+
+  function savePreset() {
+    const name = presetName.trim()
+    if (!name) return toast.error('Enter a preset name')
+    if (presets.some((preset) => preset.name.toLocaleLowerCase('en-US') === name.toLocaleLowerCase('en-US'))) {
+      return toast.error('Preset names must be unique')
+    }
+    setPresets((current) => [...current, { name, enabled: true, ...config }])
+    setPresetName('')
+    toast.success('Embed preset saved in this browser')
+  }
+
+  function loadPreset(preset: EmbedPreset) {
+    setWidget(preset.widget)
+    setOutputFormat(preset.outputFormat)
+    setAccent(preset.accent)
+    setCompact(preset.compact)
+    setTrack(preset.trackId)
+    setSessionFormat(preset.formatId)
+    setRoom(preset.roomId)
+    setVisibleFields(preset.visibleFields)
+    toast.success(`Loaded ${preset.name}`)
+  }
+
+  function renamePreset(name: string) {
+    const renamed = nextName.trim()
+    if (!renamed) return toast.error('Enter a preset name')
+    if (presets.some((preset) => preset.name !== name && preset.name.toLocaleLowerCase('en-US') === renamed.toLocaleLowerCase('en-US'))) {
+      return toast.error('Preset names must be unique')
+    }
+    setPresets((current) => current.map((preset) => preset.name === name ? { ...preset, name: renamed } : preset))
+    setEditingName(null)
+  }
 
   async function copySnippet() {
     try {
@@ -100,7 +142,7 @@ export function EmbedBuilder() {
       <div className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold tracking-tight">Embeds and feeds</h1>
         <p className="text-sm text-muted-foreground">
-          Choose a public display or data feed. Configuration stays in each URL, so there is nothing to save or regenerate.
+          Choose a public display or data feed. Output configuration stays in each URL. Named presets stay only in this browser.
         </p>
       </div>
 
@@ -205,6 +247,46 @@ export function EmbedBuilder() {
             <p className="text-sm text-muted-foreground">Outputs use current organizer data. Refreshing does not require saving or regenerating the embed.</p>
           </div>
         </div>
+      </div>
+
+      <div className="flex flex-col gap-3 border-t border-border pt-5">
+        <div className="flex flex-col gap-1">
+          <h2 className="font-semibold">Saved embed presets</h2>
+          <p className="text-sm text-muted-foreground">Presets organize code in this browser. Disabling a preset does not revoke URLs or code that was already copied.</p>
+        </div>
+        <div className="flex max-w-xl gap-2">
+          <Input aria-label="Preset name" placeholder="Preset name" value={presetName} onChange={(event) => setPresetName(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') savePreset() }} />
+          <Button onClick={savePreset}>Save current</Button>
+        </div>
+        {presets.length ? (
+          <Frame>
+            <Table>
+              <TableHeader><TableRow><TableHead>Name</TableHead><TableHead>Configuration</TableHead><TableHead className="text-right">Actions</TableHead></TableRow></TableHeader>
+              <TableBody>{presets.map((preset) => {
+                const presetOutput = buildEmbedOutput({ appUrl, eventSlug: event.slug, eventName: event.name, config: preset })
+                return <TableRow key={preset.name} className={preset.enabled ? undefined : 'opacity-55'}>
+                  <TableCell>
+                    {editingName === preset.name ? <div className="flex gap-2"><Input aria-label={`Rename ${preset.name}`} value={nextName} onChange={(event) => setNextName(event.target.value)} /><Button size="sm" onClick={() => renamePreset(preset.name)}>Save</Button></div> : <div className="flex items-center gap-2"><strong>{preset.name}</strong><Badge variant={preset.enabled ? 'success' : 'secondary'}>{preset.enabled ? 'Enabled' : 'Disabled'}</Badge></div>}
+                  </TableCell>
+                  <TableCell className="text-sm text-muted-foreground">{widgetTypes.find((row) => row.value === preset.widget)?.label} · {outputFormats.find((row) => row.value === preset.outputFormat)?.label}</TableCell>
+                  <TableCell><div className="flex flex-wrap justify-end gap-2">
+                    <Button size="sm" variant="outline" onClick={() => loadPreset(preset)}>Load</Button>
+                    <Button size="sm" variant="outline" onClick={() => { setEditingName(preset.name); setNextName(preset.name) }}>Rename</Button>
+                    <Button size="sm" variant="outline" onClick={() => setPresets((current) => current.map((row) => row.name === preset.name ? { ...row, enabled: !row.enabled } : row))}>{preset.enabled ? 'Disable' : 'Enable'}</Button>
+                    <Button size="sm" variant="outline" disabled={!preset.enabled} onClick={async () => {
+                      setRetrieved({ name: preset.name, output: presetOutput.output })
+                      try { await navigator.clipboard.writeText(presetOutput.output); toast.success(`Code copied for ${preset.name}`) }
+                      catch { toast.error('Your browser did not allow clipboard access') }
+                    }}><ClipboardIcon />Get code</Button>
+                    <Button size="sm" variant="outline" disabled={!preset.enabled} render={<Link href={preset.outputFormat === 'styled' ? presetOutput.widgetUrl : presetOutput.outputUrl} target="_blank" />}><ExternalLinkIcon />Open</Button>
+                    <Button aria-label={`Delete ${preset.name}`} size="sm" variant="ghost" onClick={() => setPresets((current) => current.filter((row) => row.name !== preset.name))}><Trash2Icon /></Button>
+                  </div></TableCell>
+                </TableRow>
+              })}</TableBody>
+            </Table>
+          </Frame>
+        ) : <p className="text-sm text-muted-foreground">No presets saved in this browser.</p>}
+        {retrieved ? <div className="flex flex-col gap-2"><strong className="text-sm">Code for {retrieved.name}</strong><pre className="overflow-x-auto rounded-md border border-border bg-muted px-3 py-2 text-xs"><code>{retrieved.output}</code></pre></div> : null}
       </div>
 
       <div className="flex flex-col gap-3 border-t border-border pt-5">

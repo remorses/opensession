@@ -6,6 +6,7 @@ import {
   formatSlotRange,
   toZonedSlot,
 } from './conflicts.ts'
+import { z } from 'zod'
 
 export type AutoPlaceSession = {
   id: string
@@ -371,6 +372,124 @@ export const PUBLIC_WIDGET_FIELDS = [
 ] as const
 export type PublicWidgetField = (typeof PUBLIC_WIDGET_FIELDS)[number]
 const publicWidgetFieldSet: ReadonlySet<string> = new Set(PUBLIC_WIDGET_FIELDS)
+
+export const EMBED_OUTPUT_FORMATS = ['styled', 'html', 'json', 'xml', 'ical'] as const
+export type EmbedOutputFormat = (typeof EMBED_OUTPUT_FORMATS)[number]
+export type EmbedConfig = {
+  widget: PublicWidgetView
+  outputFormat: EmbedOutputFormat
+  accent: string
+  compact: boolean
+  trackId: string
+  formatId: string
+  roomId: string
+  visibleFields: PublicWidgetField[]
+}
+export type EmbedPreset = EmbedConfig & { name: string; enabled: boolean }
+
+const embedConfigShape = {
+  widget: z.enum(['sessions', 'speakers', 'agenda', 'itinerary', 'gallery']),
+  outputFormat: z.enum(EMBED_OUTPUT_FORMATS),
+  accent: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  compact: z.boolean(),
+  trackId: z.string().max(100),
+  formatId: z.string().max(100),
+  roomId: z.string().max(100),
+  visibleFields: z.array(z.enum(PUBLIC_WIDGET_FIELDS)).max(PUBLIC_WIDGET_FIELDS.length)
+    .refine((values) => new Set(values).size === values.length, 'Visible fields must be unique'),
+}
+const validWidgetFormat = (config: { widget: PublicWidgetView; outputFormat: EmbedOutputFormat }) =>
+  config.outputFormat !== 'ical' || (config.widget !== 'speakers' && config.widget !== 'gallery')
+const embedConfigSchema = z.strictObject(embedConfigShape)
+  .refine(validWidgetFormat, 'iCal is not available for speaker widgets')
+const embedPresetSchema = z.strictObject({
+  name: z.string().trim().min(1).max(100),
+  enabled: z.boolean(),
+  ...embedConfigShape,
+}).refine(validWidgetFormat, 'iCal is not available for speaker widgets')
+const embedPresetsDocumentSchema = z.strictObject({
+  version: z.literal(1),
+  presets: z.array(z.unknown()).max(100),
+})
+
+/** Reads valid rows from the versioned, browser-local preset document. */
+export function parseEmbedPresets(value: string | null): EmbedPreset[] {
+  if (!value) return []
+  try {
+    const document = embedPresetsDocumentSchema.safeParse(JSON.parse(value))
+    if (!document.success) return []
+    const names = new Set<string>()
+    return document.data.presets.flatMap((row) => {
+      const parsed = embedPresetSchema.safeParse(row)
+      if (!parsed.success) return []
+      const name = parsed.data.name.toLocaleLowerCase('en-US')
+      if (names.has(name)) return []
+      names.add(name)
+      return [parsed.data]
+    })
+  } catch {
+    return []
+  }
+}
+
+export function serializeEmbedPresets(presets: EmbedPreset[]): string {
+  return JSON.stringify({ version: 1, presets })
+}
+
+function escapeAttribute(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/** Builds every builder and saved-preset URL from the same validated config. */
+export function buildEmbedOutput({ appUrl, eventSlug, eventName, config }: {
+  appUrl: string
+  eventSlug: string
+  eventName: string
+  config: EmbedConfig | EmbedPreset
+}): { widgetUrl: string; outputUrl: string; output: string } {
+  const parsed = embedConfigSchema.parse({
+    widget: config.widget,
+    outputFormat: config.outputFormat,
+    accent: config.accent,
+    compact: config.compact,
+    trackId: config.trackId,
+    formatId: config.formatId,
+    roomId: config.roomId,
+    visibleFields: config.visibleFields,
+  })
+  const params = new URLSearchParams()
+  if (parsed.accent !== '#171717') params.set('accent', parsed.accent)
+  if (parsed.compact) params.set('compact', '1')
+  if (parsed.trackId) params.set('track', parsed.trackId)
+  if (parsed.formatId) params.set('format', parsed.formatId)
+  if (parsed.roomId) params.set('room', parsed.roomId)
+  if (parsed.visibleFields.length !== PUBLIC_WIDGET_FIELDS.length) params.set('fields', parsed.visibleFields.join(','))
+  const suffix = params.size ? `?${params}` : ''
+  const slug = encodeURIComponent(eventSlug)
+  const widgetUrl = new URL(`/embed/${slug}/${parsed.widget}${suffix}`, appUrl).href
+  const outputParams = new URLSearchParams(params)
+  outputParams.set('widget', parsed.widget)
+  const outputSuffix = `?${outputParams}`
+  const feedParams = new URLSearchParams()
+  if (parsed.trackId) feedParams.set('track', parsed.trackId)
+  if (parsed.formatId) feedParams.set('format', parsed.formatId)
+  if (parsed.roomId) feedParams.set('room', parsed.roomId)
+  const outputUrl = parsed.outputFormat === 'styled'
+    ? new URL(`/public/${slug}/widget.js${outputSuffix}`, appUrl).href
+    : parsed.outputFormat === 'html'
+      ? new URL(`/public/${slug}/widget.html${outputSuffix}`, appUrl).href
+      : parsed.outputFormat === 'json'
+        ? new URL(`/public/${slug}/widget.json${outputSuffix}`, appUrl).href
+        : parsed.outputFormat === 'xml'
+          ? new URL(`/public/${slug}/widget.xml${outputSuffix}`, appUrl).href
+          : new URL(`/public/${slug}/schedule.ics${feedParams.size ? `?${feedParams}` : ''}`, appUrl).href
+  const output = parsed.outputFormat === 'styled'
+    ? `<script async src="${escapeAttribute(outputUrl)}"></script>`
+    : parsed.outputFormat === 'html'
+      ? `<iframe src="${escapeAttribute(outputUrl)}" title="${escapeAttribute(`${eventName} ${parsed.widget}`)}" loading="lazy" style="width:100%;height:720px;border:0"></iframe>`
+      : outputUrl
+  return { widgetUrl, outputUrl, output }
+}
 
 export function filterPublicSessions(sessions: PublicSession[], filters: PublicProgramFilters): PublicSession[] {
   const query = filters.q?.trim().toLocaleLowerCase('en-US') ?? ''
