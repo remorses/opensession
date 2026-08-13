@@ -2,9 +2,11 @@
 // headers, migration state, and agenda writes on real Miniflare D1.
 import { env } from 'cloudflare:workers'
 import { createSpiceflowFetch } from 'spiceflow/client'
-import { SpiceflowTestResponse } from 'spiceflow/testing'
+import { runAction, SpiceflowTestResponse } from 'spiceflow/testing'
 import dedent from 'string-dedent'
 import { beforeAll, describe, expect, test } from 'vitest'
+import { z } from 'zod'
+import { scheduleSession } from '../src/actions.tsx'
 import { app, loadPublicProgram } from '../src/app.tsx'
 import { getDb } from '../src/db.ts'
 import { applyAutoPlacementPlan, scheduleSessionSlot } from '../src/lib/agenda-server.ts'
@@ -22,6 +24,45 @@ const ids = {
   private: 'public-program-private',
   waiting: 'public-program-waiting',
   short: 'public-program-short',
+  room2a: 'agenda-integration-room-2a',
+  room2b: 'agenda-integration-room-2b',
+  ci: 'agenda-integration-ci',
+  ai: 'agenda-integration-ai',
+  docs: 'agenda-integration-docs',
+  docsSpeaker: 'agenda-integration-docs-speaker',
+  otherOrg: 'agenda-integration-other-org',
+  otherEvent: 'agenda-integration-other-event',
+  otherSession: 'agenda-integration-other-session',
+}
+
+let organizerCookie = ''
+
+const agendaLoaderSchema = z.object({
+  sessions: z.array(z.object({
+    id: z.string(),
+    roomId: z.string().nullable(),
+    roomName: z.string().nullable(),
+    dayKey: z.string().nullable(),
+    startMinute: z.number().nullable(),
+    endMinute: z.number().nullable(),
+    startsAt: z.number().nullable(),
+    endsAt: z.number().nullable(),
+  })),
+  conflicts: z.array(z.object({
+    aId: z.string(),
+    bId: z.string(),
+    reason: z.enum(['ROOM', 'SPEAKER']),
+    detail: z.string(),
+  })),
+})
+
+async function runWithOrganizer<T>(action: () => Promise<T>) {
+  return runAction(action, {
+    request: new Request('http://localhost/action', {
+      method: 'POST',
+      headers: { cookie: organizerCookie },
+    }),
+  })
 }
 
 beforeAll(async () => {
@@ -59,6 +100,39 @@ beforeAll(async () => {
       VALUES ('public-program-participant', ?, ?, ?, 'SPEAKER', 'CONFIRMED', 0, ?)
     `).bind(ids.event, ids.visible, ids.speaker, now),
   ])
+
+  const signUp = await app.handle(new Request('http://localhost/api/auth/sign-up/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      name: 'Agenda Integration Organizer',
+      email: 'agenda-organizer@example.test',
+      password: 'agenda-integration-password',
+    }),
+  }))
+  expect(signUp.status).toBe(200)
+  await env.DB.prepare('UPDATE user SET email_verified = 1 WHERE email = ?')
+    .bind('agenda-organizer@example.test')
+    .run()
+  const organizer = await getDb().query.user.findFirst({
+    where: { email: 'agenda-organizer@example.test' },
+  })
+  if (!organizer) throw new Error('agenda organizer is missing')
+  await env.DB.prepare(dedent`
+    INSERT INTO org_member (member_id, org_id, user_id, role, created_at)
+    VALUES ('agenda-integration-member', ?, ?, 'admin', ?)
+  `).bind(ids.org, organizer.id, now).run()
+  const signIn = await app.handle(new Request('http://localhost/api/auth/sign-in/email', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      email: 'agenda-organizer@example.test',
+      password: 'agenda-integration-password',
+    }),
+  }))
+  const setCookie = signIn.headers.get('set-cookie')
+  if (!setCookie) throw new Error('agenda organizer did not receive a session cookie')
+  organizerCookie = setCookie.split(';', 1)[0]!
 })
 
 describe('published anonymous program', () => {
@@ -160,6 +234,279 @@ describe('published anonymous program', () => {
     expect(jsonBody).toContain(ids.waiting)
     expect(icsBody).toContain(`session-${ids.waiting}@`)
     expect(icsResponse.headers.get('access-control-allow-origin')).toBe('*')
+  })
+
+  test('persists agenda placements and resolves speaker and room conflicts through actions and loaders', async () => {
+    await env.DB.batch([
+      env.DB.prepare("INSERT INTO room (id, event_id, name, sort_order) VALUES (?, ?, 'Room 2A', 1)")
+        .bind(ids.room2a, ids.event),
+      env.DB.prepare("INSERT INTO room (id, event_id, name, sort_order) VALUES (?, ?, 'Room 2B', 2)")
+        .bind(ids.room2b, ids.event),
+      env.DB.prepare(dedent`
+        INSERT INTO speaker (id, event_id, email, first_name, last_name, status, created_at, updated_at)
+        VALUES (?, ?, 'docs-speaker@example.test', 'Morgan', 'Lee', 'CONFIRMED', ?, ?)
+      `).bind(ids.docsSpeaker, ids.event, now, now),
+      ...[
+        [ids.ci, 'Taming 40-Minute CI: Incremental Builds at Monorepo Scale'],
+        [ids.ai, 'Your AI Pair Programmer Is Lying to You: Verification Patterns That Scale'],
+        [ids.docs, 'Docs That Answer Back: Retrieval-Grounded Documentation Sites'],
+      ].map(([id, title]) => env.DB.prepare(dedent`
+        INSERT INTO event_session (id, event_id, kind, status, title, visibility, track_id, format_id, created_at, updated_at)
+        VALUES (?, ?, 'CONTENT', 'ACCEPTED', ?, 'PUBLIC', ?, ?, ?, ?)
+      `).bind(id, ids.event, title, ids.track, ids.format, now, now)),
+      ...[
+        ['agenda-integration-ci-participant', ids.ci, ids.speaker],
+        ['agenda-integration-ai-participant', ids.ai, ids.speaker],
+        ['agenda-integration-docs-participant', ids.docs, ids.docsSpeaker],
+      ].map(([id, sessionId, speakerId]) => env.DB.prepare(dedent`
+        INSERT INTO session_participant (id, event_id, session_id, speaker_id, role, confirmation_status, sort_order, created_at)
+        VALUES (?, ?, ?, ?, 'SPEAKER', 'CONFIRMED', 0, ?)
+      `).bind(id, ids.event, sessionId, speakerId, now)),
+      env.DB.prepare(dedent`
+        INSERT INTO org (org_id, owner_user_id, kind, name, created_at, updated_at)
+        VALUES (?, ?, 'team', 'Other Agenda Org', ?, ?)
+      `).bind(ids.otherOrg, ids.user, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO event (id, org_id, name, slug, status, timezone, starts_at, ends_at, created_at, updated_at)
+        VALUES (?, ?, 'Other Agenda Event', 'other-agenda-event', 'ACTIVE', 'UTC', ?, ?, ?, ?)
+      `).bind(ids.otherEvent, ids.otherOrg, now, now + 86_400_000, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO event_session (id, event_id, kind, status, title, visibility, created_at, updated_at)
+        VALUES (?, ?, 'CONTENT', 'ACCEPTED', 'Other tenant session', 'PUBLIC', ?, ?)
+      `).bind(ids.otherSession, ids.otherEvent, now, now),
+    ])
+
+    const place = (input: {
+      sessionId: string
+      roomId: string
+      dayKey: string
+      startMinute: number
+      durationMinutes: number
+      confirmConflicts?: boolean
+    }) => runWithOrganizer(() => scheduleSession({
+      orgId: ids.org,
+      eventId: ids.event,
+      ...input,
+    }))
+    const agendaFetch = createSpiceflowFetch(app, { headers: { cookie: organizerCookie } })
+    const loadAgenda = async (view: 'week' | 'conflicts' = 'week') => {
+      const response = await agendaFetch('/org/:orgId/e/:eventId/agenda', {
+        params: { orgId: ids.org, eventId: ids.event },
+        query: { view },
+      })
+      if (!(response instanceof SpiceflowTestResponse)) throw new Error('expected agenda page')
+      return agendaLoaderSchema.parse(response.loaderData)
+    }
+
+    const initial = await place({
+      sessionId: ids.ci,
+      roomId: ids.room2a,
+      dayKey: '2027-05-12',
+      startMinute: 10 * 60,
+      durationMinutes: 30,
+    })
+    expect(initial).toMatchObject({ scheduled: true, conflicts: [], icsSequence: 0, emailsQueued: 1 })
+    const afterInitial = await loadAgenda()
+    expect(afterInitial.sessions.find((row) => row.id === ids.ci)).toMatchObject({
+      roomId: ids.room2a,
+      roomName: 'Room 2A',
+      dayKey: '2027-05-12',
+      startMinute: 600,
+      endMinute: 630,
+    })
+    expect(afterInitial.sessions.some((row) => row.id === ids.otherSession)).toBe(false)
+
+    const speakerWarning = await place({
+      sessionId: ids.ai,
+      roomId: ids.room2b,
+      dayKey: '2027-05-12',
+      startMinute: 10 * 60,
+      durationMinutes: 30,
+    })
+    expect(speakerWarning).toMatchInlineSnapshot(`
+      {
+        "conflicts": [
+          {
+            "detail": "Priya Raman",
+            "reason": "SPEAKER",
+            "sessionId": "agenda-integration-ci",
+            "timeLabel": "Wed, May 12 · 10:00 – 10:30",
+            "title": "Taming 40-Minute CI: Incremental Builds at Monorepo Scale",
+          },
+        ],
+        "emailsQueued": 0,
+        "icsSequence": 0,
+        "scheduled": false,
+        "sessionId": "agenda-integration-ai",
+      }
+    `)
+    expect(await getDb().query.eventSession.findFirst({ where: { id: ids.ai } }))
+      .toMatchObject({ roomId: null, startsAt: null, endsAt: null })
+
+    await place({
+      sessionId: ids.ai,
+      roomId: ids.room2b,
+      dayKey: '2027-05-12',
+      startMinute: 10 * 60,
+      durationMinutes: 30,
+      confirmConflicts: true,
+    })
+    const speakerConflictLoader = await loadAgenda('conflicts')
+    expect(speakerConflictLoader.conflicts).toMatchObject([{
+      aId: ids.ai,
+      bId: ids.ci,
+      reason: 'SPEAKER',
+      detail: 'Priya Raman',
+    }])
+
+    const roomWarning = await place({
+      sessionId: ids.docs,
+      roomId: ids.room2a,
+      dayKey: '2027-05-12',
+      startMinute: 10 * 60,
+      durationMinutes: 10,
+    })
+    expect(roomWarning).toMatchObject({
+      scheduled: false,
+      emailsQueued: 0,
+      conflicts: [{
+        sessionId: ids.ci,
+        title: 'Taming 40-Minute CI: Incremental Builds at Monorepo Scale',
+        reason: 'ROOM',
+        detail: 'Room 2A',
+      }],
+    })
+    expect(await getDb().query.eventSession.findFirst({ where: { id: ids.docs } }))
+      .toMatchObject({ roomId: null, startsAt: null, endsAt: null })
+    await place({
+      sessionId: ids.docs,
+      roomId: ids.room2a,
+      dayKey: '2027-05-12',
+      startMinute: 10 * 60,
+      durationMinutes: 10,
+      confirmConflicts: true,
+    })
+    expect((await loadAgenda('conflicts')).conflicts.map((row) => row.reason).sort())
+      .toEqual(['ROOM', 'SPEAKER'])
+
+    const movedAi = await place({
+      sessionId: ids.ai,
+      roomId: ids.room2b,
+      dayKey: '2027-05-12',
+      startMinute: 14 * 60,
+      durationMinutes: 30,
+    })
+    const movedDocs = await place({
+      sessionId: ids.docs,
+      roomId: ids.room2b,
+      dayKey: '2027-05-13',
+      startMinute: 11 * 60,
+      durationMinutes: 10,
+    })
+    expect({ movedAi, movedDocs }).toMatchObject({
+      movedAi: { scheduled: true, conflicts: [], icsSequence: 1, emailsQueued: 1 },
+      movedDocs: { scheduled: true, conflicts: [], icsSequence: 1, emailsQueued: 1 },
+    })
+
+    const finalLoader = await loadAgenda('conflicts')
+    expect({
+      sessions: finalLoader.sessions
+        .filter((row) => [ids.ci, ids.ai, ids.docs].includes(row.id))
+        .map((row) => ({
+          id: row.id,
+          roomId: row.roomId,
+          startsAt: row.startsAt,
+          endsAt: row.endsAt,
+        }))
+        .sort((a, b) => a.id.localeCompare(b.id)),
+      conflicts: finalLoader.conflicts,
+    }).toMatchInlineSnapshot(`
+      {
+        "conflicts": [],
+        "sessions": [
+          {
+            "endsAt": 1810132200000,
+            "id": "agenda-integration-ai",
+            "roomId": "agenda-integration-room-2b",
+            "startsAt": 1810130400000,
+          },
+          {
+            "endsAt": 1810117800000,
+            "id": "agenda-integration-ci",
+            "roomId": "agenda-integration-room-2a",
+            "startsAt": 1810116000000,
+          },
+          {
+            "endsAt": 1810206600000,
+            "id": "agenda-integration-docs",
+            "roomId": "agenda-integration-room-2b",
+            "startsAt": 1810206000000,
+          },
+        ],
+      }
+    `)
+    const finalRows = await getDb().query.eventSession.findMany({
+      where: { id: { in: [ids.ci, ids.ai, ids.docs] } },
+      orderBy: { id: 'asc' },
+    })
+    expect(finalRows.map((row) => ({ id: row.id, icsSequence: row.icsSequence }))).toEqual([
+      { id: ids.ai, icsSequence: 1 },
+      { id: ids.ci, icsSequence: 0 },
+      { id: ids.docs, icsSequence: 1 },
+    ])
+    const scheduleMail = await getDb().query.emailMessage.findMany({
+      where: { sessionId: { in: [ids.ci, ids.ai, ids.docs] } },
+      orderBy: { sessionId: 'asc', icsSequence: 'asc' },
+    })
+    expect(scheduleMail.map((row) => ({
+      sessionId: row.sessionId,
+      kind: row.kind,
+      sequence: row.icsSequence,
+      status: row.status,
+    }))).toMatchInlineSnapshot(`
+      [
+        {
+          "kind": "SCHEDULE_INVITE",
+          "sequence": 0,
+          "sessionId": "agenda-integration-ai",
+          "status": "QUEUED",
+        },
+        {
+          "kind": "SCHEDULE_UPDATE",
+          "sequence": 1,
+          "sessionId": "agenda-integration-ai",
+          "status": "QUEUED",
+        },
+        {
+          "kind": "SCHEDULE_INVITE",
+          "sequence": 0,
+          "sessionId": "agenda-integration-ci",
+          "status": "QUEUED",
+        },
+        {
+          "kind": "SCHEDULE_INVITE",
+          "sequence": 0,
+          "sessionId": "agenda-integration-docs",
+          "status": "QUEUED",
+        },
+        {
+          "kind": "SCHEDULE_UPDATE",
+          "sequence": 1,
+          "sessionId": "agenda-integration-docs",
+          "status": "QUEUED",
+        },
+      ]
+    `)
+
+    await expect(runWithOrganizer(() => scheduleSession({
+      orgId: ids.org,
+      eventId: ids.otherEvent,
+      sessionId: ids.otherSession,
+      roomId: ids.room2a,
+      dayKey: '2027-05-12',
+      startMinute: 12 * 60,
+      durationMinutes: 30,
+    }))).rejects.toBeDefined()
   })
 
   test('renders a title-only agenda block for a ten-minute session', async () => {
