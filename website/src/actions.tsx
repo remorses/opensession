@@ -88,6 +88,7 @@ import {
   applySpeakerMergeFields,
   normalizeSpeakerEmail,
   planParticipantChange,
+  planSpeakerMerge,
   prepareSpeakerImport,
   type SpeakerCsvRow,
 } from './lib/speaker-operations.ts'
@@ -2153,6 +2154,157 @@ export async function importSpeakers(input: { orgId: string; eventId: string; ro
     for (const speaker of imported) await linkSpeakerToOrgContact(db, speaker.id)
   }
   return { inserted, skipped: plan.skipped.length + plan.inserted.length - inserted, errors: [] }
+}
+
+const mergeSpeakersSchema = z.object({
+  orgId: z.string().min(1),
+  eventId: z.string().min(1),
+  survivorSpeakerId: z.string().min(1),
+  duplicateSpeakerId: z.string().min(1),
+}).refine((input) => input.survivorSpeakerId !== input.duplicateSpeakerId, {
+  message: 'A speaker cannot be merged into itself',
+  path: ['duplicateSpeakerId'],
+})
+
+export async function mergeSpeakers(input: z.input<typeof mergeSpeakersSchema>) {
+  const actionRequest = getActionRequest()
+  await requireSession(actionRequest)
+  const parsed = mergeSpeakersSchema.parse(input)
+  const { db } = await requireEventAccess({
+    actionRequest,
+    orgId: parsed.orgId,
+    eventId: parsed.eventId,
+  })
+  const speakerIds = [parsed.survivorSpeakerId, parsed.duplicateSpeakerId]
+  const [speakers, participants, assignments, draftResponses, subjectValues] = await db.batch([
+    db.query.speaker.findMany({ where: { id: { in: speakerIds }, eventId: parsed.eventId } }),
+    db.query.sessionParticipant.findMany({
+      where: { eventId: parsed.eventId, speakerId: { in: speakerIds } },
+    }),
+    db.query.taskAssignment.findMany({
+      where: { eventId: parsed.eventId, speakerId: { in: speakerIds } },
+      with: { formResponse: true, files: true, comments: true },
+    }),
+    db.query.formResponse.findMany({
+      where: { eventId: parsed.eventId, speakerId: { in: speakerIds }, status: 'DRAFT' },
+    }),
+    db.query.formFieldValue.findMany({
+      where: { subjectSpeakerId: { in: speakerIds }, response: { eventId: parsed.eventId } },
+    }),
+  ] as const)
+  const survivor = speakers.find((row) => row.id === parsed.survivorSpeakerId)
+  const duplicate = speakers.find((row) => row.id === parsed.duplicateSpeakerId)
+  if (!survivor || !duplicate) throw new Error('Both speakers must belong to this event')
+
+  const plan = planSpeakerMerge({
+    survivor,
+    duplicate,
+    participants,
+    assignments: assignments.map((row) => ({
+      ...row,
+      responseIds: row.formResponse ? [row.formResponse.id] : [],
+      fileIds: row.files.map((file) => file.id),
+      commentIds: row.comments.map((comment) => comment.id),
+    })),
+    draftResponses: draftResponses.map((row) => ({ id: row.id, formId: row.formId, speakerId: row.speakerId! })),
+    subjectValues: subjectValues.map((row) => ({
+      id: row.id,
+      responseId: row.responseId,
+      name: row.name,
+      value: row.value,
+      speakerId: row.subjectSpeakerId!,
+    })),
+  })
+
+  const statements: BatchItem<'sqlite'>[] = []
+  if (duplicate.userId && !survivor.userId) {
+    statements.push(db.update(schema.speaker).set({ userId: null }).where(orm.and(
+      orm.eq(schema.speaker.id, duplicate.id),
+      orm.eq(schema.speaker.eventId, parsed.eventId),
+    )).limit(1))
+  }
+  if (duplicate.headshotFileId && !survivor.headshotFileId) {
+    statements.push(db.update(schema.speaker).set({ headshotFileId: null }).where(orm.and(
+      orm.eq(schema.speaker.id, duplicate.id),
+      orm.eq(schema.speaker.eventId, parsed.eventId),
+    )).limit(1))
+  }
+  for (const collision of plan.participantCollisions) {
+    statements.push(db.update(schema.sessionParticipant).set(collision.patch)
+      .where(orm.eq(schema.sessionParticipant.id, collision.survivorParticipantId)).limit(1))
+    statements.push(db.delete(schema.sessionParticipant)
+      .where(orm.eq(schema.sessionParticipant.id, collision.deleteParticipantId)).limit(1))
+  }
+  for (const collision of plan.assignmentCollisions) {
+    statements.push(db.update(schema.taskAssignment).set({ ...collision.patch, updatedAt: Date.now() })
+      .where(orm.eq(schema.taskAssignment.id, collision.survivorAssignmentId)).limit(1))
+    for (const responseId of collision.moveResponseIds) {
+      statements.push(db.update(schema.formResponse).set({
+        taskAssignmentId: collision.survivorAssignmentId,
+        updatedAt: Date.now(),
+      }).where(orm.eq(schema.formResponse.id, responseId)).limit(1))
+    }
+    for (const fileId of collision.moveFileIds) {
+      statements.push(db.update(schema.file).set({ taskAssignmentId: collision.survivorAssignmentId })
+        .where(orm.eq(schema.file.id, fileId)).limit(1))
+    }
+    for (const commentId of collision.moveCommentIds) {
+      statements.push(db.update(schema.taskComment).set({ taskAssignmentId: collision.survivorAssignmentId })
+        .where(orm.eq(schema.taskComment.id, commentId)).limit(1))
+    }
+    statements.push(db.delete(schema.taskAssignment)
+      .where(orm.eq(schema.taskAssignment.id, collision.deleteAssignmentId)).limit(1))
+  }
+  for (const valueId of plan.deleteSubjectValueIds) {
+    statements.push(db.delete(schema.formFieldValue).where(orm.eq(schema.formFieldValue.id, valueId)).limit(1))
+  }
+  if (plan.reassignParticipantIds.length) {
+    statements.push(db.update(schema.sessionParticipant).set({ speakerId: survivor.id }).where(orm.and(
+      orm.eq(schema.sessionParticipant.eventId, parsed.eventId),
+      orm.inArray(schema.sessionParticipant.id, plan.reassignParticipantIds),
+    )))
+  }
+  if (plan.reassignAssignmentIds.length) {
+    statements.push(db.update(schema.taskAssignment).set({ speakerId: survivor.id, updatedAt: Date.now() }).where(orm.and(
+      orm.eq(schema.taskAssignment.eventId, parsed.eventId),
+      orm.inArray(schema.taskAssignment.id, plan.reassignAssignmentIds),
+    )))
+  }
+  const duplicateSubjectIds = subjectValues
+    .filter((row) => row.subjectSpeakerId === duplicate.id && !plan.deleteSubjectValueIds.includes(row.id))
+    .map((row) => row.id)
+  if (duplicateSubjectIds.length) {
+    statements.push(db.update(schema.formFieldValue).set({ subjectSpeakerId: survivor.id })
+      .where(orm.inArray(schema.formFieldValue.id, duplicateSubjectIds)))
+  }
+  statements.push(
+    db.update(schema.eventSession).set({ submitterSpeakerId: survivor.id }).where(orm.and(
+      orm.eq(schema.eventSession.eventId, parsed.eventId),
+      orm.eq(schema.eventSession.submitterSpeakerId, duplicate.id),
+    )),
+    db.update(schema.formResponse).set({ speakerId: survivor.id, updatedAt: Date.now() }).where(orm.and(
+      orm.eq(schema.formResponse.eventId, parsed.eventId),
+      orm.eq(schema.formResponse.speakerId, duplicate.id),
+    )),
+    db.update(schema.file).set({ uploadedBySpeakerId: survivor.id }).where(orm.and(
+      orm.eq(schema.file.eventId, parsed.eventId),
+      orm.eq(schema.file.uploadedBySpeakerId, duplicate.id),
+    )),
+    db.update(schema.emailMessage).set({ speakerId: survivor.id }).where(orm.and(
+      orm.eq(schema.emailMessage.eventId, parsed.eventId),
+      orm.eq(schema.emailMessage.speakerId, duplicate.id),
+    )),
+    db.update(schema.speaker).set({ ...plan.profilePatch, updatedAt: Date.now() }).where(orm.and(
+      orm.eq(schema.speaker.id, survivor.id),
+      orm.eq(schema.speaker.eventId, parsed.eventId),
+    )).limit(1),
+    db.delete(schema.speaker).where(orm.and(
+      orm.eq(schema.speaker.id, duplicate.id),
+      orm.eq(schema.speaker.eventId, parsed.eventId),
+    )).limit(1),
+  )
+  await db.batch(statements as [BatchItem<'sqlite'>, ...BatchItem<'sqlite'>[]])
+  return { survivorSpeakerId: survivor.id, mergedName: `${survivor.firstName} ${survivor.lastName}` }
 }
 
 const participantInput = z.object({

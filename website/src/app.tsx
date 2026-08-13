@@ -2142,6 +2142,8 @@ export const app = new Spiceflow()
       email: speaker.email, status: speaker.status, jobTitle: speaker.jobTitle,
       companyName: speaker.companyName, avatarUrl: speaker.avatarUrl,
       headshotFileId: speaker.headshotFileId,
+      bio: speaker.bio,
+      profileSummary: [speaker.pronouns, speaker.websiteUrl, speaker.linkedinUrl, speaker.twitterUrl].filter(Boolean).join(' · '),
       sessions: speaker.participations.length,
       sessionTitles: speaker.participations.flatMap((participation) =>
         participation.session?.title ? [participation.session.title] : [],

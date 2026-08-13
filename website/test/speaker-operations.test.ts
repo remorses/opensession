@@ -6,8 +6,8 @@ import { createSpiceflowFetch } from 'spiceflow/client'
 import { runAction, SpiceflowTestResponse } from 'spiceflow/testing'
 import { beforeAll, describe, expect, test } from 'vitest'
 import { z } from 'zod'
-import { sendCustomSpeakerCommunication } from '../src/actions.tsx'
-import { app } from '../src/app.tsx'
+import { mergeSpeakers, sendCustomSpeakerCommunication } from '../src/actions.tsx'
+import { app, loadPublicProgram } from '../src/app.tsx'
 
 const now = Date.UTC(2026, 7, 9)
 const emailHistorySchema = z.object({
@@ -277,4 +277,208 @@ describe('email history and portal ownership', () => {
     const directMarcusAsPriya = await env.DB.prepare('SELECT id FROM task_assignment WHERE event_id = ? AND speaker_id = ? AND id = ?').bind(ids.event, ids.priya, 'speaker-ops-all-marcus').first()
     expect({ leaked, directMarcusAsPriya }).toEqual({ leaked: false, directMarcusAsPriya: null })
   })
+})
+
+describe('safe speaker merge', () => {
+  test('atomically preserves colliding dependencies and one public identity', async () => {
+    const email = 'merge-organizer@example.test'
+    const password = 'merge-speaker-password'
+    const signUp = await app.handle(new Request('http://localhost/api/auth/sign-up/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name: 'Merge Organizer', email, password }),
+    }))
+    expect(signUp.status).toBe(200)
+    await env.DB.prepare('UPDATE user SET email_verified = 1 WHERE email = ?').bind(email).run()
+    const user = await env.DB.prepare('SELECT id FROM user WHERE email = ?').bind(email).first<{ id: string }>()
+    if (!user) throw new Error('merge organizer was not created')
+    await env.DB.prepare(dedent`
+      INSERT INTO org_member (member_id, org_id, user_id, role, created_at)
+      VALUES ('speaker-merge-member', ?, ?, 'admin', ?)
+    `).bind(ids.org, user.id, now).run()
+    const signIn = await app.handle(new Request('http://localhost/api/auth/sign-in/email', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ email, password }),
+    }))
+    const cookie = signIn.headers.get('set-cookie')?.split(';', 1)[0]
+    if (!cookie) throw new Error('merge organizer did not receive a session cookie')
+
+    const duplicate = 'speaker-merge-duplicate'
+    await env.DB.batch([
+      env.DB.prepare(dedent`
+        INSERT INTO room (id, event_id, name, sort_order) VALUES ('speaker-merge-room', ?, 'Merge Hall', 0)
+      `).bind(ids.event),
+      env.DB.prepare(dedent`
+        INSERT INTO speaker (id, event_id, email, first_name, last_name, job_title, company_name, bio, created_at, updated_at)
+        VALUES (?, ?, 'priya-duplicate@example.test', 'Priya', 'Raman', 'Principal Engineer', NULL, 'Duplicate bio', ?, ?)
+      `).bind(duplicate, ids.event, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO speaker (id, event_id, email, first_name, last_name, created_at, updated_at)
+        VALUES ('speaker-merge-other-event', ?, 'other-merge@example.test', 'Other', 'Event', ?, ?)
+      `).bind(ids.otherEvent, now, now),
+      ...[
+        ['speaker-merge-shared-session', 'Shared session', now + 3_600_000],
+        ['speaker-merge-duplicate-session', 'Duplicate session', now + 7_200_000],
+      ].map(([id, title, startsAt]) => env.DB.prepare(dedent`
+        INSERT INTO event_session
+          (id, event_id, submitter_speaker_id, kind, status, title, visibility, room_id, starts_at, ends_at, created_at, updated_at)
+        VALUES (?, ?, ?, 'CONTENT', 'ACCEPTED', ?, 'PUBLIC', 'speaker-merge-room', ?, ?, ?, ?)
+      `).bind(id, ids.event, duplicate, title, startsAt, Number(startsAt) + 1_800_000, now, now)),
+      env.DB.prepare(dedent`
+        INSERT INTO session_participant
+          (id, event_id, session_id, speaker_id, role, confirmation_status, sort_order, created_at)
+        VALUES ('speaker-merge-participant-survivor', ?, 'speaker-merge-shared-session', ?, 'SPEAKER', 'PENDING', 2, ?)
+      `).bind(ids.event, ids.priya, now),
+      env.DB.prepare(dedent`
+        INSERT INTO session_participant
+          (id, event_id, session_id, speaker_id, role, confirmation_status, confirmed_at, sort_order, created_at)
+        VALUES ('speaker-merge-participant-duplicate', ?, 'speaker-merge-shared-session', ?, 'SPEAKER', 'CONFIRMED', ?, 0, ?)
+      `).bind(ids.event, duplicate, now + 1, now),
+      env.DB.prepare(dedent`
+        INSERT INTO session_participant
+          (id, event_id, session_id, speaker_id, role, confirmation_status, sort_order, created_at)
+        VALUES ('speaker-merge-participant-union', ?, 'speaker-merge-duplicate-session', ?, 'SPEAKER', 'CONFIRMED', 0, ?)
+      `).bind(ids.event, duplicate, now),
+      env.DB.prepare(dedent`
+        INSERT INTO task_definition (id, event_id, title, target, source, assignment_policy, sort_order, created_at)
+        VALUES ('speaker-merge-task', ?, 'Merge task', 'SPEAKER', 'MANUAL', 'SELECTED', 0, ?)
+      `).bind(ids.event, now),
+      env.DB.prepare(dedent`
+        INSERT INTO task_assignment
+          (id, event_id, task_definition_id, speaker_id, status, created_at, updated_at)
+        VALUES ('speaker-merge-assignment-survivor', ?, 'speaker-merge-task', ?, 'IN_PROGRESS', ?, ?)
+      `).bind(ids.event, ids.priya, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO task_assignment
+          (id, event_id, task_definition_id, speaker_id, status, completed_at, created_at, updated_at)
+        VALUES ('speaker-merge-assignment-duplicate', ?, 'speaker-merge-task', ?, 'COMPLETED', ?, ?, ?)
+      `).bind(ids.event, duplicate, now + 2, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO form (id, event_id, purpose, target, name, slug, status, created_at, updated_at)
+        VALUES ('speaker-merge-form', ?, 'PORTAL', 'SPEAKER', 'Merge form', 'speaker-merge-form', 'OPEN', ?, ?)
+      `).bind(ids.event, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO form_version (id, form_id, mdx_source, created_at)
+        VALUES ('speaker-merge-version', 'speaker-merge-form', '<TextField name="speaker.bio" />', ?)
+      `).bind(now),
+      env.DB.prepare(dedent`
+        INSERT INTO form_response
+          (id, event_id, form_id, form_version_id, speaker_id, task_assignment_id, status, submitted_at, created_at, updated_at)
+        VALUES ('speaker-merge-response', ?, 'speaker-merge-form', 'speaker-merge-version', ?, 'speaker-merge-assignment-duplicate', 'SUBMITTED', ?, ?, ?)
+      `).bind(ids.event, duplicate, now, now, now),
+      env.DB.prepare(dedent`
+        INSERT INTO form_field_value (id, response_id, name, value, subject_speaker_id)
+        VALUES ('speaker-merge-value', 'speaker-merge-response', 'speaker.bio', 'Duplicate bio', ?)
+      `).bind(duplicate),
+      env.DB.prepare(dedent`
+        INSERT INTO file
+          (id, event_id, kind, file_name, mime_type, size_bytes, storage_key, uploaded_by_speaker_id, task_assignment_id, field_name, created_at)
+        VALUES ('speaker-merge-file', ?, 'DOCUMENT', 'slides.pdf', 'application/pdf', 10, 'speaker-merge/slides', ?, 'speaker-merge-assignment-duplicate', 'slides', ?)
+      `).bind(ids.event, duplicate, now),
+      env.DB.prepare(dedent`
+        INSERT INTO task_comment (id, task_assignment_id, field_name, author_user_id, body, created_at)
+        VALUES ('speaker-merge-comment', 'speaker-merge-assignment-duplicate', 'slides', ?, 'Keep this comment', ?)
+      `).bind(user.id, now),
+      env.DB.prepare(dedent`
+        INSERT INTO email_message
+          (id, event_id, kind, dedupe_key, to_email, speaker_id, subject, body_html, status, created_at)
+        VALUES ('speaker-merge-email', ?, 'CUSTOM', 'speaker-merge-email', 'priya-duplicate@example.test', ?, 'Hello', '<p>Hello</p>', 'SENT', ?)
+      `).bind(ids.event, duplicate, now),
+      env.DB.prepare('UPDATE event SET program_published_at = ? WHERE id = ?').bind(now, ids.event),
+    ])
+
+    await expect(runAction(() => mergeSpeakers({
+      orgId: ids.org,
+      eventId: ids.event,
+      survivorSpeakerId: ids.priya,
+      duplicateSpeakerId: 'speaker-merge-other-event',
+    }), { request: new Request('http://localhost/action', { method: 'POST', headers: { cookie } }) }))
+      .rejects.toThrow('Both speakers must belong to this event')
+    const isolated = await env.DB.prepare('SELECT id FROM speaker WHERE id IN (?, ?) ORDER BY id')
+      .bind(ids.priya, 'speaker-merge-other-event').all()
+    expect(isolated.results).toEqual([{ id: 'speaker-merge-other-event' }, { id: ids.priya }])
+
+    const result = await runAction(() => mergeSpeakers({
+      orgId: ids.org,
+      eventId: ids.event,
+      survivorSpeakerId: ids.priya,
+      duplicateSpeakerId: duplicate,
+    }), { request: new Request('http://localhost/action', { method: 'POST', headers: { cookie } }) })
+    expect(result).toEqual({ survivorSpeakerId: ids.priya, mergedName: 'Priya Raman' })
+
+    const [speakerRows, participants, assignments, response, file, comment, emailRow] = await Promise.all([
+      env.DB.prepare("SELECT id, bio, job_title, company_name FROM speaker WHERE event_id = ? AND first_name = 'Priya' AND last_name = 'Raman'").bind(ids.event).all(),
+      env.DB.prepare("SELECT session_id, speaker_id, confirmation_status, sort_order FROM session_participant WHERE id LIKE 'speaker-merge-participant-%' ORDER BY session_id").all(),
+      env.DB.prepare("SELECT id, speaker_id, status, completed_at FROM task_assignment WHERE task_definition_id = 'speaker-merge-task'").all(),
+      env.DB.prepare("SELECT speaker_id, task_assignment_id FROM form_response WHERE id = 'speaker-merge-response'").first(),
+      env.DB.prepare("SELECT uploaded_by_speaker_id, task_assignment_id FROM file WHERE id = 'speaker-merge-file'").first(),
+      env.DB.prepare("SELECT task_assignment_id, body FROM task_comment WHERE id = 'speaker-merge-comment'").first(),
+      env.DB.prepare("SELECT speaker_id FROM email_message WHERE id = 'speaker-merge-email'").first(),
+    ])
+    expect({ speakerRows: speakerRows.results, participants: participants.results, assignments: assignments.results, response, file, comment, emailRow }).toMatchInlineSnapshot(`
+      {
+        "assignments": [
+          {
+            "completed_at": ${now + 2},
+            "id": "speaker-merge-assignment-survivor",
+            "speaker_id": "speaker-ops-priya",
+            "status": "COMPLETED",
+          },
+        ],
+        "comment": {
+          "body": "Keep this comment",
+          "task_assignment_id": "speaker-merge-assignment-survivor",
+        },
+        "emailRow": {
+          "speaker_id": "speaker-ops-priya",
+        },
+        "file": {
+          "task_assignment_id": "speaker-merge-assignment-survivor",
+          "uploaded_by_speaker_id": "speaker-ops-priya",
+        },
+        "participants": [
+          {
+            "confirmation_status": "CONFIRMED",
+            "session_id": "speaker-merge-duplicate-session",
+            "sort_order": 0,
+            "speaker_id": "speaker-ops-priya",
+          },
+          {
+            "confirmation_status": "CONFIRMED",
+            "session_id": "speaker-merge-shared-session",
+            "sort_order": 0,
+            "speaker_id": "speaker-ops-priya",
+          },
+        ],
+        "response": {
+          "speaker_id": "speaker-ops-priya",
+          "task_assignment_id": "speaker-merge-assignment-survivor",
+        },
+        "speakerRows": [
+          {
+            "bio": "SBEK-ORG-EDIT-01",
+            "company_name": null,
+            "id": "speaker-ops-priya",
+            "job_title": "Principal Engineer",
+          },
+        ],
+      }
+    `)
+    const program = await loadPublicProgram('speaker-ops')
+    if (!program) throw new Error('merged public program was not published')
+    const publicSpeaker = program.speakers.find((speaker) => speaker.id === ids.priya)
+    expect({
+      matchingNames: program.speakers.filter((speaker) => speaker.name === 'Priya Raman').length,
+      sessionIds: publicSpeaker?.sessionIds,
+      sessionSpeakerIds: program.sessions
+        .filter((session) => session.id.startsWith('speaker-merge-'))
+        .flatMap((session) => session.speakers.map((speaker) => speaker.id)),
+    }).toEqual({
+      matchingNames: 1,
+      sessionIds: ['speaker-merge-duplicate-session', 'speaker-merge-shared-session'],
+      sessionSpeakerIds: [ids.priya, ids.priya],
+    })
+  })
+
 })

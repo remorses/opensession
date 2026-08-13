@@ -4,10 +4,11 @@
 
 import { useMemo, useState, useTransition } from 'react'
 import { Link, router, useLoaderData } from 'spiceflow/react'
-import { ArrowLeftIcon, MailIcon, PlusIcon, UploadIcon, UsersIcon } from 'lucide-react'
+import { ArrowLeftIcon, MailIcon, MergeIcon, PlusIcon, UploadIcon, UsersIcon } from 'lucide-react'
 import {
   importSpeakers,
   inviteSpeakerToPortal,
+  mergeSpeakers,
   removeSessionParticipant,
   saveSessionParticipant,
   saveSpeaker,
@@ -76,6 +77,7 @@ export function SpeakersPage({ initialStatus }: {
   const [addOpen, setAddOpen] = useState(false)
   const [importOpen, setImportOpen] = useState(false)
   const [composeOpen, setComposeOpen] = useState(false)
+  const [mergeOpen, setMergeOpen] = useState(false)
   const visible = filterSpeakers(speakers, {
     search,
     status: initialStatus === 'all' ? 'ALL' : speakerStatus(initialStatus.toUpperCase()),
@@ -95,6 +97,7 @@ export function SpeakersPage({ initialStatus }: {
       <div className="flex flex-wrap gap-2">
         <Button variant="outline" onClick={() => setImportOpen(true)}><UploadIcon />Import CSV</Button>
         <Button variant="outline" disabled={selected.length === 0} onClick={() => setComposeOpen(true)}><MailIcon />Message selected ({selected.length})</Button>
+        <Button variant="outline" disabled={speakers.length < 2} onClick={() => setMergeOpen(true)}><MergeIcon />Merge speakers</Button>
         <Button onClick={() => setAddOpen(true)}><PlusIcon />Add speaker</Button>
       </div>
     </div>
@@ -130,7 +133,41 @@ export function SpeakersPage({ initialStatus }: {
     <SpeakerDialog open={addOpen} onOpenChange={setAddOpen} orgId={currentOrgId} eventId={event.id} />
     <ImportDialog open={importOpen} onOpenChange={setImportOpen} orgId={currentOrgId} eventId={event.id} existingEmails={existingEmails} />
     <ComposeDialog open={composeOpen} onOpenChange={setComposeOpen} orgId={currentOrgId} event={event} portalUrl={portalUrl} speakers={speakers.filter((row) => selected.includes(row.id))} />
+    <MergeSpeakersDialog open={mergeOpen} onOpenChange={setMergeOpen} orgId={currentOrgId} eventId={event.id} speakers={speakers} />
   </div>
+}
+
+function MergeProfile({ label, speaker }: { label: string; speaker: any }) {
+  return <FramePanel className="flex flex-col gap-2">
+    <div className="text-xs font-medium uppercase text-muted-foreground">{label}</div>
+    <div className="font-medium">{speaker ? `${speaker.firstName} ${speaker.lastName}` : 'Select a speaker'}</div>
+    {speaker ? <dl className="grid gap-2 text-sm">
+      <div><dt className="text-xs text-muted-foreground">Email</dt><dd>{speaker.email}</dd></div>
+      <div><dt className="text-xs text-muted-foreground">Title</dt><dd>{speaker.jobTitle ?? 'Not provided'}</dd></div>
+      <div><dt className="text-xs text-muted-foreground">Company</dt><dd>{speaker.companyName ?? 'Not provided'}</dd></div>
+      <div><dt className="text-xs text-muted-foreground">Bio</dt><dd>{speaker.bio ?? 'Not provided'}</dd></div>
+      <div><dt className="text-xs text-muted-foreground">Profile</dt><dd>{speaker.profileSummary || 'No additional profile fields'}</dd></div>
+    </dl> : null}
+  </FramePanel>
+}
+
+function MergeSpeakersDialog({ open, onOpenChange, orgId, eventId, speakers }: any) {
+  const [survivorId, setSurvivorId] = useState('')
+  const [duplicateId, setDuplicateId] = useState('')
+  const [pending, startTransition] = useTransition()
+  const survivor = speakers.find((row: any) => row.id === survivorId)
+  const duplicate = speakers.find((row: any) => row.id === duplicateId)
+  const valid = survivor && duplicate && survivor.id !== duplicate.id
+  return <Dialog open={open} onOpenChange={onOpenChange}><DialogPopup className="max-w-3xl"><DialogHeader><DialogTitle>Merge speakers</DialogTitle><DialogDescription>Choose the speaker to keep and the duplicate to remove. The survivor keeps every non-empty profile value. Blank survivor fields are filled from the duplicate. Sessions, submissions, tasks, files, comments, and email history move to the survivor.</DialogDescription></DialogHeader><DialogPanel className="flex flex-col gap-4">
+    <div className="grid gap-3 sm:grid-cols-2">
+      <label className="flex flex-col gap-1 text-sm">Survivor<NativeSelect aria-label="Survivor speaker" value={survivorId} onChange={(event) => setSurvivorId(event.target.value)}><option value="">Select speaker to keep...</option>{speakers.map((speaker: any) => <option key={speaker.id} value={speaker.id}>{speaker.firstName} {speaker.lastName} · {speaker.email}</option>)}</NativeSelect></label>
+      <label className="flex flex-col gap-1 text-sm">Duplicate<NativeSelect aria-label="Duplicate speaker" value={duplicateId} onChange={(event) => setDuplicateId(event.target.value)}><option value="">Select duplicate to remove...</option>{speakers.map((speaker: any) => <option key={speaker.id} value={speaker.id}>{speaker.firstName} {speaker.lastName} · {speaker.email}</option>)}</NativeSelect></label>
+    </div>
+    {survivorId && survivorId === duplicateId ? <p className="text-sm text-destructive">A speaker cannot be merged into itself.</p> : null}
+    <Frame><div className="grid sm:grid-cols-2"><MergeProfile label="Keep" speaker={survivor} /><MergeProfile label="Remove after merge" speaker={duplicate} /></div></Frame>
+    <p className="text-sm text-muted-foreground">This operation is atomic. If participant roles, confirmation states, task responses, due-date overrides, or linked user accounts conflict, no data changes.</p>
+    <div className="flex justify-end gap-2"><Button variant="outline" onClick={() => onOpenChange(false)}>Cancel</Button><Button variant="destructive" disabled={pending || !valid} onClick={() => startTransition(async () => { try { const result = await mergeSpeakers({ orgId, eventId, survivorSpeakerId: survivorId, duplicateSpeakerId: duplicateId }); toast.success(`Merged duplicate into ${result.mergedName}`); setSurvivorId(''); setDuplicateId(''); onOpenChange(false) } catch (error) { toastActionError(error, 'Could not merge speakers') } })}>{pending ? 'Merging...' : 'Confirm merge'}</Button></div>
+  </DialogPanel></DialogPopup></Dialog>
 }
 
 function SpeakerDialog({ open, onOpenChange, orgId, eventId, speaker }: any) {

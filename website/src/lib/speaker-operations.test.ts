@@ -4,6 +4,7 @@ import {
   applySpeakerMergeFields,
   filterSpeakers,
   parseSpeakerCsv,
+  planSpeakerMerge,
   speakerCsvHeaders,
   planParticipantChange,
   prepareSpeakerImport,
@@ -95,6 +96,128 @@ describe('speaker roster and participants', () => {
     expect(planParticipantChange({ role: 'SPEAKER', confirmationStatus: 'DECLINED', sortOrder: 0 }, 600)).toEqual({
       role: 'SPEAKER', confirmationStatus: 'DECLINED', sortOrder: 0, confirmedAt: null, declinedAt: 600,
     })
+  })
+})
+
+describe('speaker merge planning', () => {
+  const survivor = {
+    id: 'speaker-a', firstName: 'Priya', lastName: 'Raman', email: 'priya@example.com',
+    status: 'CONFIRMED' as const, bio: 'Primary bio', jobTitle: null, companyName: 'Latticework',
+    pronouns: null, websiteUrl: null, linkedinUrl: null, twitterUrl: null,
+    headshotFileId: null, avatarUrl: null, userId: 'user-a', contactId: null,
+  }
+  const duplicate = {
+    ...survivor, id: 'speaker-b', email: 'priya.old@example.com', status: 'INVITED' as const,
+    bio: 'Duplicate bio', jobTitle: 'Principal Engineer', companyName: null,
+    websiteUrl: 'https://priya.example.com', userId: null,
+  }
+
+  test('fills blank survivor fields and resolves participant and task collisions', () => {
+    expect(planSpeakerMerge({
+      survivor,
+      duplicate,
+      participants: [
+        { id: 'participant-a', speakerId: survivor.id, sessionId: 'session-a', role: 'SPEAKER', confirmationStatus: 'PENDING', confirmedAt: null, declinedAt: null, sortOrder: 2 },
+        { id: 'participant-b', speakerId: duplicate.id, sessionId: 'session-a', role: 'SPEAKER', confirmationStatus: 'CONFIRMED', confirmedAt: 200, declinedAt: null, sortOrder: 0 },
+        { id: 'participant-c', speakerId: duplicate.id, sessionId: 'session-b', role: 'MODERATOR', confirmationStatus: 'PENDING', confirmedAt: null, declinedAt: null, sortOrder: 1 },
+      ],
+      assignments: [
+        { id: 'assignment-a', speakerId: survivor.id, taskDefinitionId: 'task-a', sessionId: null, status: 'IN_PROGRESS', dueAt: null, completedAt: null, responseIds: [], fileIds: ['file-a'], commentIds: [] },
+        { id: 'assignment-b', speakerId: duplicate.id, taskDefinitionId: 'task-a', sessionId: null, status: 'COMPLETED', dueAt: 400, completedAt: 300, responseIds: ['response-b'], fileIds: ['file-b'], commentIds: ['comment-b'] },
+      ],
+      draftResponses: [],
+      subjectValues: [],
+    })).toMatchInlineSnapshot(`
+      {
+        "assignmentCollisions": [
+          {
+            "deleteAssignmentId": "assignment-b",
+            "moveCommentIds": [
+              "comment-b",
+            ],
+            "moveFileIds": [
+              "file-b",
+            ],
+            "moveResponseIds": [
+              "response-b",
+            ],
+            "patch": {
+              "completedAt": 300,
+              "dueAt": 400,
+              "status": "COMPLETED",
+            },
+            "survivorAssignmentId": "assignment-a",
+          },
+        ],
+        "deleteSubjectValueIds": [],
+        "participantCollisions": [
+          {
+            "deleteParticipantId": "participant-b",
+            "patch": {
+              "confirmationStatus": "CONFIRMED",
+              "confirmedAt": 200,
+              "declinedAt": null,
+              "role": "SPEAKER",
+              "sortOrder": 0,
+            },
+            "survivorParticipantId": "participant-a",
+          },
+        ],
+        "profilePatch": {
+          "avatarUrl": null,
+          "bio": "Primary bio",
+          "companyName": "Latticework",
+          "contactId": null,
+          "headshotFileId": null,
+          "jobTitle": "Principal Engineer",
+          "linkedinUrl": null,
+          "pronouns": null,
+          "status": "CONFIRMED",
+          "twitterUrl": null,
+          "userId": "user-a",
+          "websiteUrl": "https://priya.example.com",
+        },
+        "reassignAssignmentIds": [],
+        "reassignParticipantIds": [
+          "participant-c",
+        ],
+      }
+    `)
+  })
+
+  test('rejects ownership and dependent collisions that cannot be represented safely', () => {
+    expect(() => planSpeakerMerge({
+      survivor,
+      duplicate: { ...duplicate, userId: 'user-b' },
+      participants: [], assignments: [], draftResponses: [], subjectValues: [],
+    })).toThrowErrorMatchingInlineSnapshot(`[Error: Cannot merge speakers linked to different user accounts]`)
+
+    expect(() => planSpeakerMerge({
+      survivor, duplicate, participants: [],
+      assignments: [
+        { id: 'a', speakerId: survivor.id, taskDefinitionId: 'task', sessionId: null, status: 'COMPLETED', dueAt: null, completedAt: 1, responseIds: ['response-a'], fileIds: [], commentIds: [] },
+        { id: 'b', speakerId: duplicate.id, taskDefinitionId: 'task', sessionId: null, status: 'COMPLETED', dueAt: null, completedAt: 2, responseIds: ['response-b'], fileIds: [], commentIds: [] },
+      ],
+      draftResponses: [], subjectValues: [],
+    })).toThrowErrorMatchingInlineSnapshot(`[Error: Cannot merge task "task": both assignments have form responses]`)
+  })
+
+  test('removes only redundant subject values and rejects active draft collisions', () => {
+    expect(planSpeakerMerge({
+      survivor, duplicate, participants: [], assignments: [], draftResponses: [],
+      subjectValues: [
+        { id: 'value-a', responseId: 'response-a', name: 'speaker.bio', value: 'same', speakerId: survivor.id },
+        { id: 'value-b', responseId: 'response-a', name: 'speaker.bio', value: 'same', speakerId: duplicate.id },
+      ],
+    }).deleteSubjectValueIds).toEqual(['value-b'])
+
+    expect(() => planSpeakerMerge({
+      survivor, duplicate, participants: [], assignments: [], subjectValues: [],
+      draftResponses: [
+        { id: 'draft-a', formId: 'profile', speakerId: survivor.id },
+        { id: 'draft-b', formId: 'profile', speakerId: duplicate.id },
+      ],
+    })).toThrowErrorMatchingInlineSnapshot(`[Error: Cannot merge speakers: both have an active draft for form "profile"]`)
   })
 })
 

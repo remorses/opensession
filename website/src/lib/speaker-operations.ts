@@ -136,6 +136,197 @@ export function planParticipantChange(input: {
   }
 }
 
+type MergeSpeaker = {
+  id: string
+  userId: string | null
+  contactId: string | null
+  status: SpeakerStatus
+  bio: string | null
+  jobTitle: string | null
+  companyName: string | null
+  pronouns: string | null
+  websiteUrl: string | null
+  linkedinUrl: string | null
+  twitterUrl: string | null
+  headshotFileId: string | null
+  avatarUrl: string | null
+}
+
+type MergeParticipant = {
+  id: string
+  speakerId: string
+  sessionId: string
+  role: 'SPEAKER' | 'MODERATOR'
+  confirmationStatus: 'PENDING' | 'CONFIRMED' | 'DECLINED'
+  confirmedAt: number | null
+  declinedAt: number | null
+  sortOrder: number
+}
+
+type MergeAssignment = {
+  id: string
+  speakerId: string
+  taskDefinitionId: string
+  sessionId: string | null
+  status: 'NOT_STARTED' | 'IN_PROGRESS' | 'COMPLETED'
+  dueAt: number | null
+  completedAt: number | null
+  responseIds: string[]
+  fileIds: string[]
+  commentIds: string[]
+}
+
+const speakerStatusRank: Record<SpeakerStatus, number> = {
+  PENDING: 0,
+  INVITED: 1,
+  DECLINED: 2,
+  CONFIRMED: 3,
+}
+const assignmentStatusRank = { NOT_STARTED: 0, IN_PROGRESS: 1, COMPLETED: 2 } as const
+
+function richerValue<T>(survivor: T | null, duplicate: T | null): T | null {
+  return survivor ?? duplicate
+}
+
+function taskKey(row: MergeAssignment): string {
+  return `${row.taskDefinitionId}\u0000${row.sessionId ?? ''}`
+}
+
+export function planSpeakerMerge(input: {
+  survivor: MergeSpeaker
+  duplicate: MergeSpeaker
+  participants: MergeParticipant[]
+  assignments: MergeAssignment[]
+  draftResponses: Array<{ id: string; formId: string; speakerId: string }>
+  subjectValues: Array<{
+    id: string
+    responseId: string
+    name: string
+    value: string
+    speakerId: string
+  }>
+}) {
+  const { survivor, duplicate } = input
+  if (survivor.id === duplicate.id) throw new Error('A speaker cannot be merged into itself')
+  if (survivor.userId && duplicate.userId && survivor.userId !== duplicate.userId) {
+    throw new Error('Cannot merge speakers linked to different user accounts')
+  }
+  const draftForms = new Set(input.draftResponses.filter((row) => row.speakerId === survivor.id).map((row) => row.formId))
+  const duplicateDraft = input.draftResponses.find((row) => row.speakerId === duplicate.id && draftForms.has(row.formId))
+  if (duplicateDraft) throw new Error(`Cannot merge speakers: both have an active draft for form "${duplicateDraft.formId}"`)
+
+  const survivorParticipants = new Map(input.participants
+    .filter((row) => row.speakerId === survivor.id)
+    .map((row) => [row.sessionId, row]))
+  const reassignParticipantIds: string[] = []
+  const participantCollisions = input.participants
+    .filter((row) => row.speakerId === duplicate.id)
+    .flatMap((duplicateRow) => {
+      const survivorRow = survivorParticipants.get(duplicateRow.sessionId)
+      if (!survivorRow) {
+        reassignParticipantIds.push(duplicateRow.id)
+        return []
+      }
+      if (survivorRow.role !== duplicateRow.role) {
+        throw new Error(`Cannot merge session "${duplicateRow.sessionId}": the speakers have different participant roles`)
+      }
+      const decisions = [survivorRow.confirmationStatus, duplicateRow.confirmationStatus]
+        .filter((status) => status !== 'PENDING')
+      if (new Set(decisions).size > 1) {
+        throw new Error(`Cannot merge session "${duplicateRow.sessionId}": confirmation states conflict`)
+      }
+      const confirmationStatus = decisions[0] ?? 'PENDING'
+      return [{
+        survivorParticipantId: survivorRow.id,
+        deleteParticipantId: duplicateRow.id,
+        patch: {
+          role: survivorRow.role,
+          confirmationStatus,
+          confirmedAt: confirmationStatus === 'CONFIRMED'
+            ? richerValue(survivorRow.confirmedAt, duplicateRow.confirmedAt)
+            : null,
+          declinedAt: confirmationStatus === 'DECLINED'
+            ? richerValue(survivorRow.declinedAt, duplicateRow.declinedAt)
+            : null,
+          sortOrder: Math.min(survivorRow.sortOrder, duplicateRow.sortOrder),
+        },
+      }]
+    })
+
+  const survivorAssignments = new Map(input.assignments
+    .filter((row) => row.speakerId === survivor.id)
+    .map((row) => [taskKey(row), row]))
+  const reassignAssignmentIds: string[] = []
+  const assignmentCollisions = input.assignments
+    .filter((row) => row.speakerId === duplicate.id)
+    .flatMap((duplicateRow) => {
+      const survivorRow = survivorAssignments.get(taskKey(duplicateRow))
+      if (!survivorRow) {
+        reassignAssignmentIds.push(duplicateRow.id)
+        return []
+      }
+      if (survivorRow.responseIds.length && duplicateRow.responseIds.length) {
+        throw new Error(`Cannot merge task "${duplicateRow.taskDefinitionId}": both assignments have form responses`)
+      }
+      if (survivorRow.dueAt != null && duplicateRow.dueAt != null && survivorRow.dueAt !== duplicateRow.dueAt) {
+        throw new Error(`Cannot merge task "${duplicateRow.taskDefinitionId}": due-date overrides conflict`)
+      }
+      if (survivorRow.completedAt != null && duplicateRow.completedAt != null && survivorRow.completedAt !== duplicateRow.completedAt) {
+        throw new Error(`Cannot merge task "${duplicateRow.taskDefinitionId}": completion timestamps conflict`)
+      }
+      const status = assignmentStatusRank[survivorRow.status] >= assignmentStatusRank[duplicateRow.status]
+        ? survivorRow.status
+        : duplicateRow.status
+      return [{
+        survivorAssignmentId: survivorRow.id,
+        deleteAssignmentId: duplicateRow.id,
+        moveResponseIds: duplicateRow.responseIds,
+        moveFileIds: duplicateRow.fileIds,
+        moveCommentIds: duplicateRow.commentIds,
+        patch: {
+          status,
+          dueAt: richerValue(survivorRow.dueAt, duplicateRow.dueAt),
+          completedAt: status === 'COMPLETED'
+            ? richerValue(survivorRow.completedAt, duplicateRow.completedAt)
+            : null,
+        },
+      }]
+    })
+
+  const survivorSubjectKeys = new Set(input.subjectValues
+    .filter((row) => row.speakerId === survivor.id)
+    .map((row) => `${row.responseId}\u0000${row.name}\u0000${row.value}`))
+  const deleteSubjectValueIds = input.subjectValues
+    .filter((row) => row.speakerId === duplicate.id)
+    .filter((row) => survivorSubjectKeys.has(`${row.responseId}\u0000${row.name}\u0000${row.value}`))
+    .map((row) => row.id)
+
+  const status = speakerStatusRank[survivor.status] >= speakerStatusRank[duplicate.status]
+    ? survivor.status
+    : duplicate.status
+  return {
+    profilePatch: {
+      userId: richerValue(survivor.userId, duplicate.userId),
+      contactId: richerValue(survivor.contactId, duplicate.contactId),
+      status,
+      bio: richerValue(survivor.bio, duplicate.bio),
+      jobTitle: richerValue(survivor.jobTitle, duplicate.jobTitle),
+      companyName: richerValue(survivor.companyName, duplicate.companyName),
+      pronouns: richerValue(survivor.pronouns, duplicate.pronouns),
+      websiteUrl: richerValue(survivor.websiteUrl, duplicate.websiteUrl),
+      linkedinUrl: richerValue(survivor.linkedinUrl, duplicate.linkedinUrl),
+      twitterUrl: richerValue(survivor.twitterUrl, duplicate.twitterUrl),
+      headshotFileId: richerValue(survivor.headshotFileId, duplicate.headshotFileId),
+      avatarUrl: richerValue(survivor.avatarUrl, duplicate.avatarUrl),
+    },
+    reassignParticipantIds,
+    participantCollisions,
+    reassignAssignmentIds,
+    assignmentCollisions,
+    deleteSubjectValueIds,
+  }
+}
+
 export type SpeakerMergeRecipient = {
   firstName: string
   lastName: string
