@@ -103,6 +103,7 @@ import { apiApp } from './api.ts'
 const loginQuerySchema = z.object({
   callbackURL: z.string().optional(),
   verify: z.enum(['required']).optional(),
+  mode: z.enum(['sign-in', 'sign-up']).optional(),
 })
 const abstractsQuerySchema = z.object({
   status: z.enum([
@@ -291,6 +292,7 @@ export const app = new Spiceflow()
             callbackURL={callbackURL}
             googleHref={router.href('/login/google', { callbackURL })}
             verificationRequired={query.verify === 'required'}
+            defaultMode={query.mode ?? 'sign-in'}
           />
         </AuthPage>
       )
@@ -307,6 +309,20 @@ export const app = new Spiceflow()
       return createGoogleSignInRedirect(request, normalizeAuthRedirectPath(query.callbackURL))
     },
   })
+
+  // /signup is a bare redirect to /login?mode=sign-up. Agents (and users)
+  // reflexively try /signup for account creation; give it a real route
+  // instead of a 404 so they land on the "Create account" tab directly.
+  .get(
+    '/signup',
+    async ({ query }) => {
+      const params = new URLSearchParams()
+      if (query.callbackURL) params.set('callbackURL', query.callbackURL)
+      params.set('mode', 'sign-up')
+      throw redirect(`/login?${params}`)
+    },
+    { query: loginQuerySchema, detail: { hide: true } },
+  )
 
   // ── Invite links (/invite/:invitationId) ──────────────────────────
   // Secret-link invites, sigillo-style: anyone with the link can join

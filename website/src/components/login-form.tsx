@@ -13,12 +13,14 @@ export function LoginForm({
   callbackURL,
   googleHref,
   verificationRequired,
+  defaultMode = 'sign-in',
 }: {
   callbackURL: string
   googleHref: string
   verificationRequired: boolean
+  defaultMode?: Mode
 }) {
-  const [mode, setMode] = useState<Mode>('sign-in')
+  const [mode, setMode] = useState<Mode>(defaultMode)
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(
     verificationRequired ? 'Verify your email address before you continue.' : null,
