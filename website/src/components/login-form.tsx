@@ -14,18 +14,20 @@ export function LoginForm({
   googleHref,
   verificationRequired,
   defaultMode = 'sign-in',
+  initialEmail = '',
 }: {
   callbackURL: string
   googleHref: string
   verificationRequired: boolean
   defaultMode?: Mode
+  initialEmail?: string
 }) {
   const [mode, setMode] = useState<Mode>(defaultMode)
   const [loading, setLoading] = useState(false)
   const [message, setMessage] = useState<string | null>(
     verificationRequired ? 'Verify your email address before you continue.' : null,
   )
-  const [email, setEmail] = useState('')
+  const [email, setEmail] = useState(initialEmail)
 
   const submit = async (formData: FormData) => {
     setLoading(true)
@@ -50,8 +52,12 @@ export function LoginForm({
       return
     }
     if (mode === 'sign-up') {
-      setMessage('Check your inbox to verify your email address, then sign in here.')
-      setMode('sign-in')
+      // Full navigation (not local state) to a dedicated "verify your email"
+      // page: requireEmailVerification blocks the callback destination
+      // anyway, so send the user straight there instead of leaving them on
+      // the sign-up form with an easy-to-miss inline message.
+      const params = new URLSearchParams({ verify: 'required', email, callbackURL })
+      window.location.href = `/login?${params}`
       return
     }
     window.location.href = callbackURL

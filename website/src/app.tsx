@@ -104,6 +104,7 @@ const loginQuerySchema = z.object({
   callbackURL: z.string().optional(),
   verify: z.enum(['required']).optional(),
   mode: z.enum(['sign-in', 'sign-up']).optional(),
+  email: z.string().optional(),
 })
 const abstractsQuerySchema = z.object({
   status: z.enum([
@@ -293,6 +294,7 @@ export const app = new Spiceflow()
             googleHref={router.href('/login/google', { callbackURL })}
             verificationRequired={query.verify === 'required'}
             defaultMode={query.mode ?? 'sign-in'}
+            initialEmail={query.email ?? ''}
           />
         </AuthPage>
       )
